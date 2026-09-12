@@ -53,6 +53,64 @@ export const AR_SETTLED: ReadonlyArray<readonly [nl: string, ar: string]> = [
   ["BTW nummer", "رقم btw"],
   ["BTW-nummer (optioneel)", "رقم btw (اختياري)"],
   ["BTW-nummer klant", "رقم btw للعميل"],
+
+  // ── The compound btw labels, and why there are 43 of them here ──
+  //
+  // The register is settled: a SHORT LABEL keeps the Dutch term, a SENTENCE spells the tax out.
+  // «مبلغ btw» on a column header, «ضريبة القيمة المضافة» in prose — the third pass expanded 41
+  // sentences that way and they stand.
+  //
+  // The rule was already recorded for «Excl. BTW» and «Incl. BTW». It did not hold, because this
+  // list matches an EXACT Dutch source and the same compound is written 43 different ways —
+  // `Prijs (excl. BTW)`, `Excl. btw: {bedrag}`, `Aanschafwaarde (ex btw)`. Every one of those
+  // slipped past a gate that was watching for `Excl. BTW`, and a reviewer working through 3942
+  // rows expanded all 43 without ever being shown the ruling.
+  //
+  // So each Dutch source is listed. Verbose on purpose: a rule that covers one spelling of a
+  // phrase is a rule that fails on the day someone writes the phrase differently.
+  ["({amount} excl.)", "({amount} بدون الضريبة)"],
+  ["{rate}% BTW", "{rate}% btw"],
+  ["{tarief}% btw", "btw {tarief}%"],
+  ["{tarief}% BTW", "{tarief}% btw"],
+  ["Aanschafwaarde (ex btw)", "قيمة الشراء (بدون btw)"],
+  ["Aanschafwaarde (incl. btw)", "قيمة الشراء (شاملة btw)"],
+  ["BTW {tarief}%", "ضريبة {tarief}%"],
+  ["BTW = {bedrag}", "btw = {bedrag}"],
+  ["BTW die je terugkrijgt", "btw التي تستردها"],
+  ["BTW gedetecteerd", "btw المكتشفة"],
+  ["BTW regel {n}", "btw للسطر {n}"],
+  ["BTW te betalen (5g)", "btw المستحقة (5g)"],
+  ["BTW verschuldigd (5a)", "btw المستحقة (5a)"],
+  ["BTW-bedrag", "مبلغ btw"],
+  ["BTW-methode", "طريقة btw"],
+  ["BTW-tarief", "نسبة btw"],
+  ["BTW:", "btw:"],
+  ["Concept BTW-aangifte", "مسودة إقرار btw"],
+  ["Concept BTW-aangifte Q{q} {jaar}", "مسودة إقرار btw للربع Q{q} {jaar}"],
+  ["Excl. BTW = {bedrag}", "بدون btw = {bedrag}"],
+  ["Excl. btw: {bedrag}", "بدون btw: {bedrag}"],
+  ["Incl. btw: {bedrag}", "شامل الضريبة: {bedrag}"],
+  ["Kosten (excl. btw)", "التكاليف (بدون الضريبة)"],
+  ["Motorrijtuigenbelasting (kost, zonder btw)", "ضريبة المركبات (تكلفة، بدون btw)"],
+  ["Na korting excl. BTW", "بعد الخصم، بدون ضريبة"],
+  ["Omzet (excl. btw)", "الإيراد (بدون الضريبة)"],
+  ["Omzet incl.", "الإيراد شامل btw"],
+  ["Omzet, inclusief btw", "الإيراد شامل btw"],
+  ["Prijs (excl. BTW)", "السعر (بدون btw)"],
+  ["Prijs (incl. BTW)", "السعر (شامل الضريبة)"],
+  ["Prijs ex btw", "السعر بدون btw"],
+  ["Prijs excl. (€)", "السعر بدون ضريبة (€)"],
+  ["Prijs incl. (€)", "السعر شامل الضريبة (€)"],
+  ["Subtotaal excl. BTW", "المجموع الفرعي بدون ضريبة"],
+  ["Totaal (incl. BTW)", "الإجمالي (شامل btw)"],
+  ["Totaal excl.", "الإجمالي بدون الضريبة"],
+  ["Totaal incl.", "الإجمالي شامل الضريبة"],
+  ["Totaal incl. btw", "الإجمالي شامل btw"],
+  ["Totaal incl. BTW", "الإجمالي شامل الضريبة"],
+  ["Totale omzet (incl.)", "إجمالي الإيراد (شامل btw)"],
+  ["Uurtarief (ex btw)", "تعرفة الساعة (بدون btw)"],
+  ["Vast btw-tarief", "نسبة btw ثابتة"],
+  ["waarvan {bedrag} btw", "منها {bedrag} btw"],
   ["Bevestig", "تأكيد"],
   ["Bevestigen", "تأكيد"],
   ["Btw-tarief", "نسبة btw"],
