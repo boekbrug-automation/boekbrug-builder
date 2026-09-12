@@ -49,6 +49,20 @@ export type PlanInput = {
   subscriptionStatus: string | null;
   /** profiles.current_period_end als ISO-string, of null. */
   currentPeriodEnd: string | null;
+  /**
+   * [TOEKENNING] Tot wanneer een lopende toekenning dit account de Plus-grenzen geeft zonder te
+   * betalen — de LAATSTE einddatum van zijn actieve toekenningen, of null als er geen is.
+   * `undefined` betekent: de aanroeper heeft er niet naar gekeken (een oud aanroeppad, of de
+   * migratie is nog niet toegepast). Beide lezen als "geen toekenning", en dat is de veilige
+   * kant: het gratis plan ontzegt niemand zijn gegevens.
+   *
+   * Een OPEN toekenning (geen einddatum) geeft de aanroeper door als een datum ver in de
+   * toekomst? Nee — daarvoor is `grantOpenEnded`. Een verzonnen jaartal 9999 in een datumveld is
+   * hoe een rekenfout in datums een factureerfout wordt.
+   */
+  grantedPlusUntil?: string | null;
+  /** Er loopt een toekenning zonder einddatum (bijvoorbeeld een partnerafspraak). */
+  grantOpenEnded?: boolean;
   /** Nu, in epoch-ms. Geïnjecteerd zodat tests deterministisch zijn. */
   nowMs: number;
 };
@@ -60,6 +74,7 @@ export type PlanDecision = {
     | "boekhouder" // het portaal is gratis, altijd, ongeacht status
     | "active" // betaalt
     | "grace_period" // opgezegd of incasso hapert, maar de betaalde periode loopt nog
+    | "toekenning" // [TOEKENNING] een lopende toekenning: welkomstperiode, pilot of verlenging
     | "free"; // het gratis plan — de normale toestand, geen gebrek
 };
 
@@ -133,7 +148,20 @@ export function decidePlan(input: PlanInput): PlanDecision {
     return { plan: "plus", reason: "grace_period" };
   }
 
-  // 5. Het gratis plan. Dit is geen straf en geen restcategorie — het is het plan waar dit
+  // 5. [TOEKENNING] Een lopende toekenning: de welkomstperiode van 90 dagen, een pilot van een
+  //    kantoor, een verlenging. Staat hier en niet hoger om twee redenen: wie betaalt hoort
+  //    "active" te lezen en niet "toekenning" (het scherm zou hem anders vertellen dat zijn
+  //    periode afloopt terwijl hij een abonnement heeft), en een onleesbare datum mag nooit Plus
+  //    opleveren — parseTimestamp geeft dan null en we vallen door naar gratis.
+  if (input.grantOpenEnded === true) {
+    return { plan: "plus", reason: "toekenning" };
+  }
+  const grantEnd = parseTimestamp(input.grantedPlusUntil ?? null);
+  if (grantEnd !== null && grantEnd > nowMs) {
+    return { plan: "plus", reason: "toekenning" };
+  }
+
+  // 6. Het gratis plan. Dit is geen straf en geen restcategorie — het is het plan waar dit
   //    product voor gemaakt is en waar de meeste gebruikers permanent op horen te zitten.
   return { plan: "free", reason: "free" };
 }

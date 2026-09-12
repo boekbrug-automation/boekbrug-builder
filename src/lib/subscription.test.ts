@@ -161,3 +161,71 @@ test("[PROEFMAAND] de gratis proefmaand is er precies één keer", () => {
   // herstelbaar in Stripe; uitgedeelde gratis maanden zijn dat niet.
   assert.equal(trialEligible("onbekend"), false);
 });
+
+// ─── [TOEKENNING] A running grant gives Plus — but never louder than a paid subscription ───────
+//
+// The welcome period, an office pilot and a support extension all arrive here as the same two
+// facts: an end date, or "open-ended". What matters is WHERE in decidePlan they are read.
+
+const NU = Date.parse("2026-09-12T12:00:00Z");
+const overDagen = (n: number) => new Date(NU + n * 86_400_000).toISOString();
+
+test("[TOEKENNING] a running grant is Plus, and says why", () => {
+  const decision = decidePlan({
+    role: "zzper", subscriptionStatus: null, currentPeriodEnd: null,
+    grantedPlusUntil: overDagen(45), nowMs: NU,
+  });
+  assert.equal(decision.plan, "plus");
+  assert.equal(decision.reason, "toekenning");
+});
+
+test("[TOEKENNING] an open-ended grant needs no date", () => {
+  const decision = decidePlan({
+    role: "zzper", subscriptionStatus: null, currentPeriodEnd: null,
+    grantedPlusUntil: null, grantOpenEnded: true, nowMs: NU,
+  });
+  assert.equal(decision.plan, "plus");
+  assert.equal(decision.reason, "toekenning");
+});
+
+test("[TOEKENNING] a paying customer is 'active', never 'toekenning'", () => {
+  // The ordering that matters on screen: this reason drives the label, and telling a subscriber
+  // his period ends in 45 days is telling him his subscription ends.
+  const decision = decidePlan({
+    role: "zzper", subscriptionStatus: "active", currentPeriodEnd: overDagen(20),
+    grantedPlusUntil: overDagen(45), nowMs: NU,
+  });
+  assert.equal(decision.reason, "active");
+
+  // Same for the grace period: a failed card is not a welcome period.
+  assert.equal(
+    decidePlan({
+      role: "zzper", subscriptionStatus: "past_due", currentPeriodEnd: null,
+      grantedPlusUntil: overDagen(45), nowMs: NU,
+    }).reason,
+    "grace_period",
+  );
+});
+
+test("[TOEKENNING] an expired, absent or unreadable grant is simply free", () => {
+  for (const until of [overDagen(-1), null, undefined, "", "binnenkort"]) {
+    const decision = decidePlan({
+      role: "zzper", subscriptionStatus: null, currentPeriodEnd: null,
+      grantedPlusUntil: until as string | null, nowMs: NU,
+    });
+    assert.equal(decision.plan, "free", `grant "${String(until)}" was read as Plus`);
+    assert.equal(decision.reason, "free");
+  }
+});
+
+test("[TOEKENNING] an accountant is still 'boekhouder', grant or no grant", () => {
+  // The portal is free without limits; a welcome period there would be an expiry date that
+  // frightens someone for no reason.
+  assert.equal(
+    decidePlan({
+      role: "accountant", subscriptionStatus: null, currentPeriodEnd: null,
+      grantedPlusUntil: overDagen(45), nowMs: NU,
+    }).reason,
+    "boekhouder",
+  );
+});

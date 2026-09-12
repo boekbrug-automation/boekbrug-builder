@@ -26,6 +26,7 @@ import { readReaderQuality } from "@/lib/reader-quality";
 // [WAAROM-VASTGEHOUDEN] En waarom de rest niet vanzelf ging — de werklijst op tijd geordend.
 import { readHoldReasons } from "@/lib/hold-reasons";
 import { decidePlan } from "@/lib/subscription";
+import { grantStanding, type PlanGrantRow } from "@/lib/plan-grants";
 // [TAAL] The operator's own language, read from the request like every other dashboard page.
 import { getServerLocale } from "@/lib/i18n/server";
 import { BeheerScherm } from "./BeheerScherm";
@@ -108,10 +109,43 @@ export default async function BeheerPage() {
   // [WAAROM-VASTGEHOUDEN] Zelfde venster, zelfde regel: null betekent "niet kunnen kijken", en
   // het paneel zegt dat dan hardop in plaats van een lege wachtrij te tonen.
   const vastgehouden = await readHoldReasons(pipeline, { nowMs, windowDays: 90 });
+  // [TOEKENNING] Lopende toekenningen, in één lezing voor alle accounts tegelijk. Zonder dit
+  // staat iedereen in zijn welkomstperiode hier als "gratis" — een overzicht dat het tegendeel
+  // beweert van wat de gebruiker zelf op zijn eigen scherm leest. Mislukt de lezing (de tabel
+  // komt uit plan_grants.sql, met de hand toegepast), dan is de kaart leeg en telt er geen
+  // toekenning: dezelfde faalrichting als overal, en niemand raakt er iets door kwijt.
+  const grantsByUser = new Map<string, PlanGrantRow[]>();
+  try {
+    const alle = await fetchAllRows<{ user_id: string } & PlanGrantRow>((lo, hi) =>
+      pipeline
+        .from("plan_grants")
+        .select("user_id, plan, starts_at, expires_at, revoked_at")
+        .order("user_id", { ascending: true })
+        .range(lo, hi),
+    );
+    for (const g of alle) {
+      const lijst = grantsByUser.get(g.user_id);
+      if (lijst) lijst.push(g);
+      else grantsByUser.set(g.user_id, [g]);
+    }
+  } catch {
+    // leeg — zie hierboven.
+  }
+
   const overview = buildBeheerOverview(
     rows,
     links,
-    (p) => decidePlan({ role: p.role, subscriptionStatus: p.subscriptionStatus, currentPeriodEnd: p.currentPeriodEnd, nowMs }).plan,
+    (p) => {
+      const standing = grantStanding(grantsByUser.get(p.id) ?? [], nowMs);
+      return decidePlan({
+        role: p.role,
+        subscriptionStatus: p.subscriptionStatus,
+        currentPeriodEnd: p.currentPeriodEnd,
+        grantedPlusUntil: standing.grantedPlusUntil,
+        grantOpenEnded: standing.grantOpenEnded,
+        nowMs,
+      }).plan;
+    },
   );
 
   const locale = await getServerLocale();

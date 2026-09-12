@@ -19,6 +19,7 @@ import { redirect } from 'next/navigation'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { getSessionUser } from '@/lib/session-user'
 import { decidePlan, type PlanDecision } from '@/lib/subscription'
+import { daysLeftOnGrant, grantStanding, type PlanGrantRow } from '@/lib/plan-grants'
 import { PLUS } from '@/lib/plan'
 import { FAIR_USE_LIMITS, NEAR_LIMIT_RATIO, evaluateFairUse, formatLimit } from '@/lib/fair-use'
 import { measureUsage } from '@/lib/fair-use-usage'
@@ -66,7 +67,7 @@ export default async function FactureringPage({
   // billing_subscription.sql, met de hand toegepast), en dat afvangen is de hele reden voor de try
   // hieronder. Met Promise.all zou een nog niet toegepaste migratie dit scherm laten crashen in
   // plaats van een eerlijk "gratis"-paneel te tonen.
-  const [tS, paramsS, profileS] = await Promise.allSettled([
+  const [tS, paramsS, profileS, grantsS] = await Promise.allSettled([
     // [TAAL] Servercomponent: de vertaler komt uit de request, niet uit een hook.
     serverTranslator(),
     searchParams,
@@ -76,6 +77,14 @@ export default async function FactureringPage({
       .select('role, subscription_status, subscription_plan, current_period_end, stripe_customer_id')
       .eq('id', user.id)
       .single() as Promise<{ data: BillingProfile | null; error: unknown }>,
+    // [TOEKENNING] Lopende toekenningen — de welkomstperiode, een pilot, een verlenging. Eigen
+    // belofte in dezelfde allSettled: de tabel komt uit plan_grants.sql (met de hand toegepast),
+    // dus deze lezing MAG mislukken en het scherm toont dan gewoon het gratis plan.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabase as any)
+      .from('plan_grants')
+      .select('plan, starts_at, expires_at, revoked_at')
+      .eq('user_id', user.id) as Promise<{ data: PlanGrantRow[] | null; error: unknown }>,
   ])
 
   if (tS.status === 'rejected') throw tS.reason
@@ -98,11 +107,21 @@ export default async function FactureringPage({
   // Ontbreken de kolommen, dan is het antwoord niet "onbekend" maar gewoon "gratis": dat is
   // wat er dan geldt, en het is de waarheid voor bijna iedereen. Alleen de rol lezen we
   // alsnog, zodat een boekhouder ook zonder migratie het juiste ziet staan.
+  // [TOEKENNING] Zelfde faalrichting als hierboven: onleesbaar of nog niet toegepast betekent
+  // "geen toekenning", en dan is het antwoord gratis. Dat ontzegt niemand iets — zie decidePlan().
+  const nowMs = readClock()
+  const grantRows =
+    grantsS.status === 'fulfilled' && Array.isArray(grantsS.value?.data) ? grantsS.value.data : []
+  const standing = grantStanding(grantRows, nowMs)
+  const grantDays = daysLeftOnGrant(standing, nowMs)
+
   const decision: PlanDecision = decidePlan({
     role: profile?.role ?? null,
     subscriptionStatus: columnsPresent ? profile?.subscription_status ?? null : null,
     currentPeriodEnd: columnsPresent ? profile?.current_period_end ?? null : null,
-    nowMs: readClock(),
+    grantedPlusUntil: standing.grantedPlusUntil,
+    grantOpenEnded: standing.grantOpenEnded,
+    nowMs,
   })
 
   const hasCustomer = Boolean(profile?.stripe_customer_id)
@@ -140,7 +159,17 @@ export default async function FactureringPage({
       <section style={{ background: '#fff', border: '1px solid #e0e0e0', borderRadius: 14, padding: 22 }}>
         <Row label={t('plan.titel')} value={planLabel(decision, profile, t)} />
 
-        {profile?.current_period_end && decision.plan === 'plus' && (
+        {/* [WELKOM-90] Wie in de welkomstperiode zit, hoort te weten tot wanneer — en dat er
+            daarna niets gebeurt. Een periode die stil afloopt is precies hoe iemand denkt dat
+            hem iets is afgepakt. */}
+        {decision.reason === 'toekenning' && standing.grantedPlusUntil !== null && (
+          <Row
+            label={t('plan.welkomTot')}
+            value={`${dateNL(standing.grantedPlusUntil) ?? '—'}${grantDays === null ? '' : ` (${grantDays} ${grantDays === 1 ? 'dag' : 'dagen'})`}`}
+          />
+        )}
+
+        {profile?.current_period_end && decision.plan === 'plus' && decision.reason !== 'toekenning' && (
           <Row
             label={decision.reason === 'grace_period' ? t('plan.plusLooptTot') : t('plan.volgendeVerlenging')}
             value={dateNL(profile.current_period_end) ?? '—'}
@@ -166,6 +195,7 @@ export default async function FactureringPage({
             </>
           ) : (
             <>
+              {decision.reason === 'toekenning' && <>{t('plan.welkomDaarna')}{' '}</>}
               {t('plan.jeWordt')} <strong>{t('plan.nooitAfgeschreven')}</strong> {t('plan.geenProefperiode')}{' '}
               <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>
                 {t('plan.beleid')}
@@ -270,6 +300,8 @@ function planLabel(decision: PlanDecision, profile: BillingProfile | null, t: Tr
       return profile?.subscription_status === 'past_due'
         ? t('plan.betalingMislukt')
         : t('plan.looptAf')
+    case 'toekenning':
+      return t('plan.welkomstperiode')
     case 'free':
     default:
       return t('plan.gratis')

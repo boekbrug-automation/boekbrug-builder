@@ -55,12 +55,23 @@ export const BELOFTE_MINI = "Niets kwijtraken. De rest doen wij." as const;
  * De geruststelling onder een knop.
  *
  * Elk deel hiervan is een contractuele toezegging, geen marketingzin: "gratis" en "nooit
- * automatisch afgeschreven" staan in voorwaarden §5.2, en "geen proefperiode" is de reden
- * dat `trial_ends_at` bewust NIET in billing_subscription.sql staat. Verandert een van deze
- * drie, dan verandert er een contract mee.
+ * automatisch afgeschreven" staan in voorwaarden §5.2, en dat er niets wordt afgeschreven is de
+ * reden dat `trial_ends_at` bewust NIET in billing_subscription.sql staat. Verandert een van
+ * deze drie, dan verandert er een contract mee.
+
+ * ── [WELKOM-90] Waarom "geen proefperiode die afloopt" hier weg is ──────────────────────────
+ *
+ * Omdat het sinds de welkomstperiode niet meer waar is: elk nieuw account heeft negentig dagen
+ * de Plus-grenzen. De toezegging die eronder zat is dat wel, en die staat er nu voluit — de
+ * periode wordt GEEN abonnement en er wordt niets afgeschreven; na negentig dagen geldt het
+ * gratis plan, en alles wat er staat blijft leesbaar, doorzoekbaar en exporteerbaar.
+ *
+ * De oude zin is niet "verzacht": hij is vervangen door de zin die klopt. Een belofte die
+ * blijft staan nadat het product veranderde, is precies het soort onwaarheid waar dit bestand
+ * tegen bestaat.
  */
 export const BELOFTE_GERUST =
-  "Gratis · geen proefperiode die afloopt · nooit automatisch afgeschreven" as const;
+  "Je eerste 90 dagen met alles erop · daarna gratis verder · nooit automatisch afgeschreven" as const;
 
 /**
  * Wat de gebruiker zelf moet doen — de enige taak die overblijft. Drie stappen, want meer

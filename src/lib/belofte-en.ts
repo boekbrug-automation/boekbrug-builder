@@ -41,7 +41,7 @@ export const PROMISE_SHORT =
  * `trial_ends_at` deliberately does not exist in billing_subscription.sql.
  */
 export const PROMISE_REASSURE =
-  "Free · no trial that expires · never charged automatically" as const;
+  "Your first 90 days with everything on · free after that · never charged automatically" as const;
 
 /** The only task left for you. Three steps, because nobody reads more — and these are all. */
 export const PROMISE_STEPS: readonly { head: string; text: string }[] = [

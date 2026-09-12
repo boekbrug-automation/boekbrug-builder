@@ -59,7 +59,11 @@ export function buildBeheerOverview(
     current_period_end?: string | null;
   }>,
   links: Array<{ accountant_id: string; zzper_id: string; created_at?: string | null }>,
-  planOf: (p: { role: string | null; subscriptionStatus: string | null; currentPeriodEnd: string | null }) => string,
+  // [TOEKENNING] `id` hoort erbij sinds toekenningen bestaan: de aanroeper zoekt de lopende
+  // toekenningen van DIT account op voordat hij het plan bepaalt. Zonder de id kan hij dat niet,
+  // en staat iedereen in zijn welkomstperiode hier als "gratis" — het tegendeel van wat de
+  // gebruiker op zijn eigen scherm leest.
+  planOf: (p: { id: string; role: string | null; subscriptionStatus: string | null; currentPeriodEnd: string | null }) => string,
 ): BeheerOverview {
   const nameOf = (p: { company_name: string | null; full_name: string | null; email: string | null }) =>
     p.company_name || p.full_name || p.email || "(zonder naam)";
@@ -73,6 +77,7 @@ export function buildBeheerOverview(
       role: p.role === "accountant" ? "boekhouder" : (p.role || "zzp"),
       createdAt: p.created_at ? p.created_at.slice(0, 10) : null,
       plan: planOf({
+        id: p.id,
         role: p.role ?? null,
         subscriptionStatus: p.subscription_status ?? null,
         currentPeriodEnd: p.current_period_end ?? null,

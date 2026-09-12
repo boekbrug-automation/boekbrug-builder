@@ -10596,6 +10596,24 @@ export const MESSAGES = {
     ar: 'ولا توجد فترة تجريبية تتحول بصمت إلى اشتراك. فوق الاستخدام العادل يتوقف مؤقتاً فقط ما يكلفنا مالاً؛ أما الاطلاع على إدارتك والبحث فيها وتصديرها فتبقى تعمل دائماً.',
     en: 'and there is no trial period that silently becomes a subscription. Beyond fair use only what costs us money pauses; viewing, searching and exporting your administration always keep working.',
   },
+  // [WELKOM-90] De eerste 90 dagen. Geen "proef": er hangt geen kaart aan en er volgt geen
+  // incasso — na afloop geldt gewoon het gratis plan. Daarom heet het hier een welkomstperiode
+  // en nergens een proefperiode.
+  'plan.welkomstperiode': {
+    nl: 'Je eerste 90 dagen — alles van Plus',
+    ar: 'أول 90 يوماً — كل ما في Plus',
+    en: 'Your first 90 days — everything in Plus',
+  },
+  'plan.welkomTot': {
+    nl: 'Nog tot',
+    ar: 'حتى',
+    en: 'Until',
+  },
+  'plan.welkomDaarna': {
+    nl: 'Daarna ga je verder op het gratis plan. Er wordt niets afgeschreven en je hoeft niets te doen.',
+    ar: 'بعدها تتابع على الخطة المجانية. لا يُخصم شيء ولا يلزمك فعل أي شيء.',
+    en: 'After that you continue on the free plan. Nothing is charged and you need to do nothing.',
+  },
   'plan.gratis': {
     nl: 'Gratis',
     ar: 'مجاني',

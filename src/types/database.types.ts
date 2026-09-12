@@ -11,6 +11,7 @@
 //   · clients.created_by         — same migration
 //   · invoice_lines.unit         — supabase/migrations/invoice_line_unit.sql (text, nullable)
 //   · accountant_directory       — supabase/migrations/accountant_directory.sql ([KANTOORGIDS])
+//   · plan_grants                — supabase/migrations/plan_grants.sql ([TOEKENNING])
 //   · bank_connections           — supabase/migrations/bank_connections.sql
 //   · bank_connection_accounts   — same migration (incl. identification_hash, [EB-ACCOUNT-IDENTITY])
 //   · bank_transactions.source        — supabase/migrations/bank_tx_source_identity.sql (text, nullable)
@@ -55,6 +56,53 @@ export type Database = {
   }
   public: {
     Tables: {
+      plan_grants: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          expires_at: string | null
+          id: string
+          plan: string
+          reason: string
+          revoked_at: string | null
+          revoked_by: string | null
+          starts_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          plan: string
+          reason: string
+          revoked_at?: string | null
+          revoked_by?: string | null
+          starts_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          plan?: string
+          reason?: string
+          revoked_at?: string | null
+          revoked_by?: string | null
+          starts_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "plan_grants_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       accountant_directory: {
         Row: {
           accountant_id: string

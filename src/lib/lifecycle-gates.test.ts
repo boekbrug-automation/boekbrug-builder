@@ -48,6 +48,8 @@ import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutes
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
 import { OFFICE_GETS as OFFICE_GETS_FOR, unavailableBenefits as unavailableBenefitsFor } from "./office-offer";
 import { normaliseEntry as normaliseEntryFor, entryProblems as entryProblemsFor } from "./accountant-directory";
+import { grantStanding as grantStandingFor } from "./plan-grants";
+import { decidePlan as decidePlanFor } from "./subscription";
 import { PUBLIC_PATHS as PUBLIC_PATHS_FOR } from "./public-paths";
 import { PLUS_PRICE_EUR } from "./fair-use";
 import { round2 } from "./invoice-totals";
@@ -32958,4 +32960,90 @@ test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought i
   assert.match(vragen, /href="\/boekhouders"/, "the one screen that knows he has no boekhouder does not offer one");
   assert.match(vragen, /!accountantId && \(/,
     "the list is offered to owners who already have an accountant, which is noise on a done screen");
+});
+
+
+// ─── [WELKOM-90] Ninety days of Plus, and the promise that survived the change ────────────────
+//
+// Every new account starts with the Plus ceilings for ninety days and then lands on the free
+// plan. The free plan stays: it is published in voorwaarden §5.2, and it is what lets an office
+// put twenty clients into BoekBrug without any of them being asked for a card.
+//
+// Three things have to hold together, and the third is the one that rots quietly:
+//
+//   1. NO SIGNUP PATH CAN MISS IT. The grant is written by a trigger on profiles, not by the
+//      register route — there is more than one way a profile row comes into existence, and a
+//      grant living in one path is a grant the other paths skip. Measured in production: the
+//      profile row is itself created by a trigger on auth.users, so a route-level grant would
+//      have missed every signup that does not go through our own form.
+//   2. NOBODY CAN GRANT IT TO HIMSELF. plan_grants has a SELECT policy and no other, so under
+//      RLS an owner cannot extend his own period. Proven against production inside a rolled-back
+//      transaction: insert refused, update wrote nothing, own row readable.
+//   3. THE PROMISE STILL MATCHES THE PRODUCT. belofte.ts used to say "geen proefperiode die
+//      afloopt", and after this it would have been false. A promise left standing after the
+//      product moved is exactly the untruth that file exists to prevent — so the line changed,
+//      in all three languages, and what the old clause protected is now said in words: nothing
+//      becomes a subscription, nothing is charged, afterwards the free plan applies.
+test("[WELKOM-90] the welcome period is unmissable, ungrantable by its holder, and honestly said", () => {
+  const migratie = readFileSync("supabase/migrations/plan_grants.sql", "utf8");
+
+  // 1 — a trigger on profiles, not a line in a route.
+  assert.match(migratie, /CREATE TRIGGER profiles_welcome_plus\s+AFTER INSERT ON public\.profiles/,
+    "the welcome grant left the table and moved into a route — the other signup paths now skip it");
+  assert.match(migratie, /interval '90 days'/, "the period is no longer ninety days");
+  assert.match(migratie, /IF NEW\.role = 'accountant' THEN\s+RETURN NEW;/,
+    "an accountant gets a welcome grant — an expiry date on a portal that is free anyway");
+
+  // 2 — read-only for everyone who is not the service role.
+  const beleid = migratie.match(/CREATE POLICY [a-z_]+ ON public\.plan_grants\s+FOR (\w+)/g) ?? [];
+  assert.deepStrictEqual(
+    beleid.map((p) => p.split("FOR ")[1]),
+    ["SELECT"],
+    "plan_grants gained a write policy — an owner who can write here can grant himself Plus forever",
+  );
+
+  // 3 — the promise, in all three languages, and the retired clause gone from each.
+  const nl = code("src/lib/belofte.ts");
+  const en = code("src/lib/belofte-en.ts");
+  const ar = code("src/lib/belofte-ar.ts");
+  assert.match(nl, /90 dagen/, "the Dutch promise no longer mentions the period the app gives");
+  assert.match(en, /90 days/);
+  assert.match(ar, /90/);
+  for (const [taal, bron] of [["nl", nl], ["en", en], ["ar", ar]] as const) {
+    assert.doesNotMatch(bron, /geen proefperiode die afloopt|no trial that expires|بلا فترة تجريبية تنتهي/,
+      `the retired clause is back in ${taal} — it stopped being true when the welcome period shipped`);
+  }
+  // The half that must never be dropped while shortening: no automatic charge.
+  assert.match(nl, /nooit automatisch afgeschreven/, "§5.2 fell out of the Dutch promise");
+  assert.match(en, /never charged automatically/);
+
+  // ── The reduction, exercised rather than read ──────────────────────────────────────────────
+  // A grant decides ceilings, so a bug here is somebody's month. The pure module is tested in
+  // full elsewhere; what is pinned HERE is the ordering that only shows up in combination.
+  const nu = Date.parse("2026-09-12T12:00:00Z");
+  const overDagen = (n: number) => new Date(nu + n * 86_400_000).toISOString();
+
+  const lopend = grantStandingFor(
+    [{ plan: "plus", starts_at: overDagen(-1), expires_at: overDagen(45), revoked_at: null }],
+    nu,
+  );
+  assert.strictEqual(
+    decidePlanFor({ role: "zzper", subscriptionStatus: null, currentPeriodEnd: null, ...lopend, nowMs: nu }).reason,
+    "toekenning",
+  );
+  // A subscriber with a grant reads "active": telling a paying customer his period ends in 45
+  // days is telling him his subscription ends.
+  assert.strictEqual(
+    decidePlanFor({ role: "zzper", subscriptionStatus: "active", currentPeriodEnd: overDagen(20), ...lopend, nowMs: nu }).reason,
+    "active",
+  );
+  // Revoked is not running, and a revoked grant must not keep anyone on Plus.
+  const ingetrokken = grantStandingFor(
+    [{ plan: "plus", starts_at: overDagen(-1), expires_at: overDagen(45), revoked_at: overDagen(-1) }],
+    nu,
+  );
+  assert.strictEqual(
+    decidePlanFor({ role: "zzper", subscriptionStatus: null, currentPeriodEnd: null, ...ingetrokken, nowMs: nu }).plan,
+    "free",
+  );
 });

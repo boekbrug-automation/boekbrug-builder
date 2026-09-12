@@ -41,7 +41,7 @@ export const BELOFTE_UITLEG_AR =
  * deliberately does not exist in billing_subscription.sql.
  */
 export const BELOFTE_GERUST_AR =
-  "مجاني · بلا فترة تجريبية تنتهي · ولا خصم تلقائي أبداً" as const;
+  "أول 90 يوماً بكل شيء · ثم تتابع مجاناً · ولا خصم تلقائي أبداً" as const;
 
 /** The one task the owner keeps, in three steps. */
 export const BELOFTE_STAPPEN_AR: readonly { kop: string; tekst: string }[] = [
