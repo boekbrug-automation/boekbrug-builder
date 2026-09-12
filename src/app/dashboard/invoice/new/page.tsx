@@ -18,6 +18,7 @@ import { createClient } from '@/lib/supabase'
 import { lineSignFault, staysAFactuur } from '@/lib/negative-line'
 // [KOMMA-INVOER] One comma-safe money field for every screen that has one.
 import DecimalInput from '@/components/ui/DecimalInput'
+import AdresZoeker from '@/components/AdresZoeker'
 import dynamic from 'next/dynamic'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
@@ -1682,6 +1683,21 @@ function NewInvoicePageContent() {
                 <OutlinedInput value={clientPostal} onChange={e => setClientPostal(e.target.value)} placeholder="1234 AB" label={t('nieuw.klant.postcode')} focusColor={cfg.focusColor} />
                 <OutlinedInput value={clientCity} onChange={e => setClientCity(e.target.value)} placeholder="Amsterdam" label={t('nieuw.klant.stad')} focusColor={cfg.focusColor} />
               </div>
+              {/* [ADRES-ECHT] Het BAG kent het adres; de eigenaar beslist of hij het overneemt.
+                  Het huisnummer komt uit het adresveld ("Tilburgseweg 42"), want dat is hoe dit
+                  formulier het al vraagt — splitHouseNumber haalt er het nummer uit. */}
+              <AdresZoeker
+                postcode={clientPostal}
+                huisnummer={clientAddress.replace(/^\D+/, '')}
+                straat={clientAddress.replace(/\s*\d.*$/, '')}
+                plaats={clientCity}
+                onOvernemen={(adres) => {
+                  setClientAddress(`${adres.street} ${adres.houseNumber}${adres.addition ? `-${adres.addition}` : ''}`)
+                  setClientPostal(`${adres.postcode.slice(0, 4)} ${adres.postcode.slice(4)}`)
+                  setClientCity(adres.city)
+                  clearFieldError('clientAddress')
+                }}
+              />
               {/* [KLANT-LAND] Two letters; empty reads as the Netherlands. It decides the 0%-guard at the
                   send door and the country line under the city on a foreign customer's invoice. */}
               <div style={{ marginTop: 8, maxWidth: 200 }}>

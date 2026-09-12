@@ -48,6 +48,10 @@ export const RATE_LIMITS = {
   // stilzetten — precies de gebruiker die zijn uren nu eindelijk bijhoudt in plaats van in een
   // schrift. 300 is ruim boven wat iemand met de hand haalt en houdt de bovengrens gewoon bestaan.
   UREN_WRITE:          { maxRequests: 300, windowMinutes: 60 },   // 300 / hour
+  // [ADRES-ECHT] Postcode lookups against PDOK. Generous because a person typing an address
+  // triggers one per completed field and may correct it twice — but bounded, because an open
+  // proxy in front of a FREE public register is how someone else's traffic becomes our ban.
+  ADDRESS_LOOKUP:      { maxRequests: 400, windowMinutes: 60 },   // 400 / hour
   // [COST] AI/OCR calls to Claude — a per-user ceiling so one account can't drive
   // unbounded ANTHROPIC spend on the main intake/onboarding/email pipelines.
   AI_OCR:              { maxRequests: 240, windowMinutes: 60 },   // 240 AI reads / hour — a shop's month of receipts in one sitting (non-AI files no longer count)

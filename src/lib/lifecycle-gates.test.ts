@@ -33250,3 +33250,94 @@ test("[DERDE-BRON] a register's answer keeps its third state, and only a yes may
   assert.strictEqual(mergeAcceptedFor(getypt, register).addition, "Gebouw C");
   assert.strictEqual(mergeAcceptedFor(getypt, register).street, "Tilburgseweg");
 });
+
+
+// ─── [ADRES-ECHT] Every address field in the app is looked up, and none is overwritten ────────
+//
+// An address is a money field here. It is printed on the invoice, and a Dutch invoice without the
+// full address of both parties is not a valid invoice — so a typo is a document a customer's
+// accountant can refuse and a btw deduction that gets questioned. PDOK/BAG answers that for free,
+// without a key, straight from the Kadaster.
+//
+// Two halves, and both fail quietly:
+//
+//   1. EVERY FIELD, NOT MOST. There are five places an address is typed. A lookup on four of them
+//      is worse than none on all five: the owner learns the app checks addresses, and then trusts
+//      the one screen that does not. So the rule is mechanical — a screen that has a postcode and
+//      a city field mounts AdresZoeker, or it is on the list below with a reason.
+//   2. THE REGISTER PROPOSES. Nothing is filled in without a tap. If we overwrite a street and it
+//      is the wrong one, that is OUR error on HIS document; and the BAG does not know "Gebouw C"
+//      or "t.a.v. de heer De Vries", which is what gets a parcel to the right desk.
+test("[ADRES-ECHT] every address form looks the address up, and none of them fills it in by itself", () => {
+  const zoeker = code("src/components/AdresZoeker.tsx");
+
+  // The proposal is a button. A useEffect that calls the setters directly is the overwrite this
+  // whole design exists to prevent, and it would look perfectly reasonable in review.
+  assert.match(zoeker, /onClick=\{\(\) => onOvernemen\(stand\.adres\)\}/,
+    "taking over the register's answer is no longer a deliberate tap");
+  // Cut each effect at its OWN end — `}, [deps])` — and not at the end of the file. The first
+  // version of this took everything after "useEffect", which swallowed the JSX below it and went
+  // red on the onClick that is the correct answer. A window that runs to the end of the file is
+  // this file's documented defect class; see the note at the top about [UREN-EENMALIG].
+  const effecten = [...zoeker.matchAll(/useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[/g)].map((m) => m[1]);
+  assert.ok(effecten.length >= 1, "no useEffect body was found — the cut is broken, not the component");
+  for (const body of effecten) {
+    assert.doesNotMatch(body, /onOvernemen\(/,
+      "an effect calls onOvernemen — the register now overwrites what the owner typed");
+  }
+
+  // A failed lookup fills nothing and says nothing false. "Dit adres bestaat niet" after a
+  // time-out is a different message with a different next step.
+  assert.match(zoeker, /soort: 'niets'/);
+  assert.match(zoeker, /niet bereikbaar/);
+
+  // The stale-answer guard. Without it a slow answer for "42" lands after the fast answer for
+  // "44", and the screen shows an address that belongs to neither.
+  assert.match(zoeker, /beurt\.current/,
+    "the lookup lost its turn counter — a slow answer can overwrite a newer one");
+
+  // ── Every screen that types an address ──────────────────────────────────────────────────
+  const schermen: string[] = [];
+  const loop = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const pad = `${dir}/${entry}`;
+      if (statSync(pad).isDirectory()) loop(pad);
+      else if (/\.tsx$/.test(pad) && !/\.test\./.test(pad)) schermen.push(pad);
+    }
+  };
+  loop("src/app");
+  loop("src/modules");
+
+  // Deliberately without a lookup, and the only one:
+  const zonder: Record<string, string> = {
+    // The public invoice tool has no session, and /api/adres requires one. Not squeamishness: an
+    // unauthenticated proxy in front of a free public register is how anonymous traffic gets OUR
+    // egress address blocked, which would take the lookup away from every logged-in owner too.
+    "src/app/factuur-maken/GratisFactuur.tsx": "publieke tool zonder sessie; /api/adres eist een login",
+  };
+
+  const mist: string[] = [];
+  for (const bestand of schermen) {
+    const bron = readFileSync(bestand, "utf8");
+    // A screen that EDITS an address: a client component, with a postcode, and a city the owner
+    // can actually change. The first version tested for "city:" and matched a type annotation on
+    // a read-only server page — a detector that flags a screen showing an address would have had
+    // the exclusion list grow until it meant nothing.
+    if (!/^\s*['"]use client['"]/m.test(bron)) continue;
+    if (!/postal_code|postcode|postalCode/i.test(bron)) continue;
+    if (!/setCity\(|setClientCity\(|key: 'city'|key: "city"/.test(bron)) continue;
+    if (zonder[bestand]) continue;
+    // The MOUNT, not the identifier. Deleting the block while leaving the import behind kept this
+    // gate green in its own red-proof — `includes("AdresZoeker")` was still true because of the
+    // import line. A gate satisfied by an unused import is a gate that measures nothing.
+    if (/<AdresZoeker\b/.test(bron)) continue;
+    mist.push(bestand);
+  }
+  // And the detector itself must still find things: if a refactor renames every setter, this gate
+  // would pass by finding no screens at all — this file's documented defect class.
+  const gevonden = schermen.filter((f) => /<AdresZoeker\b/.test(readFileSync(f, "utf8")));
+  assert.ok(gevonden.length >= 4, `only ${gevonden.length} screens mount AdresZoeker — the scan is broken, not the app`);
+  assert.deepStrictEqual(mist, [],
+    "these take an address and never look it up — a lookup on most screens is worse than on none, " +
+      "because the owner learns to trust the ones that do not check");
+});

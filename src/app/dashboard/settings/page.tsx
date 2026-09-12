@@ -7,6 +7,7 @@ import { amsterdamToday } from '@/lib/format-nl'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PushNotificationCard } from '@/components/settings/PushNotificationCard'
+import AdresZoeker from '@/components/AdresZoeker'
 // [TAAL] De taal van het SCHERM. Niet van de documenten — die blijven Nederlands, want die leest
 // de klant en de Belastingdienst. Zie src/lib/i18n/locale.ts.
 import { LanguageCard } from '@/components/settings/LanguageCard'
@@ -683,6 +684,23 @@ export default function SettingsPage() {
                 onChange={e => setCity(e.target.value)}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm"
                 placeholder={t('inst.stadInvullen')}
+              />
+            </div>
+
+            {/* [ADRES-ECHT] Het eigen adres staat op elke factuur die dit account verstuurt, dus
+                hier is een typefout duurder dan waar dan ook: hij gaat mee op ALLES. Het register
+                stelt voor, de eigenaar neemt over. */}
+            <div className="col-span-2">
+              <AdresZoeker
+                postcode={postalCode}
+                huisnummer={address.replace(/^\D+/, '')}
+                straat={address.replace(/\s*\d.*$/, '')}
+                plaats={city}
+                onOvernemen={(adres) => {
+                  setAddress(`${adres.street} ${adres.houseNumber}${adres.addition ? `-${adres.addition}` : ''}`)
+                  setPostalCode(`${adres.postcode.slice(0, 4)} ${adres.postcode.slice(4)}`)
+                  setCity(adres.city)
+                }}
               />
             </div>
           </div>

@@ -17,6 +17,7 @@ import { round2 } from '@/lib/invoice-totals'
 import { staysAFactuur } from '@/lib/negative-line'
 // [KOMMA-INVOER] The one comma-safe money field, shared with the builder and the credit screen.
 import DecimalInput from '@/components/ui/DecimalInput'
+import AdresZoeker from '@/components/AdresZoeker'
 import { createClient } from '@/lib/supabase'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
@@ -668,6 +669,20 @@ export default function InvoiceEditPage() {
                 />
               </div>
             </div>
+            {/* [ADRES-ECHT] Ook op het bewerkscherm. Het stelt alleen voor — de vastgelegde
+                momentopname van deze factuur verandert pas als de eigenaar Overnemen tikt, en
+                dat is precies de handeling die hij op dit scherm sowieso komt doen. */}
+            <AdresZoeker
+              postcode={clientPostal}
+              huisnummer={clientAddress.replace(/^\D+/, '')}
+              straat={clientAddress.replace(/\s*\d.*$/, '')}
+              plaats={clientCity}
+              onOvernemen={(adres) => {
+                setClientAddress(`${adres.street} ${adres.houseNumber}${adres.addition ? `-${adres.addition}` : ''}`)
+                setClientPostal(`${adres.postcode.slice(0, 4)} ${adres.postcode.slice(4)}`)
+                setClientCity(adres.city)
+              }}
+            />
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">{t('nieuw.klant.btw')}</label>
               <input
