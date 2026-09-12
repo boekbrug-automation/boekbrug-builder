@@ -96,8 +96,8 @@ test("the bands are ordered, so bandFor cannot return a later band by accident",
 // It is money on a public page, so it is checked like money: the btw division, the ceiling's
 // deliberate generosity, and the refusal to invent a figure out of nonsense input.
 test("[PROVISIE-REKENSOM] exclBtw undoes the consumer price, to the cent", () => {
-  // Plus is quoted INCLUDING btw because Dutch consumer prices are. 12,99 / 1,21 = 10,7355…
-  assert.strictEqual(exclBtw(PLUS_PRICE_EUR), 10.74);
+  // Plus is quoted INCLUDING btw because Dutch consumer prices are. 19,99 / 1,21 = 16,5206…
+  assert.strictEqual(exclBtw(PLUS_PRICE_EUR), 16.52);
   assert.strictEqual(exclBtw(121), 100);
   assert.strictEqual(exclBtw(0), 0);
   // And it is the exact inverse of the function beside it, at a value with no rounding argument.
@@ -105,13 +105,15 @@ test("[PROVISIE-REKENSOM] exclBtw undoes the consumer price, to the cent", () =>
 });
 
 test("[PROVISIE-REKENSOM] the ceiling is one multiplication, and a generous one", () => {
-  // 25 × 10,74 × 20% = 53,70 — above what the same office would be charged for the portal (49),
-  // which is the whole point of the comparison on the page.
-  assert.strictEqual(referralCeilingExclBtw(25), 53.7);
-  assert.strictEqual(referralCeilingExclBtw(25, 0.2), 53.7);
-  assert.strictEqual(referralCeilingExclBtw(1), 2.15);
+  // 25 × 16,52 × 20% = 82,60. Above the portal price it is compared against, and that is fine:
+  // the page renders both numbers rather than printing them, so the comparison stays honest
+  // whichever way it falls. What the ceiling still is, at any price, is a CEILING — it assumes
+  // every linked client pays Plus, while most of them will not.
+  assert.strictEqual(referralCeilingExclBtw(25), 82.6);
+  assert.strictEqual(referralCeilingExclBtw(25, 0.2), 82.6);
+  assert.strictEqual(referralCeilingExclBtw(1), 3.3);
   // Half the rate is half the money — no floor, no minimum, nothing hidden in the function.
-  assert.strictEqual(referralCeilingExclBtw(25, 0.1), 26.85);
+  assert.strictEqual(referralCeilingExclBtw(25, 0.1), 41.3);
   // A fraction of a client is not a client.
   assert.strictEqual(referralCeilingExclBtw(25.9), referralCeilingExclBtw(25));
 });

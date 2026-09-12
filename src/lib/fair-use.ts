@@ -54,7 +54,7 @@
 export const ACCOUNTANT_FREE_CLIENTS = 10;
 
 /** De prijs van het betaalde klantplan, in euro per maand, inclusief btw. */
-export const PLUS_PRICE_EUR = 12.99;
+export const PLUS_PRICE_EUR = 19.99;
 
 /** Hoeveel procent van een grens telt als "bijna vol" — bij deze stand waarschuwen we. */
 export const NEAR_LIMIT_RATIO = 0.8;

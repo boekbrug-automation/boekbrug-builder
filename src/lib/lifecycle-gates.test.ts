@@ -7314,6 +7314,15 @@ test("[AR-TERMEN] the retired Arabic forms cannot come back", () => {
     if (key.startsWith("log.")) continue;
     if (/[.!؟]$/.test(ar)) continue;
     if (ar.split(/\s+/).length > 4) continue; // a sentence, not a label
+    //   · a FRAGMENT built into a larger sentence. This repo already marks those in the source
+    //     language: a label's Dutch is capitalised, a fragment's is not — `ververs de pagina` is
+    //     interpolated into a toast ("… — ververs de pagina"), where the Arabic imperative is the
+    //     correct register and the noun would be broken grammar. Read off the Dutch rather than
+    //     kept as a list of keys, because the next fragment is one nobody has written yet. It
+    //     costs almost no coverage: of the 2536 short values this rule examines, 210 have a
+    //     lowercase Dutch source and exactly one of those opens with an imperative.
+    const nl = (message.nl ?? "").trim();
+    if (nl && nl[0] === nl[0].toLowerCase() && nl[0] !== nl[0].toUpperCase()) continue;
     const opener = IMPERATIVE.find((w) => ar.startsWith(w + " "));
     if (opener) fouten.push(`${key}: «${ar}» opens with the imperative «${opener}» — a label is a noun`);
   }

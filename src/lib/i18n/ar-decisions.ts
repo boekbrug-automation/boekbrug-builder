@@ -184,6 +184,47 @@ export const AR_DELIBERATE_SPLITS: ReadonlyArray<{
 ];
 
 /**
+ * [AR-FASE2] The third pass: everything that is not a button.
+ *
+ * 3942 rows — headings, field labels, placeholders, screen-reader text, tooltips, toasts, errors
+ * and explanations — each classified by the role it plays on screen, because a heading and a
+ * warning are different registers and a reviewer told which one it is answers differently. Rows
+ * already settled above were excluded from the sheet, so nobody was asked to re-decide them.
+ *
+ * It produced 872 corrected values: 375 orthographic, 493 real rewordings — plural agreement after
+ * a numeral, «خصم مباشر» for a direct debit where «خصم تلقائي» could be read as an automatic
+ * DISCOUNT in a bookkeeping app, and a great many sentences simply said better.
+ *
+ * ── WHAT THIS PASS DID NOT SETTLE, WHICH IS THE PART WORTH READING ──
+ *
+ * Three patterns look like rules waiting to be finished, and none of them is one. In each case the
+ * reviewer SAW the remaining rows and left them, so "completing" the pattern would overrule the
+ * person whose judgement the pass exists to capture:
+ *
+ *   · tanween. 375 corrections wrote «ـًا» — and 33 reviewed rows kept «ـاً». Mixed on purpose or
+ *     not, it is not a rule, and there is no gate.
+ *   · quotation marks. 109 values use «…» and 5 keep "…", all five reviewed.
+ *   · plural straight after a numeral placeholder. Many became «{n} فاتورة»; 18 stayed
+ *     «{n} فواتير», every one of them reviewed.
+ *
+ * Do not normalise any of the three. If one should become a rule, that is a question for the
+ * reviewer, and the answer belongs here.
+ *
+ * ── AND 43 ROWS ARE HELD, NOT APPLIED ──
+ *
+ * The pass proposed expanding the compound btw labels — «مبلغ btw», «نسبة btw», «بدون btw»,
+ * «شامل btw» — to «ضريبة القيمة المضافة». Those compounds were settled in the previous pass as
+ * keeping the term, and AR_SETTLED matches an exact Dutch source, so 43 keys carrying the same
+ * compound under a slightly different Dutch string slipped past the gate. They were reverted to
+ * the wording the previous pass approved, and the question — whether Arabic should spell the tax
+ * out in LABELS as it already does in prose — goes back to the reviewer as one decision instead of
+ * being made 43 times by accident.
+ *
+ * That is the whole reason this file exists: the pass that reviews 3942 rows cannot hold the
+ * previous pass's 105 rulings in its head, and a gate can.
+ */
+
+/**
  * Words retired by the review, with what replaced them. Whole labels, matched exactly: «إعادة»
  * alone is retired while «إعادة الإرسال» and «إعادة المحاولة» are the words that replaced others.
  */
@@ -232,6 +273,7 @@ export const AR_RETIRED_EVERYWHERE: Readonly<Record<string, string>> = {
   "فكّ الربط": "إلغاء الربط",
   "فكّ ربط": "إلغاء ربط", // the same name in construct state: «فكّ ربط دفعة جماعية»
   "افكك ربط": "ألغِ ربط",
+  "كاسة": "كاشير", // the till, and it names a thing — it lived inside «شاشة الكاسة», never alone
   "رقم BTW": "رقم btw",
   "رقم ضريبة القيمة المضافة": "رقم btw", // the BARE «ضريبة القيمة المضافة» is not retired: it
                                           // names the tax itself in six values and stays there

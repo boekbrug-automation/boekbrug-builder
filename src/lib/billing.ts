@@ -22,6 +22,7 @@
 import Stripe from "stripe";
 
 import { PLUS_TRIAL_DAYS } from "@/lib/plan";
+import { PLUS_PRICE_EUR } from "@/lib/fair-use";
 
 // ── Configuration ────────────────────────────────────────────────────
 //
@@ -155,6 +156,32 @@ export async function createCheckoutSession(params: {
 }): Promise<Stripe.Checkout.Session> {
   if (!STRIPE_PRICE_ID_PLUS) {
     throw new Error("[BILLING] Missing STRIPE_PRICE_ID_PLUS");
+  }
+
+  // ── [PRIJS-KLOPT] Never open a checkout that charges an amount we did not publish ──────────
+  //
+  // The published price lives in fair-use.ts and reaches the pricing page, the Terms and the
+  // billing screen from there. What Stripe actually charges lives in a price OBJECT behind an
+  // environment variable, and the two have no connection whatsoever — nothing in this repo can
+  // notice that they drifted. The day the constant is raised and the env var still points at the
+  // old price, every page says one number and the card is debited another. That is not a bug to
+  // find in a support e-mail; it is the kind a customer reports to their bank.
+  //
+  // So the amount is READ from Stripe and compared, at the last possible moment, per session.
+  // One extra API call per checkout — a checkout already takes several — and it turns a silent
+  // mismatch into a refusal that names both numbers.
+  //
+  // Currency is compared too: a price object in another currency is the same defect wearing a
+  // different hat, and 19,99 dollars is not 19,99 euro.
+  const priceObject = await getStripe().prices.retrieve(STRIPE_PRICE_ID_PLUS);
+  const stripeCents = priceObject.unit_amount;
+  const publishedCents = Math.round(PLUS_PRICE_EUR * 100);
+  if (stripeCents !== publishedCents || priceObject.currency !== "eur") {
+    throw new Error(
+      `[PRIJS-KLOPT] Stripe zou ${stripeCents ?? "onbekend"} ${priceObject.currency} incasseren, ` +
+        `maar BoekBrug publiceert ${publishedCents} eur. Er wordt niets afgerekend tot die twee ` +
+        `gelijk zijn: pas STRIPE_PRICE_ID_PLUS aan of zet de gepubliceerde prijs terug.`,
+    );
   }
 
   return getStripe().checkout.sessions.create({
