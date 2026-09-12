@@ -16,6 +16,8 @@ import { textToPdf } from '@/lib/text-to-pdf'
 // [DOORGESTUURD] Read the attachments out of an e-mail that arrived as an attachment.
 import { extractMimeAttachments, mimeHeader, uniqueAttachmentName, type EmbeddedAttachment } from '@/lib/mime-attachments'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
+// [THROTTLE] One polite wait-and-retry, shared by both providers. See mail-throttle.ts.
+import { throttledFetch, beginThrottleBudget } from '@/lib/mail-throttle'
 import { ownedStoragePath } from '@/lib/storage-path'
 // [BRIDGE-EXTRACT] byte-hash dedup — één bestand → één hash → één record
 import { expandArchives } from "@/lib/archive-expand";
@@ -870,9 +872,7 @@ export async function fetchGmailAttachments(
         `&maxResults=${GMAIL_PAGE_SIZE}` +
         (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '')
 
-      const listRes: Response = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
+      const listRes: Response = await gmailFetch(url, accessToken)
 
       if (!listRes.ok) {
         const body = await listRes.text()
@@ -971,9 +971,9 @@ async function fetchMessageAttachments(
   messageId: string,
   accessToken: string
 ): Promise<{ items: GmailAttachment[]; ok: boolean; statements: BankStatementRef[]; unread: SkippedAttachmentRef[] }> {
-  const res = await fetch(
+  const res = await gmailFetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
+    accessToken,
   )
 
   // [BOEK-011 throttle×watermark] ok:false = this email wasn't fully read; the
@@ -1140,9 +1140,9 @@ async function fetchMessageAttachments(
       if (att.attachmentId) {
         // Needs a second fetch to get the actual bytes
         try {
-          const attRes = await fetch(
+          const attRes = await gmailFetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${att.attachmentId}`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
+            accessToken,
           )
           if (!attRes.ok) {
             // [ONBEREIKBAAR] Weather or permanence — and the difference is the whole mailbox.
@@ -1254,30 +1254,28 @@ export async function getOutlookUserEmail(accessToken: string): Promise<string> 
   return data.mail || data.userPrincipalName || ''
 }
 
+// [THROTTLE] Gmail's half of the shared retry. messages.get costs 5 quota units against a 250-unit
+// per-user-second budget and this path issues ten of them at once, so 429 is the ordinary weather
+// here — not an exception. See mail-throttle.ts for what a throttle used to cost: not a lost
+// invoice (the watermark holds, correctly), but a run that stops and then repeats the identical
+// burst from the identical watermark on the next cron.
+function gmailFetch(url: string, accessToken: string): Promise<Response> {
+  return throttledFetch(url, accessToken, 'Gmail')
+}
+
 // ─── Outlook attachment fetching (Microsoft Graph) ──────────────────────────
 
-// [BOEK-011 throttle] One retry that respects Retry-After. Microsoft Graph
-// throttles per-mailbox (MailboxConcurrency ≈ 4 concurrent; plus rate windows)
-// and answers 429/"ApplicationThrottled" with a Retry-After header. Seen in
-// production at pagination page 6. One polite wait-and-retry absorbs the
-// common case; a second failure returns the response so the caller can mark
-// the fetch INCOMPLETE (which holds the watermark — see fetchOutlookAttachments).
-async function graphFetch(url: string, accessToken: string): Promise<Response> {
-  const doFetch = () =>
-    fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
-
-  let res = await doFetch()
-  if (res.status === 429 || res.status === 503) {
-    const retryAfter = Number(res.headers.get('retry-after'))
-    const waitMs =
-      Number.isFinite(retryAfter) && retryAfter > 0
-        ? Math.min(retryAfter * 1000, 15000)
-        : 4000
-    console.warn(`[BOEK-011] Graph throttled (${res.status}) — waiting ${waitMs}ms`)
-    await new Promise((r) => setTimeout(r, waitMs))
-    res = await doFetch()
-  }
-  return res
+// [THROTTLE] Was the only retry either provider had, and it is now the shared one — see
+// mail-throttle.ts for why Gmail never having one was an omission rather than a decision. Kept as a
+// named wrapper because three call sites read better as graphFetch(url, token) than as a call that
+// repeats the provider label at every use.
+//
+// Production history that produced it: Microsoft Graph throttles per mailbox (MailboxConcurrency
+// ≈ 4, plus rate windows) and answered 429 with a Retry-After at pagination page 6. One polite wait
+// absorbs the common case; a second failure returns the response so the caller can mark the fetch
+// INCOMPLETE, which holds the watermark (see fetchOutlookAttachments).
+function graphFetch(url: string, accessToken: string): Promise<Response> {
+  return throttledFetch(url, accessToken, 'Graph')
 }
 
 /**
@@ -2474,6 +2472,11 @@ export async function syncUserEmails(
   // (which has no session). The only read below is this user's OWN profile, explicitly
   // scoped by id — service-role here is safe and removes the request-session coupling.
   const supabase = createPipelineClient()
+
+  // [THROTTLE-BUDGET] Open this run's wait budget before the first provider call. Once, here, and
+  // nowhere else: the budget is per RUN, and resetting it deeper in would let a long sync keep
+  // buying itself more sleep against a route that is killed at 300 seconds.
+  beginThrottleBudget()
 
   // [BOEK-011 + BOEK-SECURITY] Load tokens via Vault. We still need a few
   // fields from email_connections directly (provider) — getEmailTokens
@@ -5416,9 +5419,9 @@ async function fetchGmailBodyInvoices(
   const q =
     `-has:attachment after:${afterDate} in:anywhere -in:sent -in:drafts -in:chats ${GMAIL_NOT_OWN_MAIL} ` +
     `{${BODY_SEARCH_WORDS.join(' ')}}`
-  const listRes = await fetch(
+  const listRes = await gmailFetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${MAX_BODY_SCAN}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    accessToken,
   )
   if (!listRes.ok) {
     console.error('[MAILTEKST] Gmail body listing failed', { status: listRes.status })
@@ -5429,9 +5432,9 @@ async function fetchGmailBodyInvoices(
 
   const items: GmailAttachment[] = []
   for (const { id } of ids) {
-    const res = await fetch(
+    const res = await gmailFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
+      accessToken,
     )
     if (!res.ok) continue
     const msg = (await res.json()) as {
