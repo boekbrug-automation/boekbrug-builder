@@ -1696,6 +1696,73 @@ test("[DOCCHECK] an excl-label must never anchor the total it is not", () => {
   );
 });
 
+test("[THROTTLE] every mailbox message call goes through the shared retry", () => {
+  // Graph got a retry because production demanded one — its own comment records a 429 at pagination
+  // page 6. Gmail never got one, and that was an omission rather than a decision: the second
+  // provider was simply written later.
+  //
+  // It never lost an invoice. Both Gmail failure paths mark the fetch incomplete and the WATERMARK
+  // HOLDS, so the mail is re-read. What it lost was forward progress, in a shape that can stick:
+  // ten concurrent messages.get (5 quota units each against 250 per user-second), one 429 anywhere
+  // sets attachmentsOk = false for the whole run, the watermark holds, and the next cron issues the
+  // identical burst from the identical watermark.
+  const mod = code("src/lib/email-integration.ts");
+
+  // One implementation, two named wrappers. Two copies of one rule is how the copy nobody reads
+  // drifts from the one that decides — the argument placementOf and groundingOf already carry.
+  assert.match(mod, /function gmailFetch\([\s\S]{0,200}?throttledFetch\(url, accessToken, 'Gmail'\)/,
+    "Gmail's wrapper must delegate to the shared helper, not carry a second retry of its own");
+  assert.match(mod, /function graphFetch\([\s\S]{0,200}?throttledFetch\(url, accessToken, 'Graph'\)/,
+    "Graph's wrapper must delegate to the same one");
+  assert.match(mod, /import \{ throttledFetch, beginThrottleBudget \} from '@\/lib\/mail-throttle'/);
+
+  // [THROTTLE-BUDGET] And the run budget must be opened, exactly once, in the sync entry point.
+  // Without it the retry is a regression in the case it exists for: ~400 sequential chunks and up
+  // to 40 list pages, each able to sleep fifteen seconds, inside a route killed at 300.
+  const opens = (mod.match(/beginThrottleBudget\(\)/g) ?? []).length;
+  assert.equal(opens, 1, `beginThrottleBudget() is called ${opens}× — it must be once, per RUN`);
+  const syncAt = mod.indexOf("export async function syncUserEmails");
+  assert.ok(syncAt > 0, "syncUserEmails must be findable — this gate measures nothing otherwise");
+  assert.ok(mod.indexOf("beginThrottleBudget()", syncAt) > syncAt,
+    "the budget must be opened inside syncUserEmails, before the first provider call");
+
+  // And neither wrapper may become decoration. Measured at the time of writing: gmailFetch has 5
+  // call sites and graphFetch 3. A wrapper that exists and is not called is the exact state this
+  // gate was written to end.
+  const uses = (name: string) => (mod.match(new RegExp(String.raw`\b${name}\s*\(`, "g")) ?? []).length - 1;
+  assert.ok(uses("gmailFetch") >= 4, `gmailFetch is called ${uses("gmailFetch")}× — the Gmail path went around it again`);
+  assert.ok(uses("graphFetch") >= 3, `graphFetch is called ${uses("graphFetch")}× — the Graph path went around it again`);
+
+  // The other half, and the one that catches a NEW call: every literal fetch( in this file is an
+  // auth or identity endpoint, never the message API. Those four are deliberately not retried —
+  // a refusal from a token endpoint is an answer about the grant, not weather — and they are named
+  // here so that adding a fifth is a decision somebody has to make on purpose.
+  const TOKEN_OR_IDENTITY = [
+    "'https://oauth2.googleapis.com/revoke'",
+    "'https://oauth2.googleapis.com/token'",
+    "'https://www.googleapis.com/oauth2/v3/userinfo'",
+    "'https://graph.microsoft.com/v1.0/me'",
+    "endpoint",   // refreshAccessToken: the provider's token URL, chosen per provider
+    "tokenUrl",   // the Outlook authorization-code exchange
+  ];
+  const bare: string[] = [];
+  let seen = 0;
+  for (const m of mod.matchAll(/(^|[^A-Za-z0-9_$.])fetch\s*\(\s*([^,\s)]+)/g)) {
+    seen++;
+    const arg = m[2];
+    if (TOKEN_OR_IDENTITY.some((a) => arg.startsWith(a))) continue;
+    bare.push(`line ${mod.slice(0, m.index).split("\n").length}: fetch(${arg.slice(0, 60)}`);
+  }
+  // A scan that matches nothing reports a clean file, and an empty list is then indistinguishable
+  // from success. This gate's first draft did exactly that: it counted zero message calls and
+  // passed. The counter is the assertion that the SCAN still works, not the code.
+  assert.ok(seen >= 6, `only ${seen} literal fetch( calls were seen in a file that has six — the scan is broken`);
+  assert.deepEqual(bare, [],
+    "these reach a provider without the shared retry. If it is a message API call, use gmailFetch " +
+    "or graphFetch; if it is genuinely an auth endpoint that must not be retried, add it to " +
+    "TOKEN_OR_IDENTITY above with the reason:\n  " + bare.join("\n  "));
+});
+
 test("[DOCCHECK-TAAL] the date witness reads the languages the module already receives", () => {
   // Measured on 12 September 2026: of 86 incoming invoices carrying a stored _doccheck, seven said
   // the date was 'absent' — and all seven were English-language SaaS invoices whose date was
