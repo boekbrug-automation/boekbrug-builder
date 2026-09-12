@@ -19,6 +19,7 @@ import type { ProfileRow } from '@/types/rows'
 import { foldText } from '@/lib/search'
 import { useDialog } from '@/components/ui/Dialog'
 import AdresZoeker from '@/components/AdresZoeker'
+import BtwControle from '@/components/BtwControle'
 import { useToast } from '@/components/ui/Toast'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
@@ -360,6 +361,7 @@ export default function KlantenClient({ profile, openByClient = null }: {
                   />
                   {/* [ADRES-ECHT] Onder het plaatsveld, want dan staan alle drie de velden er al.
                       Het register stelt voor; de eigenaar tikt Overnemen. */}
+                  {f.key === 'btw_number' && <BtwControle nummer={form.btw_number} />}
                   {f.key === 'city' && (
                     <AdresZoeker
                       postcode={form.postal_code}

@@ -54,6 +54,7 @@ import {
   isConfirmed as isConfirmedFor, mayOverwriteInput as mayOverwriteInputFor,
 } from "./verification";
 import { euVatShape as euVatShapeFor, isOtherEuCountry as isOtherEuCountryFor } from "./eu-vat-format";
+import { parseViesAnswer as parseViesAnswerFor } from "./vies-parse";
 import {
   normaliseAddress as normaliseAddressFor, compareToRegister as compareToRegisterFor,
   mergeAccepted as mergeAcceptedFor,
@@ -33340,4 +33341,79 @@ test("[ADRES-ECHT] every address form looks the address up, and none of them fil
   assert.deepStrictEqual(mist, [],
     "these take an address and never look it up — a lookup on most screens is worse than on none, " +
       "because the owner learns to trust the ones that do not check");
+});
+
+
+// ─── [EU-BTW] A foreign btw-nummer is checked at VIES, beside the field, while it is fixable ──
+//
+// A supply to a business in another EU country with a VALID btw-nummer is verlegd: 0% on the
+// invoice and the customer declares the tax. If the number was not valid, the supply was never
+// zero-rated and the Dutch supplier owes the btw HIMSELF — on an invoice he has already sent
+// without it. That is the whole reason this check exists, and the reason it sits next to the
+// input rather than on a review screen: at the input it is still a typo, afterwards it is a
+// correction to a document someone else is holding.
+//
+// Three things this gate holds:
+//
+//   1. A DUTCH number is not sent to VIES. VIES answers about intra-EU registration, and for a
+//      Dutch customer of a Dutch supplier the question does not arise — a "niet gecontroleerd"
+//      under every ordinary domestic invoice teaches people to ignore the line entirely.
+//   2. VIES REPORTING ITS OWN TROUBLE IS NOT A VERDICT. It fans out to 27 national registers,
+//      any of which can be down, and it says so with HTTP 200 and the trouble in a field.
+//      Reading MS_UNAVAILABLE as "invalid" sends an owner chasing a number that is perfectly
+//      fine — and worse, reading it as valid puts 0% on an invoice on no evidence at all.
+//   3. EVERY FIELD WHERE A BTW-NUMMER IS TYPED gets the check, for the same reason as the
+//      address: a check on two screens out of three teaches the owner to trust the third.
+test("[EU-BTW] VIES is asked about foreign numbers only, and its silence is never a verdict", () => {
+  const route = code("src/app/api/btw-nummer/route.ts");
+
+  // 1 — the Dutch short-circuit, before any fetch.
+  const voorFetch = route.slice(0, route.indexOf("await fetch"));
+  assert.ok(voorFetch.length > 0, "the route no longer fetches — the cut is broken, not the code");
+  assert.match(voorFetch, /shape\.country === "NL"/,
+    "a Dutch number now travels to VIES, which does not answer that question");
+
+  // 2 — the three outcomes, and which one a failure takes.
+  assert.match(route, /unknown<ViesCompany>\("VIES", "VIES was niet bereikbaar"\)/);
+  assert.match(route, /refused<ViesCompany>\("VIES", "VIES kent dit btw-nummer niet als geldig"/);
+  // A refusal carries the moment: "valid on 12 September" is the defensible record.
+  assert.match(route, /refused<ViesCompany>\("VIES", "VIES kent dit btw-nummer niet als geldig", now\)/);
+
+  // The parser, exercised — the half that decides whether a foreign register's bad day becomes
+  // a wrong verdict on someone's invoice.
+  for (const err of ["MS_UNAVAILABLE", "TIMEOUT", "SERVICE_UNAVAILABLE"]) {
+    const r = parseViesAnswerFor({ valid: true, countryCode: "BE", vatNumber: "0123456749", userError: err }, "BE0123456749");
+    assert.strictEqual(r.reading, "unusable", `${err} became a verdict`);
+  }
+  assert.strictEqual(
+    parseViesAnswerFor({ valid: false, countryCode: "BE", vatNumber: "0123456749" }, "BE0123456749").reading,
+    "invalid",
+  );
+  // An answer about a different number is not an answer about this one.
+  assert.strictEqual(
+    parseViesAnswerFor({ valid: true, countryCode: "BE", vatNumber: "0999999999" }, "BE0123456749").reading,
+    "unusable",
+  );
+  // And nothing unrecognisable may come out as a verdict in either direction.
+  for (const rommel of [null, 42, {}, { valid: "true" }]) {
+    assert.strictEqual(parseViesAnswerFor(rommel, "BE0123456749").reading, "unusable", JSON.stringify(rommel));
+  }
+
+  // 3 — every screen that takes a btw-nummer checks it.
+  const schermen = [
+    "src/app/dashboard/invoice/new/page.tsx",
+    "src/app/dashboard/invoice/[id]/edit/page.tsx",
+    "src/app/dashboard/klanten/KlantenClient.tsx",
+  ];
+  for (const scherm of schermen) {
+    assert.match(readFileSync(scherm, "utf8"), /<BtwControle\b/,
+      `${scherm} takes a btw-nummer and never checks it — a check on two screens out of three ` +
+        "teaches the owner to trust the third");
+  }
+
+  // The component itself must not fill anything in, and must not shout on a Dutch number.
+  const comp = code("src/components/BtwControle.tsx");
+  assert.match(comp, /vorm\.country !== 'NL'/, "the component now warns under domestic invoices too");
+  assert.doesNotMatch(comp, /onChange|setNummer|onOvernemen/,
+    "the VIES panel writes into the form — it reports, it does not correct");
 });

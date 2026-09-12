@@ -19,6 +19,7 @@ import { lineSignFault, staysAFactuur } from '@/lib/negative-line'
 // [KOMMA-INVOER] One comma-safe money field for every screen that has one.
 import DecimalInput from '@/components/ui/DecimalInput'
 import AdresZoeker from '@/components/AdresZoeker'
+import BtwControle from '@/components/BtwControle'
 import dynamic from 'next/dynamic'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
@@ -1708,6 +1709,10 @@ function NewInvoicePageContent() {
                 {clientBtw.trim() && looksLikeDutchBtw(clientBtw) && !isValidDutchBtw(clientBtw) && (
                   <p style={{ fontSize: 11, color: M3.error, margin: '4px 0 0' }}>{t('nieuw.klant.btwFormaat')}</p>
                 )}
+                {/* [EU-BTW] VIES, naast het veld en niet op een controlepagina: hier is het nog
+                    te repareren, en een verlegde levering met een ongeldig nummer laat de btw bij
+                    de Nederlandse ondernemer liggen. */}
+                <BtwControle nummer={clientBtw} />
                 {/* [ICP] Said while the number is still on screen and still fixable. */}
                 {euVatSuspect && (
                   <p style={{ fontSize: 11, color: M3.error, margin: '4px 0 0' }}>

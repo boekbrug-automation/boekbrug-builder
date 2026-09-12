@@ -18,6 +18,7 @@ import { staysAFactuur } from '@/lib/negative-line'
 // [KOMMA-INVOER] The one comma-safe money field, shared with the builder and the credit screen.
 import DecimalInput from '@/components/ui/DecimalInput'
 import AdresZoeker from '@/components/AdresZoeker'
+import BtwControle from '@/components/BtwControle'
 import { createClient } from '@/lib/supabase'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
@@ -692,6 +693,9 @@ export default function InvoiceEditPage() {
                 placeholder="NL123456789B01"
               />
             </div>
+            {/* [EU-BTW] Ook hier: een verlegde levering met een ongeldig nummer laat
+                de btw bij de ondernemer liggen, en dit scherm is waar hij hem nog repareert. */}
+            <BtwControle nummer={clientBtw} />
           </div>
           {/* [CREDITNOTA-EXTERN] The invoice this standalone creditnota corrects — named, or the
               document is not a creditnota at all (art. 219). Printed on the PDF, carried in the e-factuur. */}
