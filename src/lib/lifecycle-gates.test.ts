@@ -33473,3 +33473,87 @@ test("[EU-BTW] VIES is asked about foreign numbers only, and its silence is neve
   assert.doesNotMatch(comp, /onChange|setNummer|onOvernemen/,
     "the VIES panel writes into the form — it reports, it does not correct");
 });
+
+
+// ─── [GEEN-ACHTERDEUR] The commercial console may never become an accounting backdoor ─────────
+//
+// A Control Center is coming: one place to see customers, offices, grants and usage, and to hand
+// out a pilot or extend a welcome period without a developer. That is commercial state, and
+// commercial state SHOULD be flexible.
+//
+// Accounting state must not be. The rule, written before the console exists rather than after:
+//
+//     An administrator may change what an account MAY DO. He may never change what it DID.
+//
+// Nothing on that surface may write an invoice, a booking line, a btw figure, a bank transaction
+// or a cash entry. A mistake in a subscription is an e-mail; a hand-edited invoice is a
+// falsified administratie, and it is falsified in a way that leaves no correction trail — which
+// is exactly what an accountant asks about when he asks whether he can trust this product with
+// his clients' books.
+//
+// ── WHY A GATE AND NOT A POLICY ──
+// Because the policy version fails on a busy Tuesday, with the best of intentions: a customer is
+// on the phone, the fix is one UPDATE away, and the console is already open. The rail has to be
+// in the build, and it has to be here BEFORE the first admin screen — a prohibition added after
+// a surface exists is a prohibition that has to remove something.
+test("[GEEN-ACHTERDEUR] no administrative surface may write to the books", () => {
+  // The tables that ARE the administratie. A write to any of these from an admin surface is a
+  // change to what happened, not to what may happen.
+  const BOEKEN = [
+    "invoices", "invoice_lines", "invoice_corrections", "bank_transactions", "bank_tx_invoices",
+    "cash_entries", "daily_turnover", "grootboek", "ledger_daily", "assets", "time_entries",
+    "documents", "aangiftes", "eft_settlements",
+  ];
+  const SCHRIJFT = /\.(insert|update|upsert|delete)\s*\(/;
+
+  // Where an administrative surface lives, or will. Named here so the rail exists before the
+  // road: a file created under any of these is covered from its first line.
+  const ADMIN_PADEN = [
+    "src/app/api/admin",
+    "src/app/api/control",
+    "src/app/dashboard/beheer",
+    "src/app/dashboard/control",
+    "src/modules/control",
+  ];
+
+  const overtredingen: string[] = [];
+  const loop = (dir: string) => {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir)) {
+      const pad = `${dir}/${entry}`;
+      if (statSync(pad).isDirectory()) { loop(pad); continue; }
+      if (!/\.(ts|tsx)$/.test(pad) || /\.test\./.test(pad)) continue;
+      const bron = code(pad);
+      for (const tabel of BOEKEN) {
+        // `.from("invoices")` followed, within one statement, by a write.
+        const patroon = new RegExp(`from\\(\\s*["'\`]${tabel}["'\`]\\s*\\)[^;]{0,400}`, "g");
+        for (const m of bron.matchAll(patroon)) {
+          if (SCHRIJFT.test(m[0])) overtredingen.push(`${pad}: writes ${tabel}`);
+        }
+      }
+    }
+  };
+  for (const pad of ADMIN_PADEN) loop(pad);
+
+  assert.deepStrictEqual(overtredingen, [],
+    "an administrative surface writes to the books. A subscription mistake is an e-mail; a " +
+      "hand-edited invoice is a falsified administratie with no correction trail. Corrections go " +
+      "through the accounting flow that leaves one — creditnota, correctievoorstel, or the " +
+      "owner's own door.");
+
+  // The rail must actually be watching something, or it passes by looking nowhere. At least one
+  // of the named paths exists today (/dashboard/beheer), and the walker must find files in it.
+  let gezien = 0;
+  const tel = (dir: string) => {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir)) {
+      const pad = `${dir}/${entry}`;
+      if (statSync(pad).isDirectory()) tel(pad);
+      else if (/\.(ts|tsx)$/.test(pad) && !/\.test\./.test(pad)) gezien++;
+    }
+  };
+  for (const pad of ADMIN_PADEN) tel(pad);
+  assert.ok(gezien >= 1,
+    "the walker found no administrative files at all — the paths were renamed and this gate is " +
+      "now guarding nothing, which is worse than not existing");
+});
