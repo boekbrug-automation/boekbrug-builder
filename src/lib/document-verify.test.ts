@@ -100,6 +100,58 @@ test('[DOCCHECK] the date finally has a witness', () => {
   assert.equal(verifyDate(null, 'Datum 01-06-2026'), 'unreadable')
 })
 
+test('[DOCCHECK-TAAL] and it reads the date on an English invoice, which is where it was failing', () => {
+  // Not hypothetical, and not an edge case. Of the 86 incoming invoices carrying a stored _doccheck
+  // on 12 September 2026, seven said the date was 'absent' — and all seven were English-language
+  // SaaS invoices (Anthropic, Vercel, Eleven Labs, Supabase) whose date was perfectly correct.
+  // Their stored fingerprint is identical in every case:  total 'anchored', invoiceNumber 'found',
+  // date 'absent'.  The text layer was read fine; only the date FORM was unmatched, because the
+  // month table held Dutch alone while TOTAL_WORDS had carried English and German all along.
+  //
+  // So the verdict that is supposed to be the date's one witness was, in production, wrong every
+  // single time it spoke — seven owners told to check a date that was right. That is how a warning
+  // stops being read, and this file argues exactly that about three other checks.
+  const bill = (printed: string) =>
+    `INVOICE\nAnthropic, PBC\nDate of issue ${printed}\nInvoice number SSY2ZA5L-0007\nAmount due  20.00\n`
+  for (const printed of [
+    'August 13, 2026', 'Aug 13, 2026', 'Aug. 13, 2026', '13 August 2026', '13 Aug 2026',
+    'August 13 2026', '2026/08/13',
+  ]) {
+    assert.equal(verifyDate('2026-08-13', bill(printed)), 'found', `not found in: ${printed}`)
+  }
+  // The three months where slicing the Dutch name to three letters does NOT give the English one.
+  // These are the ones a `monthName.slice(0, 3)` shortcut silently missed while looking correct.
+  assert.equal(verifyDate('2026-03-02', bill('2 Mar 2026')), 'found', 'maart/March')
+  assert.equal(verifyDate('2026-05-02', bill('2 May 2026')), 'found', 'mei/May')
+  assert.equal(verifyDate('2026-10-02', bill('2 Oct 2026')), 'found', 'oktober/October')
+  // German, for the same reason TOTAL_WORDS lists 'Gesamtbetrag'.
+  assert.equal(verifyDate('2026-03-02', bill('2. März 2026')), 'found')
+  assert.equal(verifyDate('2026-12-02', bill('2. Dezember 2026')), 'found')
+})
+
+test('[DOCCHECK-VOLGORDE] month-first NUMERIC only when the day cannot be a month', () => {
+  // This is the one place where being more permissive would cost the check its entire value.
+  //
+  // The day/month swap is the classic silent date error — 1 February read as 2 January is a valid
+  // date, the reader is confident, no amount changes, and nothing else in the app can see it. This
+  // witness can, and only because it refuses to read an ambiguous string both ways.
+  const paper = (d: string) => `FACTUUR\nFactuurdatum: ${d}\nTotaal 121,00\n`
+
+  // Above 12 there is only one possible reading, so matching the American order is free.
+  assert.equal(verifyDate('2026-08-13', paper('08-13-2026')), 'found', 'no thirteenth month exists')
+  assert.equal(verifyDate('2026-08-13', paper('8/13/2026')), 'found')
+  assert.equal(verifyDate('2026-08-13', paper('13-08-2026')), 'found', 'and the Dutch order of it')
+
+  // At or below 12 both readings exist, and the swapped one must NOT be accepted.
+  assert.equal(verifyDate('2026-01-02', paper('01-02-2026')), 'absent',
+    'the paper says 1 February; accepting the American reading would bless 2 January')
+  assert.equal(verifyDate('2026-02-01', paper('01-02-2026')), 'found', 'the correct reading of it')
+  assert.equal(verifyDate('2026-11-12', paper('11-12-2026')), 'absent', 'both ≤ 12, swapped')
+  assert.equal(verifyDate('2026-12-11', paper('11-12-2026')), 'found', 'both ≤ 12, read right')
+  assert.equal(verifyDate('2026-05-10', paper('05-10-2026')), 'absent')
+  assert.equal(verifyDate('2026-10-05', paper('05-10-2026')), 'found')
+})
+
 test('[DOCCHECK] the invoice number too, and punctuation does not divide it', () => {
   // The number is what makes a duplicate detectable and what a payment quotes. A stored number that
   // is not on the paper is one nothing else can ever reconcile against.
