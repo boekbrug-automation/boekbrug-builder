@@ -49,6 +49,15 @@ import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from 
 import { OFFICE_GETS as OFFICE_GETS_FOR, unavailableBenefits as unavailableBenefitsFor } from "./office-offer";
 import { normaliseEntry as normaliseEntryFor, entryProblems as entryProblemsFor } from "./accountant-directory";
 import { grantStanding as grantStandingFor } from "./plan-grants";
+import {
+  confirmed as confirmedFor, refused as refusedFor, unknown as unknownFor,
+  isConfirmed as isConfirmedFor, mayOverwriteInput as mayOverwriteInputFor,
+} from "./verification";
+import { euVatShape as euVatShapeFor, isOtherEuCountry as isOtherEuCountryFor } from "./eu-vat-format";
+import {
+  normaliseAddress as normaliseAddressFor, compareToRegister as compareToRegisterFor,
+  mergeAccepted as mergeAcceptedFor,
+} from "./dutch-address";
 import { decidePlan as decidePlanFor } from "./subscription";
 import { PUBLIC_PATHS as PUBLIC_PATHS_FOR } from "./public-paths";
 import { PLUS_PRICE_EUR } from "./fair-use";
@@ -33055,4 +33064,63 @@ test("[WELKOM-90] the welcome period is unmissable, ungrantable by its holder, a
     decidePlanFor({ role: "zzper", subscriptionStatus: null, currentPeriodEnd: null, ...ingetrokken, nowMs: nu }).plan,
     "free",
   );
+});
+
+
+// ─── [DERDE-BRON] An outside register may confirm, may refuse, and may fail to answer ─────────
+//
+// BoekBrug is starting to ask registers it does not own: VIES for an EU btw-nummer, PDOK/BAG for
+// a Dutch address, KvK for a company. Each has an obvious pair of answers and a third that
+// decides whether the feature helps or harms — "we could not ask".
+//
+// Both ways of losing that third answer are damaging, and quietly:
+//
+//   · unknown read as REFUSED tells an owner his customer's btw-nummer is wrong because a
+//     European service had its Tuesday maintenance window. He retypes a correct number, doubts
+//     it, and phones the customer.
+//   · unknown read as CONFIRMED is worse: a tick over a number nobody checked, on an invoice
+//     where a wrong btw-nummer moves who owes the tax.
+//
+// The type makes the collapse impossible and this gate keeps it that way — the moment a boolean
+// appears in that position, the third answer has nowhere to live.
+test("[DERDE-BRON] a register's answer keeps its third state, and only a yes may overwrite", () => {
+  const bron = code("src/lib/verification.ts");
+
+  // Three outcomes, in the type, by name.
+  assert.match(bron, /export type VerificationOutcome = "confirmed" \| "refused" \| "unknown"/,
+    "the outcome collapsed into fewer than three — one of the two damaging readings is now possible");
+  // No boolean may stand in for the outcome anywhere in this module.
+  assert.doesNotMatch(bron, /\b(isValid|valid|ok)\s*:\s*boolean/,
+    "a boolean appeared beside the outcome — the third answer has nowhere to live");
+
+  // The behaviour, exercised. A gate that only reads the type passes on a module that lies.
+  const nu = "2026-09-12T12:00:00.000Z";
+  assert.strictEqual(isConfirmedFor(unknownFor("VIES", "time-out")), false,
+    "an unreachable register counts as a confirmation");
+  assert.strictEqual(mayOverwriteInputFor(unknownFor("PDOK", "time-out")), false,
+    "a failed lookup may overwrite the address the owner is held to");
+  assert.strictEqual(mayOverwriteInputFor(refusedFor("PDOK", "bestaat niet", nu)), false);
+  assert.strictEqual(mayOverwriteInputFor(confirmedFor("PDOK", { straat: "X" }, nu)), true);
+  // An unanswered question carries no timestamp: otherwise it sorts as answered.
+  assert.strictEqual(unknownFor("KvK", "geen sleutel").checkedAt, null);
+
+  // ── The shape check that runs before any of them ──────────────────────────────────────────
+  // It says "possible", never "valid": NL999999999B99 is perfectly shaped and belongs to nobody.
+  assert.strictEqual(euVatShapeFor("NL822081297B01").shape, "possible");
+  assert.strictEqual(euVatShapeFor("NL999999999B99").shape, "possible");
+  // And the direction that decides a rubriek: nonsense is never "another EU country", because
+  // that reading turns btw verlegd on and moves who owes the tax.
+  for (const rommel of ["", "onbekend", "US123456789", "NL123"]) {
+    assert.strictEqual(isOtherEuCountryFor(rommel), false, `"${rommel}" was read as intra-EU`);
+  }
+
+  // ── The address rule ──────────────────────────────────────────────────────────────────────
+  // The register is authoritative on the street; it does not know "Gebouw C", and losing that
+  // delivers the invoice to the wrong desk.
+  const getypt = normaliseAddressFor({ postcode: "5038 ed", houseNumber: "42", addition: "Gebouw C", street: "tilburgseweg", city: "tilburg" });
+  const register = normaliseAddressFor({ postcode: "5038ED", houseNumber: 42, street: "Tilburgseweg", city: "Tilburg" });
+  assert.deepStrictEqual(compareToRegisterFor(getypt, register), [],
+    "a difference in casing was reported — that trains people to click past real warnings");
+  assert.strictEqual(mergeAcceptedFor(getypt, register).addition, "Gebouw C");
+  assert.strictEqual(mergeAcceptedFor(getypt, register).street, "Tilburgseweg");
 });
