@@ -406,6 +406,52 @@ Two non-catastrophic items:
 - **🟡 AZ2 notification spam** — `messages/route.ts:79-87` writes a notification to a body-supplied
   `receiver_id` via service-role; pin it to a real conversation partner.
 
+## 8g. Tenant boundary in the mailbox pipeline (CLEAN — September 2026)
+
+Asked before pointing Gmail/Outlook sync at real customers. `createPipelineClient()` is
+**service_role: it bypasses RLS entirely**, so in `src/lib/email-integration.ts` every filter IS the
+boundary — there is no second net behind it. Five pipeline clients are bound in that file
+(`supabase`, `insertPipeline`, `skipPipeline`, `wmPipeline`, `opruimen`).
+
+Every table query on one of them, counted and then read by hand:
+
+| | count |
+|---|---|
+| table queries on a service-role client | 43 |
+| carrying an explicit tenant filter (`user_id` / `receiver_id` / `sender_id`) | 35 |
+| addressed by primary `id` | 8 |
+| **carrying neither** | **0** |
+
+The eight by-`id` calls are the only ones that need an argument rather than a grep, and each was
+traced to the read that produced the id:
+
+- `email_connections` delete on `other.id` — `others` is `.eq('user_id', userId)` (provider switch);
+- `email_connections` update on `row.id` — `row` is `.eq('user_id', userId).eq('provider', …)`;
+- `profiles` select on `.eq('id', userId)` — the id *is* the tenant;
+- `email_connections` watermark read **and** write on `tokens.connectionId` — `getEmailTokens()`
+  selects `.eq('user_id', userId)`, so the connection id cannot be another owner's;
+- `suppliers` iban read on `supplier.id` — `suppliers` is per-owner
+  (`user_id NOT NULL REFERENCES profiles(id)`), and every read in `supplier-registry.ts` that
+  produces an id carries `.eq('user_id', userId)`; every insert carries `user_id: userId`;
+- two `documents` writes on `documentId` — the row this same call inserted moments earlier.
+
+**Storage was checked separately and is already gated.** All eight `storage.from('documents')` calls
+in the file are either a key this code built itself (`${userId}/incoming/…`) or passed through
+`ownedStoragePath(path, userId)` first — the distinction `[SEC-STORAGE-PATH]` draws, and the gate of
+that name walks every service-role byte-op in `src/` and enforces it.
+
+**No gate was added for the table half, deliberately.** The storage rule is one uniform invariant
+(a path key carries its owner in its first segment), which is why it can be a prohibition with no
+exception list. The table rule is not uniform: the tenant column differs per table
+(`user_id`, `receiver_id`, `zzper_id`, `accountant_id`, `client_id`) and one route computes it at
+runtime (`direction === 'incoming' ? 'receiver_id' : 'sender_id'`). A first repo-wide scan reported
+132 violations, and widening the column list dissolved essentially all of them — a gate at that
+signal-to-noise is a snapshot that goes stale, not a net. The eight justified by-`id` calls in this
+one file would themselves need an eight-entry allowlist, which is the same objection.
+
+So this section is the record instead: **audited, clean, and the reasoning for each exception is
+above so the next reader does not have to re-derive it.**
+
 ## 9. Recommended fix order
 
 1. ~~**C1** (xlsx upgrade) + **H2** (bound the sheet range) — a tiny authenticated upload crashes/corrupts the shared server today.~~
