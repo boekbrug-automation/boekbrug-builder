@@ -30594,6 +30594,66 @@ test("[FACTUURSTAAT] the money decides what is paid, and the anonymous sets may 
     `the count fell to ${anoniem} — lower BASELINE to ${anoniem} so the ratchet keeps biting`);
 });
 
+// ─── [OAUTH-INTREKKEN] Disconnecting a mailbox, and what may be said about a failed refresh ────
+//
+// Two things the mailbox import got wrong on the way to its first real customers, both found by
+// reading the path rather than by a failure.
+//
+// The refresh handler logged the provider's whole answer. A token endpoint answers with
+// CREDENTIALS — Microsoft returns a new refresh_token on every refresh, Google when it rotates,
+// and either can return an id_token. The branch that logged the most was `{ userId, refreshData }`
+// for "a 200 came back with no access_token", which is exactly the response that can still carry
+// them. Logs are retained and searchable, so that is a live credential at rest in a second place.
+//
+// And Ontkoppelen deleted our copy of the token without telling Google the grant was over. The
+// owner saw "disconnected" while the app stayed listed under third-party access in their Google
+// account, and any surviving copy of the refresh token still opened their mailbox. The privacy
+// statement keeps those tokens only "tot je de koppeling verbreekt".
+test("[OAUTH-INTREKKEN] the mailbox disconnect revokes, and no token reaches a log", () => {
+  const src = code("src/lib/email-integration.ts");
+
+  // ── The revoke happens, and it happens BEFORE the secret it needs is destroyed. Measured INSIDE
+  //    deleteEmailConnection: `vault_delete_secret` also appears in the provider-switch cleanup
+  //    further up, and a file-wide indexOf would be comparing two different functions.
+  const van = src.indexOf("export async function deleteEmailConnection");
+  assert.ok(van > 0, "deleteEmailConnection was renamed — this gate measures nothing");
+  const rest = src.slice(van);
+  const einde = rest.indexOf("\nexport ", 1);
+  const fnDelete = einde > 0 ? rest.slice(0, einde) : rest;
+  assert.ok(fnDelete.length > 300, "the disconnect window measures nothing");
+  const revokeAt = fnDelete.indexOf("revokeGoogleGrant(tokens.refreshToken)");
+  const vaultAt = fnDelete.indexOf("vault_delete_secret");
+  assert.ok(revokeAt > 0, "Ontkoppelen no longer tells Google the grant is over");
+  assert.ok(vaultAt > 0, "the Vault cleanup left this function — this gate measures nothing");
+  assert.ok(revokeAt < vaultAt,
+    "the revoke must read the token before the Vault secret is deleted; afterwards there is nothing left to revoke with");
+  assert.match(src, /oauth2\.googleapis\.com\/revoke/, "the endpoint itself");
+
+  // ── A failed revoke may never block the disconnect: the owner asked to be disconnected, and a
+  //    provider outage must not be able to refuse that.
+  const fn = src.slice(src.indexOf("export async function revokeGoogleGrant"),
+                       src.indexOf("export async function deleteEmailConnection"));
+  assert.ok(fn.length > 200, "revokeGoogleGrant moved — this window measures nothing");
+  assert.match(fn, /catch/, "an unreachable provider must not throw out of the disconnect");
+  assert.doesNotMatch(fn, /throw /, "…and must not rethrow either");
+
+  // ── Nothing in the file logs a token-endpoint response by value.
+  const fouten: string[] = [];
+  for (const m of src.matchAll(/console\.(?:log|warn|error)\([^\n]*\n?[^\n]*/g)) {
+    const regel = m[0];
+    if (/\brefreshData\b/.test(regel) && !/safeOAuthLog\(/.test(regel))
+      fouten.push("logs refreshData by value: " + regel.trim().slice(0, 80));
+    if (/body:\s*errBody/.test(regel))
+      fouten.push("logs a raw token-endpoint body: " + regel.trim().slice(0, 80));
+  }
+  assert.deepEqual(fouten, [], "a credential can reach the logs:\n  " + fouten.join("\n  "));
+
+  // ── And the redactor keeps the documented error fields, or the log stops being useful and the
+  //    next reader "fixes" it by printing everything again.
+  assert.match(src, /"error", "error_description"/,
+    "an allow-list that drops error/error_description makes the log worthless");
+});
+
 // ─── [MERK-KOP] The wordmark, and the one mail it may never appear on ─────────────────────────
 //
 // Not one mail this app sends carried a brand header: every one opened straight into a sentence,

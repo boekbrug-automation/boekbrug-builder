@@ -360,11 +360,54 @@ export async function saveEmailTokens(params: {
  * so "Ontkoppel + reconnect" is the supported way to force a FULL re-import
  * (e.g. after wiping test data). Dedup makes the re-import harmless.
  */
+/**
+ * [OAUTH-INTREKKEN] Tell Google the grant is over, before we forget the token that proves it.
+ *
+ * Deleting our copy is not the same as withdrawing consent. Until this call existed, an owner who
+ * pressed Ontkoppelen saw "disconnected" while the grant stayed live in their Google account: it
+ * still listed BoekBrug under third-party access, and any surviving copy of the refresh token —
+ * a backup, a log, a Vault export — still opened their mailbox. The privacy statement keeps these
+ * tokens only "tot je de koppeling verbreekt", and art. 7(3) AVG gives the owner the right to
+ * withdraw consent as easily as they gave it.
+ *
+ * Best-effort by design: a provider outage must never leave the owner unable to disconnect. The
+ * local deletion is what the owner asked for and it proceeds either way; this is the part we
+ * cannot retry later, because after the Vault secret is gone the token is unrecoverable.
+ *
+ * Microsoft is NOT here, and that is not an oversight: the identity platform implements no
+ * RFC 7009 revocation endpoint for a third-party app, so there is no call to make. An Outlook
+ * owner removes the grant at myaccount.microsoft.com, and the interface should say so.
+ */
+export async function revokeGoogleGrant(refreshToken: string): Promise<boolean> {
+  if (!refreshToken) return false
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: refreshToken }).toString(),
+    })
+    // 200 = revoked. 400 = already invalid, which is the same end state and not a failure.
+    if (res.ok || res.status === 400) return true
+    console.warn('[OAUTH-INTREKKEN] Google refused the revoke', { status: res.status })
+    return false
+  } catch (err) {
+    console.warn('[OAUTH-INTREKKEN] Could not reach Google to revoke', { err: String(err) })
+    return false
+  }
+}
+
 export async function deleteEmailConnection(
   userId: string,
   provider: 'gmail' | 'outlook' = 'gmail'
 ): Promise<{ success: boolean }> {
   const supabase = createPipelineClient()
+
+  // Read the token BEFORE the Vault secret is destroyed — afterwards there is nothing left to
+  // revoke with, and the grant would outlive the disconnect for good.
+  if (provider === 'gmail') {
+    const tokens = await getEmailTokens(userId, 'gmail')
+    if (tokens?.refreshToken) await revokeGoogleGrant(tokens.refreshToken)
+  }
 
   const { data: conn } = await supabase
     .from('email_connections')
@@ -500,7 +543,7 @@ async function refreshAccessToken(userId: string): Promise<string | null> {
         userId,
         provider: tokens.provider,
         status: response.status,
-        body: errBody,
+        ...safeOAuthLog(errBody),
       })
       // [EMAIL-HEALTH] 400/401 = the grant is definitively dead (invalid_grant / revoked /
       // expired refresh_token) — flag it so the owner is told, not silently stuck. A 429/5xx is
@@ -518,7 +561,7 @@ async function refreshAccessToken(userId: string): Promise<string | null> {
   }
 
   if (!refreshData.access_token) {
-    console.error('[BOEK-011] Refresh returned no access_token', { userId, refreshData })
+    console.error('[BOEK-011] Refresh returned no access_token', { userId, ...safeOAuthLog(refreshData) })
     // A 200 with no access_token means the provider rejected the grant without an HTTP error —
     // treat it as definitively dead so the connection doesn't rot green.
     await markEmailNeedsReauth(userId, tokens.provider, 'refresh_no_access_token')
@@ -2045,6 +2088,37 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 // manual upload path (email/upload/route.ts caps at 10 MB). Without it, anyone who
 // emails the owner a large PDF causes an unbounded Storage write + a Claude call —
 // storage-growth / AI-spend DoS from untrusted mail.
+/**
+ * [OAUTH-GEEN-TOKEN-IN-LOG] What may be said out loud about a failed token call.
+ *
+ * The refresh path logged the provider's whole response — `{ userId, refreshData }` on a 200 with
+ * no access_token, and the raw body on an HTTP error. A token endpoint answers with credentials:
+ * Microsoft returns a NEW refresh_token on every refresh, Google returns one when it rotates, and
+ * both can return an id_token. A response that merely lacks `access_token` can still carry those,
+ * so the "nothing useful came back" branch was the one most likely to write a live credential into
+ * the logs — where it is retained, searchable, and readable by anyone with log access.
+ *
+ * OAuth errors are a documented, non-secret shape (RFC 6749 §5.2: error, error_description,
+ * error_uri). Those are what a reader needs to tell invalid_grant from a rate limit. Everything
+ * else is reported as the KEY NAMES only, which answers "what did it send back?" without printing
+ * the values.
+ */
+export function safeOAuthLog(body: unknown): Record<string, unknown> {
+  if (typeof body === "string") {
+    // An HTTP error body. Parse it if it is the documented JSON shape; otherwise say nothing more
+    // than its size — an unparseable body is exactly where a surprise payload would hide.
+    try { return safeOAuthLog(JSON.parse(body)) } catch { return { bodyBytes: body.length } }
+  }
+  if (!body || typeof body !== "object") return { body: typeof body }
+  const o = body as Record<string, unknown>
+  const uit: Record<string, unknown> = {}
+  for (const veld of ["error", "error_description", "error_uri", "error_codes", "correlation_id"]) {
+    if (typeof o[veld] === "string" || typeof o[veld] === "number") uit[veld] = o[veld]
+  }
+  uit.keys = Object.keys(o).sort()
+  return uit
+}
+
 const MAX_EMAIL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 /**
