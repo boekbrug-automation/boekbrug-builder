@@ -86,6 +86,10 @@ export const PUBLIC_PATHS = [
   // maakt. Veilig tegen de prefix-regel — het portaal zelf heet /dashboard/accountant en begint
   // dus niet met deze string.
   "/voor-boekhouders",
+  // [KANTOORGIDS] De gids van kantoren die met BoekBrug werken. Publiek omdat hij voor
+  // ondernemers ZONDER account is — dat is de hele reden dat hij bestaat. Geen conflict met de
+  // prefixregel: /voor-boekhouders begint niet met /boekhouders.
+  "/boekhouders",
   // [SEGMENT-VOORDEUR] Dezelfde reden, drie keer: dit zijn voordeuren voor iemand die nog geen
   // account heeft. Ze stonden in sitemap.xml en stuurden élke bezoeker én élke crawler naar
   // /login — de rooktest ving dat met drie keer "→ 307", en dat is precies waarvoor hij bestaat.

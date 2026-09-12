@@ -35,6 +35,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     // decides for its whole book — a single office with fifty ZZP clients is fifty entrepreneurs,
     // which no entrepreneur-facing page can match per visit.
     { url: `${SITE_URL}/voor-boekhouders`, lastModified, changeFrequency: 'monthly', priority: 0.8 },
+    { url: `${SITE_URL}/boekhouders`, lastModified, changeFrequency: 'weekly', priority: 0.7 },
     // [SEGMENT-VOORDEUR] Dezelfde app, drie deuren. Volgorde naar hoeveel papier per maand op de
     // lezer afkomt — zie de kop van src/lib/segment-pages.ts.
     { url: `${SITE_URL}/voor-winkel`, lastModified, changeFrequency: 'monthly', priority: 0.8 },

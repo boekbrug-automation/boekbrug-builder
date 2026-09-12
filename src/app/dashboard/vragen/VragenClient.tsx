@@ -106,6 +106,14 @@ export default function VragenClient({
                 ? t('vr.geen.metBoekhouder')
                 : t('vr.geen.zonderBoekhouder')}
             </div>
+            {/* [KANTOORGIDS] Alleen zonder boekhouder: wie er al een heeft, hoeft geen lijst. */}
+            {!accountantId && (
+              <div style={{ fontSize: 13.5, marginTop: 8, lineHeight: 1.55 }}>
+                <a href="/boekhouders" style={{ color: '#0B5345', fontWeight: 600 }}>
+                  {t('vr.geen.zoekBoekhouder')}
+                </a>
+              </div>
+            )}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

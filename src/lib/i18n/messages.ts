@@ -116,6 +116,7 @@ export const MESSAGES = {
   'chrome.factuurNamens': { nl: 'Factuur namens klant', ar: 'فاتورة نيابةً عن عميل', en: 'Invoice on behalf of a client' },
   'chrome.openstaand': { nl: 'Openstaande facturen', ar: 'الفواتير غير المسدَّدة', en: 'Outstanding invoices' },
   'chrome.opvragen': { nl: 'Stukken opvragen', ar: 'طلب المستندات', en: 'Request documents' },
+  'chrome.kantoorgids': { nl: 'Kantoorgids', ar: 'دليل المكاتب', en: 'Office directory' },
   'chrome.bevestigen': { nl: 'Bevestigen', ar: 'تأكيد', en: 'Confirm' },
   // "Mijn", omdat de boekhouder hiernaast ook de facturen van zijn KLANTEN ziet.
   'chrome.mijnFacturen': { nl: 'Mijn facturen', ar: 'فواتيري', en: 'My invoices' },
@@ -11225,6 +11226,14 @@ export const MESSAGES = {
     ar: 'لم تربط محاسباً بعد. حين يحدث ذلك ستصل أسئلته إلى هنا.',
     en: 'You have not linked an accountant yet. Once you do, their questions arrive here.',
   },
+  // [KANTOORGIDS] De andere richting van [GEEN-PROVISIE]: een ondernemer zonder boekhouder is
+  // precies de lead waar een kantoor anders voor betaalt, en dit is het scherm waarop hij zegt
+  // dat hij er geen heeft. Eén zin, één link — geen verkooppraatje op een leeg scherm.
+  'vr.geen.zoekBoekhouder': {
+    nl: 'Zoek je er een? Bekijk de kantoren die met BoekBrug werken.',
+    ar: 'تبحث عن محاسب؟ اطّلع على المكاتب التي تعمل مع BoekBrug.',
+    en: 'Looking for one? See the offices that work with BoekBrug.',
+  },
   'vr.geenKoppeling': {
     nl: 'Er is op dit moment geen boekhouder aan je account gekoppeld, dus we kunnen je antwoord nergens naartoe sturen.',
     ar: 'لا يوجد حالياً محاسب مرتبط بحسابك، لذا لا يمكننا إرسال جوابك إلى أي جهة.',
@@ -14793,6 +14802,8 @@ export const MESSAGES = {
   'bh.home.tegel.factureren': { nl: 'Factureren', en: 'Invoicing', ar: 'إصدار فاتورة' },
   'bh.home.tegel.openstaand': { nl: 'Openstaand', en: 'Outstanding', ar: 'مستحق' },
   'bh.home.tegel.opvragen': { nl: 'Opvragen', en: 'Request', ar: 'طلب المستندات' },
+  // [KANTOORGIDS] De tegel naar de eigen vermelding. Kort, want het is een naam en geen zin.
+  'bh.home.tegel.gids': { nl: 'Kantoorgids', en: 'Office directory', ar: 'دليل المكاتب' },
   'bh.home.tegel.bevestigen': { nl: 'Bevestigen', en: 'Confirm', ar: 'تأكيد' },
   'bh.home.tegel.bestanden': { nl: 'Bestanden', en: 'Files', ar: 'الملفات' },
   'bh.home.tegel.instellingen': { nl: 'Instellingen', en: 'Settings', ar: 'الإعدادات' },

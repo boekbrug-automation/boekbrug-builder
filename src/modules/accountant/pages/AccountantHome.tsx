@@ -604,6 +604,10 @@ export default function AccountantHome({ profile, overview, workQueues, clients,
             <ToolTile icon="forward_to_inbox" tint="#1967D2" label={t('bh.home.tegel.opvragen')} onClick={() => router.push('/dashboard/accountant/opvragen')} />
             {/* [BEVESTIGEN] De stukken die het kwartaal van een klant tegenhouden. */}
             <ToolTile icon="fact_check" tint="#188038" label={t('bh.home.tegel.bevestigen')} onClick={() => router.push('/dashboard/accountant/bevestigen')} />
+            {/* [KANTOORGIDS] Ondernemers zonder boekhouder krijgen de gids te zien; hier zet het
+                kantoor zichzelf erin. Altijd zichtbaar, ook als er nog niets is ingevuld — een
+                tegel die pas verschijnt als je hem al gebruikt, vertelt niemand dat hij bestaat. */}
+            <ToolTile icon="storefront" tint="#0B8043" label={t('bh.home.tegel.gids')} onClick={() => router.push('/dashboard/accountant/gids')} />
             <ToolTile icon="folder_open" tint="#5F6368" label={t('bh.home.tegel.bestanden')} onClick={() => router.push('/dashboard/bestanden')} />
             <ToolTile icon="settings" tint="#7B1FA2" label={t('bh.home.tegel.instellingen')} onClick={() => router.push('/dashboard/settings')} />
           </div>

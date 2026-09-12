@@ -10,6 +10,7 @@
 //   · invoices.created_by        — same migration (uuid, nullable, FK → profiles.id)
 //   · clients.created_by         — same migration
 //   · invoice_lines.unit         — supabase/migrations/invoice_line_unit.sql (text, nullable)
+//   · accountant_directory       — supabase/migrations/accountant_directory.sql ([KANTOORGIDS])
 //   · bank_connections           — supabase/migrations/bank_connections.sql
 //   · bank_connection_accounts   — same migration (incl. identification_hash, [EB-ACCOUNT-IDENTITY])
 //   · bank_transactions.source        — supabase/migrations/bank_tx_source_identity.sql (text, nullable)
@@ -54,6 +55,53 @@ export type Database = {
   }
   public: {
     Tables: {
+      accountant_directory: {
+        Row: {
+          accountant_id: string
+          accepting_clients: boolean
+          city: string
+          contact_email: string
+          created_at: string
+          office_name: string
+          published: boolean
+          specialisms: string[]
+          updated_at: string
+          website: string | null
+        }
+        Insert: {
+          accountant_id: string
+          accepting_clients?: boolean
+          city?: string
+          contact_email?: string
+          created_at?: string
+          office_name?: string
+          published?: boolean
+          specialisms?: string[]
+          updated_at?: string
+          website?: string | null
+        }
+        Update: {
+          accountant_id?: string
+          accepting_clients?: boolean
+          city?: string
+          contact_email?: string
+          created_at?: string
+          office_name?: string
+          published?: boolean
+          specialisms?: string[]
+          updated_at?: string
+          website?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "accountant_directory_accountant_id_fkey"
+            columns: ["accountant_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       accountant_clients: {
         Row: {
           accountant_id: string | null

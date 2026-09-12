@@ -47,6 +47,8 @@ import { decide as decideAutonomy } from "./autonomy-scope";
 import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutesFor } from "./work-done";
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
 import { OFFICE_GETS as OFFICE_GETS_FOR, unavailableBenefits as unavailableBenefitsFor } from "./office-offer";
+import { normaliseEntry as normaliseEntryFor, entryProblems as entryProblemsFor } from "./accountant-directory";
+import { PUBLIC_PATHS as PUBLIC_PATHS_FOR } from "./public-paths";
 import { PLUS_PRICE_EUR } from "./fair-use";
 import { round2 } from "./invoice-totals";
 // [SEGMENT-VOORDEUR] De drie deuren, en alles wat ze beloven.
@@ -32891,4 +32893,69 @@ test("[GEEN-PROVISIE] no commission can enter the product without arguing with t
   }
   assert.deepStrictEqual(migraties, [],
     "a migration adds a commission column — a rate in the database outlives every page that denies it");
+});
+
+
+// ─── [KANTOORGIDS] The referral that runs the other way, and stays unbuyable ───────────────────
+//
+// [GEEN-PROVISIE] settled that BoekBrug pays no office for bringing a client. This is why that is
+// not a bare "no": an owner who signs up without a boekhouder is a lead an office would otherwise
+// have paid for, and /boekhouders hands those to the offices that work with us. A referral running
+// both ways is worth more to an office than a share of a subscription, and it costs nothing out of
+// what a client pays.
+//
+// Three things must hold, and each of them fails silently:
+//
+//   1. THE ORDER IS NOT FOR SALE. sortForOwner orders by availability then name, and DirectoryEntry
+//      has no field a price could enter through. The day the first three rows can be bought, this
+//      is an advertisement and the refusal to pay for recommendations is a technicality.
+//   2. PUBLISHED IS AN ACT. The default is off, in the type and in the migration. An accountant
+//      who finds a listing they never made does not file a complaint; they leave.
+//   3. THE PAGE IS REACHABLE WITHOUT A SESSION. It exists for the owner who has no account yet,
+//      so a route that the middleware sends to /login is a page that only its author ever sees.
+test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought into", () => {
+  const puur = code("src/lib/accountant-directory.ts");
+  const pagina = code("src/app/boekhouders/page.tsx");
+
+  // 1 — the order, and the absence of anything to rank by.
+  assert.match(puur, /export function sortForOwner/, "the one ordering is gone");
+  assert.match(pagina, /sortForOwner\(/, "the page sorts by itself instead of by the one rule");
+  const RANG = /\b(rank|ranking|score|tier|featured|sponsored|promoted|boost|priority|betaaldePositie|paid_position)\b/i;
+  assert.doesNotMatch(puur, RANG, "the directory grew something to rank offices by");
+  assert.doesNotMatch(pagina, RANG, "the page ranks offices by something the module does not know");
+  // And it cannot read a payment either: the entry the page renders has no such field.
+  const velden = Object.keys(
+    normaliseEntryFor({ accountantId: "x", officeName: "n", city: "c", contactEmail: "a@b.nl" }),
+  ).sort();
+  assert.deepStrictEqual(velden,
+    ["acceptingClients", "accountantId", "city", "contactEmail", "officeName", "specialisms", "website"],
+    "a directory entry gained a field — check it is not a rank, a score or a paid position");
+
+  // 2 — off by default, in the code and in the migration that outlives it.
+  assert.strictEqual(
+    normaliseEntryFor({ accountantId: "x" }).acceptingClients, false,
+    "a missing answer reads as 'ja, stuur maar' — an office is volunteered by silence");
+  const migratie = readFileSync("supabase/migrations/accountant_directory.sql", "utf8");
+  assert.match(migratie, /published\s+boolean\s+NOT NULL DEFAULT false/,
+    "the migration publishes a listing the office never turned on");
+  assert.match(migratie, /FOR SELECT TO anon, authenticated USING \(published\)/,
+    "the public read is no longer limited to published rows");
+  // A published row must be usable: a listing with no e-mail sends an owner nowhere and tells
+  // nobody. The database says so too, because the route is not the only way in.
+  assert.match(migratie, /accountant_directory_published_is_complete/,
+    "a half-filled listing can be published again");
+  assert.deepStrictEqual(
+    entryProblemsFor(normaliseEntryFor({ accountantId: "x", officeName: "n", city: "c", contactEmail: "" })).length > 0,
+    true, "a listing with no contact passes as publishable");
+
+  // 3 — reachable without a session, and findable.
+  assert.ok(PUBLIC_PATHS_FOR.includes("/boekhouders"),
+    "the gids is behind the login — the owner it was built for cannot reach it");
+  assert.match(code("src/app/sitemap.ts"), /\/boekhouders/, "the gids is not in the sitemap");
+
+  // The owner's side of the loop: the screen where he says he has no accountant offers the list.
+  const vragen = code("src/app/dashboard/vragen/VragenClient.tsx");
+  assert.match(vragen, /href="\/boekhouders"/, "the one screen that knows he has no boekhouder does not offer one");
+  assert.match(vragen, /!accountantId && \(/,
+    "the list is offered to owners who already have an accountant, which is noise on a done screen");
 });
