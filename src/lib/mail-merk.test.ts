@@ -38,6 +38,14 @@ test("a hostile base url cannot break out of the attribute", () => {
   assert.equal((kop.match(/href="/g) ?? []).length, 1, "exactly one href, and it is still one attribute");
 });
 
+test("the wordmark needs no base url of its own", () => {
+  // Eleven senders have no baseUrl in scope — they are answers to something the reader did, not
+  // cron output carrying a deploy origin. Without a default they would each hard-code the address,
+  // which is how a product comes to have two.
+  assert.equal(merkKop(), merkKop(MERK_URL));
+  assert.match(merkKop(), /href="https:\/\/boekbrug\.nl\/dashboard"/);
+});
+
 test("the footer says what the product is, and carries the caller's own line", () => {
   const voet = merkVoet(MERK_URL, "Je krijgt dit alleen op dagen dat er iets gebeurde.");
   assert.match(voet, /dagen dat er iets gebeurde/);

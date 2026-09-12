@@ -38,19 +38,6 @@ import { escapeHtml } from "./escape-html";
 export const MERK_BLAUW = "#1A73E8";
 
 /**
- * The header: the wordmark as a link home, and the blue rule under it.
- *
- * `baseUrl` is the absolute origin, because a mail has no origin of its own — a root-relative href
- * in an inbox resolves against the mail client, which is nowhere.
- */
-export function merkKop(baseUrl: string): string {
-  const home = `${escapeHtml(baseUrl)}/dashboard`;
-  return `
-      <a href="${home}" style="display: inline-block; text-decoration: none; color: ${MERK_BLAUW}; font-size: 20px; font-weight: 700; letter-spacing: -0.2px;">BoekBrug</a>
-      <div style="height: 3px; background: ${MERK_BLAUW}; border-radius: 2px; margin: 6px 0 18px; width: 44px;"></div>`;
-}
-
-/**
  * The public site, and what the sign-off points at.
  *
  * Not `/dashboard`, which is where the header goes: the footer also ends the invoice mail, and the
@@ -58,6 +45,19 @@ export function merkKop(baseUrl: string): string {
  * link — it is the product looking like it was not written for them.
  */
 export const MERK_URL = "https://boekbrug.nl";
+
+/**
+ * The header: the wordmark as a link home, and the blue rule under it.
+ *
+ * `baseUrl` is the absolute origin, because a mail has no origin of its own — a root-relative href
+ * in an inbox resolves against the mail client, which is nowhere.
+ */
+export function merkKop(baseUrl: string = MERK_URL): string {
+  const home = `${escapeHtml(baseUrl)}/dashboard`;
+  return `
+      <a href="${home}" style="display: inline-block; text-decoration: none; color: ${MERK_BLAUW}; font-size: 20px; font-weight: 700; letter-spacing: -0.2px;">BoekBrug</a>
+      <div style="height: 3px; background: ${MERK_BLAUW}; border-radius: 2px; margin: 6px 0 18px; width: 44px;"></div>`;
+}
 
 /**
  * [MERK-VOET] The sign-off under every mail this product sends, in the shape the invoice PDF

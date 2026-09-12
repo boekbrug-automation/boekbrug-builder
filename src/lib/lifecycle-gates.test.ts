@@ -30602,7 +30602,7 @@ test("[FACTUURSTAAT] the money decides what is paid, and the anonymous sets may 
 // appear on the invoice mail an owner sends their CUSTOMER — that message is the owner's, to their
 // customer, about their money, and our name at the top of it brands someone else's business
 // correspondence. [EIGEN-MARKER] drew the same line on the PDF.
-test("[MERK-KOP] the wordmark is text, links home, and stays off the customer's invoice mail", () => {
+test("[MERK-KOP] the wordmark is text, links home, and stays off every mail to a customer", () => {
   const merk = code("src/lib/mail-merk.ts");
   const digest = code("src/lib/ochtend-digest.ts");
 
@@ -30619,21 +30619,87 @@ test("[MERK-KOP] the wordmark is text, links home, and stays off the customer's 
   assert.match(digest, /\$\{merkKop\(input\.baseUrl\)\}/);
   assert.match(digest, /\$\{merkVoet\(input\.baseUrl, "/);
 
-  // ── THE BOUNDARY. The customer-facing invoice mail must not carry our header.
-  //    Checked over the whole mail surface rather than one file, because the next mail to a
-  //    customer will be written somewhere this test has never heard of.
+  // ── THE BOUNDARY, read off the mail itself rather than from a list of names.
+  //
+  // The version of this gate that shipped first named ONE sender. Its own comment said the check
+  // belonged on the whole surface "because the next mail to a customer will be written somewhere
+  // this test has never heard of" — and by the time the header reached the other eleven mails,
+  // three more customer-facing senders existed that it was not watching: the reminder, the offerte
+  // and the quarter package.
+  //
+  // So the rule is structural. [AFZENDERNAAM] already decides this: a mail that goes to a THIRD
+  // PARTY carries the owner's company name via customerMailFrom(), and a mail to our own user
+  // carries ours. That line is the audience, so that line decides the header.
   const klantBestanden = ["src/lib/email-body-invoice.ts", "src/lib/ubl-for-email.ts", "src/lib/mail-text.ts"];
   for (const f of klantBestanden) {
     assert.doesNotMatch(code(f), /merkKop\(/,
       `${f} reaches a customer — our wordmark would brand the owner's own correspondence`);
   }
-  // sendInvoiceToClient is the door that mails an invoice to a customer; it may not import it.
   const email = code("src/lib/email.ts");
-  const klantDeur = email.slice(email.indexOf("export async function sendInvoiceToClient"),
-                               email.indexOf("export async function sendMessageNotification"));
-  assert.ok(klantDeur.length > 200, "sendInvoiceToClient moved — this window measures nothing");
-  assert.doesNotMatch(klantDeur, /merkKop\(/,
-    "the invoice mail is the owner's message to their customer, not ours");
+  const grenzen = [...email.matchAll(/export async function (\w+)/g)];
+  assert.ok(grenzen.length > 10, "the senders moved — this gate measures nothing");
+  let klantMails = 0;
+  for (let i = 0; i < grenzen.length; i++) {
+    const van = grenzen[i].index!, tot = i + 1 < grenzen.length ? grenzen[i + 1].index! : email.length;
+    const blok = email.slice(van, tot);
+    if (!blok.includes("emails.send(")) continue;
+    if (!blok.includes("customerMailFrom(")) continue;
+    klantMails++;
+    assert.doesNotMatch(blok, /merkKop\(/,
+      `${grenzen[i][1]} writes to a third party under the owner's name — our wordmark at the top would read as if we sent it`);
+  }
+  assert.ok(klantMails >= 4,
+    `only ${klantMails} customer-facing senders found; customerMailFrom was renamed and this gate stopped watching`);
+
+  // And the other half: a mail BoekBrug sends to its OWN user wears the header. Without this the
+  // module drifts back to what it was — written for twelve mails, applied to one.
+  let eigenMails = 0;
+  for (let i = 0; i < grenzen.length; i++) {
+    const naam = grenzen[i][1];
+    const van = grenzen[i].index!, tot = i + 1 < grenzen.length ? grenzen[i + 1].index! : email.length;
+    const blok = email.slice(van, tot);
+    if (!blok.includes("emails.send(") || blok.includes("customerMailFrom(")) continue;
+    // Three deliberate exceptions, each for a stated reason: the operator alarm is a machine note,
+    // the feedback mail goes from us to us, and the morning digest is composed elsewhere and wears
+    // the header there.
+    if (["sendBeheerAlarm", "sendFeedbackNotification", "sendOchtendMail"].includes(naam)) {
+      assert.doesNotMatch(blok, /merkKop\(/, `${naam} is not post from a product — see mail-merk.ts`);
+      continue;
+    }
+    eigenMails++;
+    assert.match(blok, /merkKop\(\)/, `${naam} writes to our own user and opens straight into a sentence`);
+  }
+  assert.ok(eigenMails >= 11, `only ${eigenMails} owner-facing senders checked — a sender was renamed`);
+});
+
+// ─── [TRUST-DELIVERY] A failed mail is never silent ───────────────────────────────────────────
+//
+// deliverEmail() logs the failure with a label and, when the mail is not critical, reports it to
+// Sentry instead of throwing. Fifteen of the eighteen senders used it; three raised a bare Error
+// instead, so their failures reached no log line and no label — including the invoice mail, the one
+// message in this product whose non-delivery costs the owner money.
+//
+// critical: true still throws, which is what the invoice route depends on to mark email_failed. The
+// difference is that the throw is now also recorded.
+test("[TRUST-DELIVERY] every sender hands its result to deliverEmail, with a label", () => {
+  const email = code("src/lib/email.ts");
+  const grenzen = [...email.matchAll(/export async function (\w+)/g)];
+  assert.ok(grenzen.length > 10, "the senders moved — this gate measures nothing");
+  const stil: string[] = [];
+  let gecontroleerd = 0;
+  for (let i = 0; i < grenzen.length; i++) {
+    const van = grenzen[i].index!, tot = i + 1 < grenzen.length ? grenzen[i + 1].index! : email.length;
+    const blok = email.slice(van, tot);
+    if (!blok.includes("emails.send(")) continue;
+    gecontroleerd++;
+    if (!/deliverEmail\(__sendResult, \{ label: '[a-z-]+', critical: (true|false) \}\)/.test(blok))
+      stil.push(grenzen[i][1]);
+  }
+  assert.ok(gecontroleerd >= 18, `only ${gecontroleerd} senders found — the file was restructured`);
+  assert.deepEqual(stil, [], "these senders can fail without a log line:\n  " + stil.join("\n  "));
+  // No sender goes back to swallowing the reason in a bare Error.
+  assert.doesNotMatch(email, /throw new Error\(`Resend afgewezen/,
+    "a bare Error loses the label every other failure is findable by");
 });
 
 // ─── [MERK-VOET] One sign-off, and the two mails that must not carry it ───────────────────────
