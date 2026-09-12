@@ -131,7 +131,7 @@ hold-rate half. Each surfaces by name.
 | amount | text grounding · placement on the page · e-invoice · arithmetic | **held** |
 | btw | printed split · explicit-rate rule · arithmetic | **held** |
 | document type | four independent flags + tax-kind | **held** |
-| invoice number | placeholder detection · `verifyInvoiceNumber` (reported, no veto) | **held** on a placeholder |
+| invoice number | placeholder detection · `verifyInvoiceNumber` (stored, read by nothing) | **held** on a placeholder |
 | supplier | `vendor-grounding.ts` — is the name printed in the document's own text | **held** |
 | **date** | `verifyDate` — **exists, sees the error, and no gate asks it** | **auto-books** |
 
@@ -163,11 +163,19 @@ paper "Factuurdatum: 01-02-2026",  read 2026-02-01  →  found    (the correct r
 
 `ai.ts` stores that verdict as `_doccheck.date`. And then it stops:
 
-| stored verdict | has a reader | asked by the auto-booking door |
-|---|---|---|
-| `_doccheck.total` | `placementOf()` | yes — `placementBlocksAutoBooking` |
-| `_doccheck.btwContradiction` | `btwContradictionOf()` | yes |
-| `_doccheck.date` | **none** | **no** |
+| stored verdict | has a reader | reaches the owner | asked by the auto-booking door |
+|---|---|---|---|
+| `_doccheck.total` | `placementOf()` | yes | yes — `placementBlocksAutoBooking` |
+| `_doccheck.btwContradiction` | `btwContradictionOf()` | yes | yes |
+| `_doccheck.date` | none | yes — a sentence, no flag | **no** |
+| `_doccheck.invoiceNumber` | none | **no** | no |
+| `_doccheck.btw` | none | **no** | no |
+
+The bottom two rows are computed on every import and read by nobody at all — not the gate, not the
+screen. That is worth knowing rather than fixing on the spot: measured over the 86 invoices carrying
+a `_doccheck`, neither has ever returned `absent` (56 `found`/`found`, 25 `unreadable`/`unreadable`,
+5 `found`/`unreadable`). They have never once disagreed with the reader, so wiring them up today
+would be free and would catch nothing. The date is the row where the verdict and the outcome differ.
 
 `import-health.ts` pushes a sentence for the owner and sets no flag, so `shouldAutoAdvanceInvoice`
 never sees it. The gap is not a missing check — it is a check that reaches the screen and not the
