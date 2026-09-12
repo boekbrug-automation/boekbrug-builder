@@ -109,6 +109,9 @@ const STATIC_TITLES = new Map<string, MessageKey>([
   ["/dashboard/accountant/bevestigen", "chrome.bevestigen"],
   // [KANTOORGIDS] De eigen vermelding in de gids die ondernemers zonder boekhouder te zien krijgen.
   ["/dashboard/accountant/gids", "chrome.kantoorgids"],
+  // [CONTROL] De commerciële console. Alleen zichtbaar voor de id's in CONTROL_USER_IDS; voor
+  // iedereen anders bestaat de route niet, maar de titel hoort er te zijn voor wie hem wél opent.
+  ["/dashboard/control", "chrome.control"],
   // HAS-ACTIONS pages: the shared bar gives back + title; the page keeps its own
   // search/filter/sort controls as a secondary sticky toolbar offset below it.
   ["/dashboard/facturen", "chrome.mijnFacturen"],

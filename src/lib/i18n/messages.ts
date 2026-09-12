@@ -117,6 +117,7 @@ export const MESSAGES = {
   'chrome.openstaand': { nl: 'Openstaande facturen', ar: 'الفواتير غير المسدَّدة', en: 'Outstanding invoices' },
   'chrome.opvragen': { nl: 'Stukken opvragen', ar: 'طلب المستندات', en: 'Request documents' },
   'chrome.kantoorgids': { nl: 'Kantoorgids', ar: 'دليل المكاتب', en: 'Office directory' },
+  'chrome.control': { nl: 'Control Center', ar: 'مركز التحكم', en: 'Control Center' },
   'chrome.bevestigen': { nl: 'Bevestigen', ar: 'تأكيد', en: 'Confirm' },
   // "Mijn", omdat de boekhouder hiernaast ook de facturen van zijn KLANTEN ziet.
   'chrome.mijnFacturen': { nl: 'Mijn facturen', ar: 'فواتيري', en: 'My invoices' },

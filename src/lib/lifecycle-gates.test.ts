@@ -56,6 +56,8 @@ import {
 import { euVatShape as euVatShapeFor, isOtherEuCountry as isOtherEuCountryFor } from "./eu-vat-format";
 import { parseViesAnswer as parseViesAnswerFor } from "./vies-parse";
 import { parseKvkProfile as parseKvkProfileFor } from "./kvk-parse";
+import { mayOpenControl as mayOpenControlFor } from "./control-access";
+import { buildControlOverview as buildControlOverviewFor } from "./control-overview";
 import {
   normaliseAddress as normaliseAddressFor, compareToRegister as compareToRegisterFor,
   mergeAccepted as mergeAcceptedFor,
@@ -25497,6 +25499,11 @@ test("[DEUR] every dashboard screen is reachable from somewhere in the app", () 
    */
   const EXEMPT_DOORLESS = new Map([
     ["/dashboard/beheer", "operator-only behind notFound() — a link would announce it exists"],
+    // [CONTROL] Same reasoning, same shape: the commercial console answers notFound() for
+    // everyone outside CONTROL_USER_IDS, so a tile would tell every owner that a screen listing
+    // every account in the product exists and that they are not allowed on it. It is reached by
+    // typing the path, by the person who set the variable.
+    ["/dashboard/control", "console behind notFound() — a link would announce it exists"],
   ]);
 
   const doorless: string[] = [];
@@ -33680,4 +33687,58 @@ test("[KVK-OPTIONEEL] a missing key is a normal state, and a bad answer is never
   }, "12345678");
   assert.strictEqual(metBeide.reading, "found");
   if (metBeide.reading === "found") assert.strictEqual(metBeide.company.address, "Tilburgseweg 42");
+});
+
+
+// ─── [CONTROL] The console reads, and its door is not in the database ─────────────────────────
+//
+// One place to see who is in the product and what they have: accounts by plan, offices, grants
+// running. Two properties decide whether it is safe, and both are easy to lose in an edit that
+// looks like an improvement.
+//
+//   1. IT ONLY READS. No button on it changes anything — not yet, and never for the books
+//      ([GEEN-ACHTERDEUR] holds the second half). Starting read-only is not timidity: a console
+//      that begins with buttons gets the buttons somebody imagined, not the ones that turned out
+//      to be needed.
+//   2. ITS DOOR IS NOT A ROLE. `profiles.role` is chosen by the person signing up — that is how
+//      the accountant portal works, and it is fine there because the portal grants nothing but
+//      wider limits. "See every account in the product" must not be reachable by writing a word
+//      into your own row, so membership lives in an environment variable that only the person
+//      with the Vercel project can set. Unset means NOBODY, and the page then does not exist.
+test("[CONTROL] the console reads only, and its door cannot be opened from the database", () => {
+  const pagina = code("src/app/dashboard/control/page.tsx");
+  const scherm = code("src/app/dashboard/control/ControlScherm.tsx");
+
+  // 1 — no writes, anywhere on the surface.
+  for (const [naam, bron] of [["page", pagina], ["scherm", scherm]] as const) {
+    assert.doesNotMatch(bron, /\.(insert|update|upsert|delete)\s*\(/,
+      `the console ${naam} writes — it is a reading surface, and the first write is where that stops`);
+  }
+
+  // 2 — the door. A role check here would be the whole console behind a self-chosen word.
+  assert.match(pagina, /mayOpenControl\(user\?\.id, process\.env\.CONTROL_USER_IDS\)/,
+    "the console door no longer reads the environment allowlist");
+  assert.doesNotMatch(pagina, /role === ['"]admin['"]|role === ['"]owner['"]/,
+    "the console is gated on a role — profiles.role is chosen by the person signing up");
+  assert.match(pagina, /notFound\(\)/,
+    "a refused visitor gets something other than notFound — an admin console should not announce itself");
+
+  // And the rule behind it, exercised: unset means nobody, in every shape of unset.
+  for (const leeg of [undefined, null, "", "   ", ","]) {
+    assert.strictEqual(mayOpenControlFor("ac22189e-7052-4c48-b4ec-90947cf92ecc", leeg as string), false,
+      `an unset list (${JSON.stringify(leeg)}) let someone in — "no list, so allow everyone" is how ` +
+        "an internal console ends up open on a Sunday");
+  }
+  assert.strictEqual(mayOpenControlFor(undefined, "abc"), false, "a logged-out request matched the list");
+  assert.strictEqual(mayOpenControlFor("abc", "abc,def"), true);
+
+  // 3 — no invented revenue. The obvious next line is paying × price, and it would be wrong in
+  // both directions on the day it is printed: a grace period is not revenue, a cancellation still
+  // counts, and Stripe knows about tax and failed collections that this code does not.
+  const overzicht = buildControlOverviewFor([], Date.parse("2026-09-12T12:00:00Z"));
+  assert.deepStrictEqual(Object.keys(overzicht.counts).sort(),
+    ["accountants", "free", "granted", "paying", "total"],
+    "the console grew a computed figure — if it is money, it comes from Stripe or not at all");
+  assert.doesNotMatch(scherm, /PLUS_PRICE_EUR|mrr|MRR/,
+    "the console screen reaches for a price — that number is Stripe's, not ours to multiply");
 });
