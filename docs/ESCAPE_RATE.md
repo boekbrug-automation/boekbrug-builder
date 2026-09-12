@@ -8,7 +8,7 @@ So the release gate is two numbers, not one:
 
 | metric | definition | target |
 |---|---|---|
-| **escape rate** | a wrong value that reached the ledger with no human in the loop | 0 on amount, btw, date |
+| **escape rate** | a wrong value that reached the ledger with no human in the loop | 0 on amount, btw, type, supplier — the date is open, see below |
 | **hold rate** | a correct value that was held for review anyway | measured, not minimised to zero |
 
 A hold is an automation cost. An escape is an accounting error. They are not the same failure and
@@ -115,39 +115,117 @@ Measuring the reader still needs the corpus. Both are real work; only one is blo
 
 ### Built: `src/lib/escape-rate.test.ts`
 
-Sixteen known-wrong reads, phrased as the signals the pipeline actually carries, handed to the real
-`shouldAutoAdvanceInvoice`. All sixteen are held. The clean invoice still advances — asserted
+Seventeen known-wrong reads, phrased as the signals the pipeline actually carries, handed to the
+real `shouldAutoAdvanceInvoice`. All seventeen are held. The clean invoice still advances — asserted
 separately, because a gate that refuses everything has an escape rate of zero and is worthless.
 
 Negative-controlled: removing the zero-btw veto lets the silently-zeroed voorbelasting through,
-removing the grounding veto lets a total the document never contained through, and a
-refuse-everything gate fails the hold-rate half. Each surfaces by name.
+removing the grounding veto lets a total the document never contained through, removing the
+vendor-grounding veto lets the BALKIP case through, and a refuse-everything gate fails the
+hold-rate half. Each surfaces by name.
 
-### The coverage map, and it is not all green
+### The coverage map
 
 | critical field | witnesses outside the reader | a confidently-wrong read |
 |---|---|---|
 | amount | text grounding · placement on the page · e-invoice · arithmetic | **held** |
 | btw | printed split · explicit-rate rule · arithmetic | **held** |
 | document type | four independent flags + tax-kind | **held** |
-| invoice number | placeholder detection | **held** |
-| **date** | **none** — only the reader's own confidence | **auto-books** |
-| **supplier** | **none** — only the reader's own confidence | **auto-books** |
+| invoice number | placeholder detection · `verifyInvoiceNumber` (stored, read by nothing) | **held** on a placeholder |
+| supplier | `vendor-grounding.ts` — is the name printed in the document's own text | **held** |
+| **date** | `verifyDate` — **exists, sees the error, and no gate asks it** | **auto-books** |
 
-The money field has three witnesses from outside the reader. The date and the supplier have none:
-they are checked against the reader's confidence in itself, and a reader that turns 01-02-2026 into
-02-01-2026 is not unsure — it is confident and wrong. Nothing downstream contradicts it either,
-because no amount changes.
+### Correction to the first version of this map
 
-A wrong date moves the cost and its voorbelasting into the wrong quarter, which surfaces as a
-correction to an aangifte that was already filed. A wrong supplier lands it on the wrong crediteur.
+Published on 12 September 2026 and wrong in both of its red rows. Re-checked against the code the
+same day:
 
-Both gaps are **pinned by a test that asserts they currently escape**, not asserted away — so they
-appear in the coverage map instead of being found by an accountant. When a witness is added, that
-test goes red and says so.
+- **The supplier was never uncorroborated.** `src/lib/vendor-grounding.ts` asks whether the name
+  the reader returned appears in the document's own characters, `ai.ts` stores the verdict as
+  `field_confidence._vendorGrounding`, and `import-health.ts` turns `'absent'` into `flags.vendor`,
+  which holds the invoice. Verified by handing that exact blob to the real decision:
+  `_vendorGrounding.verdict = 'absent'` → `advance: false, reason: needs_review`. The case now sits
+  in `MOETEN_WACHTEN` and is negative-controlled.
+- **The date was never uncorroborated either** — and this is the more useful correction, because
+  the remaining gap turns out to be a different and much smaller one.
 
-**What a date witness would look like**, by analogy with the amount: the same three questions.
-Is the date literally printed in the document's text? Is it where a date is printed (labelled
-`factuurdatum`, not a delivery or payment-term date)? Does the supplier's e-invoice agree? The
-machinery for all three already exists for the total — it is the questions that were never asked
-of the date.
+### The date: a witness whose testimony never reaches the gate
+
+`document-verify.ts::verifyDate` compares the stored date against every form a document might print
+it in, and it **catches the day/month swap** — the classic silent date error, where 1 February is
+read as 2 January: a valid date, a confident reader, and no amount changes, so nothing else in the
+app can contradict it. Verified against the real function:
+
+```
+paper "Factuurdatum: 01-02-2026",  read 2026-01-02  →  absent   (the swap, seen)
+paper "Factuurdatum: 01-02-2026",  read 2026-02-01  →  found    (the correct read, not flagged)
+```
+
+`ai.ts` stores that verdict as `_doccheck.date`. And then it stops:
+
+| stored verdict | has a reader | reaches the owner | asked by the auto-booking door |
+|---|---|---|---|
+| `_doccheck.total` | `placementOf()` | yes | yes — `placementBlocksAutoBooking` |
+| `_doccheck.btwContradiction` | `btwContradictionOf()` | yes | yes |
+| `_doccheck.date` | none | yes — a sentence, no flag | **no** |
+| `_doccheck.invoiceNumber` | none | **no** | no |
+| `_doccheck.btw` | none | **no** | no |
+
+The bottom two rows are computed on every import and read by nobody at all — not the gate, not the
+screen. That is worth knowing rather than fixing on the spot: measured over the 86 invoices carrying
+a `_doccheck`, neither has ever returned `absent` (56 `found`/`found`, 25 `unreadable`/`unreadable`,
+5 `found`/`unreadable`). They have never once disagreed with the reader, so wiring them up today
+would be free and would catch nothing. The date is the row where the verdict and the outcome differ.
+
+`import-health.ts` pushes a sentence for the owner and sets no flag, so `shouldAutoAdvanceInvoice`
+never sees it. The gap is not a missing check — it is a check that reaches the screen and not the
+gate, which is a much cheaper thing to close.
+
+### Why it was not simply wired up on the spot
+
+Because the veto would have been wrong every time it fired. Measured on the production database:
+
+```sql
+select coalesce(field_confidence->'_doccheck'->>'date', '(no _doccheck)') as verdict,
+       count(*) as rows,
+       count(*) filter (where status = 'received') as booked
+from invoices where direction = 'incoming' group by 1 order by 2 desc;
+```
+
+```
+(no _doccheck) ... 522      found ... 54      unreadable ... 25      absent ... 7
+```
+
+All **seven** `absent` rows are US SaaS invoices — Anthropic, Vercel, Eleven Labs, Supabase — and
+every one of them carries the same fingerprint: `total: anchored`, `invoiceNumber: found`,
+`date: absent`. The text layer was read perfectly; only the date FORM was unmatched, because
+`MONTHS_NL` held Dutch alone while `TOTAL_WORDS` two hundred lines above it had carried English and
+German from the start.
+
+So on the day the map was drawn, promoting `date === 'absent'` to a veto would have held **seven
+correct invoices and caught zero wrong ones** — precisely the "queue full of correct invoices" that
+`documentCheckBlocks` predicted in its own comment when it chose to report and not block. That
+comment was right about the mechanism and wrong about the cause: the unpredictable format was not
+exotic, it was every American software bill the owner receives.
+
+Seven owners were also shown *"de factuurdatum staat niet zo op het document"* on an invoice whose
+date was right. Those seven rows keep their stored verdict — the document text is not retained, so
+it cannot be re-run from the database.
+
+### What was done, and the condition for closing the gap
+
+`verifyDate` now reads the languages the module already admitted it receives: English and German
+month names, the `August 13, 2026` order that no previous form produced, and the German ordinal
+`2. März 2026`. Two decisions inside it are deliberate and should not be re-opened casually:
+
+- **Month-first NUMERIC is accepted only when the day is above 12.** `8/13/2026` has exactly one
+  reading, so matching it is free; `01-02-2026` has two, and accepting the American one would throw
+  away the single most valuable thing this witness does. Above 12 a swap is impossible; at or below
+  it, refusing to match is what keeps the swap visible. `[DOCCHECK-VOLGORDE]` asserts both halves.
+- **Short month names are listed, not sliced.** Slicing the Dutch name to three letters worked for
+  nine months by coincidence and failed silently on maart/March, mei/May and oktober/October.
+
+The veto itself waits on evidence rather than on argument. **Re-run the query above once new
+invoices have flowed through.** When `absent` rows are no longer dominated by correct invoices,
+`_doccheck.date` gets a reader beside `placementOf` and a veto beside it, and the pin in
+`escape-rate.test.ts` goes red and says so.

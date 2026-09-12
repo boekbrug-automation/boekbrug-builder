@@ -16,6 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { shouldAutoAdvanceInvoice, type AutoAdvanceSignals } from "./auto-advance";
+import { verifyDate } from "./document-verify";
 
 const clean = (over: Partial<AutoAdvanceSignals> = {}): AutoAdvanceSignals => ({
   is_invoice: true, is_statement: false, is_reminder: false, is_credit_note: false,
@@ -64,6 +65,15 @@ const MOETEN_WACHTEN: Case[] = [
     signals: clean({ health: h({ invoice_number: "EMAIL-1717000000000" }) }) },
   { veld: "supplier", naam: "the reader itself is unsure of the vendor",
     signals: clean({ health: h({ field_confidence: { vendor: 0.30, invoice_number: 0.97, invoice_date: 0.99, amount: 0.96 } }) }) },
+  // The vendor's OUTSIDE witness, and the reason this row exists: the reader is fully confident and
+  // the document's own text does not contain the name it returned. That is the BALKIP case —
+  // an invoice from one company booked under another, every amount read correctly — and
+  // vendor-grounding.ts is what sees it.
+  { veld: "supplier", naam: "a confident vendor name that is nowhere in the document's text",
+    signals: clean({ health: h({ field_confidence: {
+      vendor: 0.98, invoice_number: 0.97, invoice_date: 0.99, amount: 0.96,
+      _vendorGrounding: { verdict: "absent", name: "GROOTHANDEL M.H. BAL V.O.F." },
+    } }) }) },
   // ── consent ──────────────────────────────────────────────────────────────────────────────────
   { veld: "duplicate", naam: "a duplicate the owner forced past the warning",
     signals: clean({ forcedDuplicate: true }) },
@@ -85,34 +95,63 @@ test("[ESCAPE-RATE] the gate still lets a clean invoice through — a hold-every
   assert.equal(d.advance, true, "a clean, grounded, arithmetic-consistent invoice must auto-book");
 });
 
-// ── THE COVERAGE MAP, and it is not all green ───────────────────────────────────────────────────
+// ── THE COVERAGE MAP, and the one square that is genuinely empty ────────────────────────────────
 //
-// The money field has THREE witnesses from outside the reader: is the number in the document's
-// text (totalGrounding), is it where a total is printed (totalPlacement), and does the supplier's
-// own structured data agree (eInvoiceContradicts). The date and the supplier have NONE. They are
-// checked only against the reader's own confidence in itself — and a reader that misreads
-// 01-02-2026 as 02-01-2026 is not unsure, it is confident and wrong.
+// An earlier version of this file said the date and the supplier had NO witness outside the reader.
+// Both halves were wrong, and re-checking them is what produced the finding below.
 //
-// A wrong date does not change any amount, so nothing downstream contradicts it: it moves the cost
-// and its voorbelasting into the wrong quarter, which surfaces as a correction to an aangifte that
-// was already filed. This test PINS that gap rather than asserting it away, so it shows up in the
-// coverage map instead of being discovered by an accountant.
-test("[ESCAPE-RATE] a confidently-wrong date has no outside witness — documented gap", () => {
-  const confidentlyWrongDate = clean({
-    // Everything the gate can see says "excellent read". Only the date is wrong, and the reader
-    // does not know it: day and month swapped, still a valid date, high self-confidence.
-    health: h({ invoice_date: "2026-10-05" }),   // the document says 05-10; this books October
-  });
-  const d = shouldAutoAdvanceInvoice(confidentlyWrongDate);
-  assert.equal(d.advance, true,
-    "if this now HOLDS, an outside witness for the date was added — update docs/ESCAPE_RATE.md and delete this pin");
-  assert.equal(d.reason, "clean_high_confidence");
+//   · THE SUPPLIER HAS ONE, AND IT HOLDS.  vendor-grounding.ts asks whether the name the reader
+//     returned is printed in the document's own text; import-health.ts turns an 'absent' verdict
+//     into flags.vendor, and the invoice waits. That case is asserted in MOETEN_WACHTEN above,
+//     where it belongs — not pinned here as a gap.
+//
+//   · THE DATE HAS ONE TOO, AND NOTHING LISTENS.  document-verify.ts::verifyDate compares the
+//     stored date with every form the paper might print it in, and it CATCHES the day/month swap —
+//     the test below proves that against the real function. ai.ts stores the verdict as
+//     _doccheck.date. Then it stops: _doccheck.total has placementOf() and the auto-booking doors
+//     ask it, _doccheck.btwContradiction has btwContradictionOf() and they ask that too, and
+//     _doccheck.date has no reader at all. import-health.ts pushes a sentence for the owner and
+//     sets no flag, so shouldAutoAdvanceInvoice never sees it.
+//
+// So the gap is not a missing witness. It is a witness whose testimony reaches the screen and not
+// the gate — which is a different and much cheaper thing to fix, and it is pinned as such.
+//
+// Why it has not simply been wired up: measured on 12 September 2026, all seven 'absent' date
+// verdicts in production were FALSE — English-language invoices whose date was correct (see
+// [DOCCHECK-TAAL] in document-verify.test.ts). Wiring the veto that day would have held seven
+// correct invoices and caught nothing. The language gap is now closed; the veto waits on a
+// re-measurement, and docs/ESCAPE_RATE.md carries the query and the condition.
+
+test("[ESCAPE-RATE] the date witness DOES see a confidently-wrong date", () => {
+  // Not a mock. The real verifyDate, against a document that prints the Dutch date the reader
+  // swapped: the paper says 1 February 2026, the reader returned 2 January 2026 — a valid date, a
+  // confident read, and no amount changes, so nothing else in the app can contradict it.
+  const paper = "FACTUUR\nGroothandel De Vries B.V.\nFactuurdatum: 01-02-2026\n" +
+    "Factuurnummer: 2026-0042\nTotaal incl. btw  EUR 121,00\n";
+  assert.equal(verifyDate("2026-01-02", paper), "absent", "the swap is visible to the witness");
+  assert.equal(verifyDate("2026-02-01", paper), "found", "and the correct read is not flagged");
 });
 
-test("[ESCAPE-RATE] and so does a confidently-wrong supplier — documented gap", () => {
-  // Same shape: the vendor string is wrong but the reader is sure. Nothing outside it disagrees,
-  // because no amount changes. Lands the cost on the wrong crediteur.
-  const d = shouldAutoAdvanceInvoice(clean());
+test("[ESCAPE-RATE] ...and the auto-booking gate never asks it — the one real gap", () => {
+  // Same invoice, phrased as the signals the pipeline carries: the verdict IS stored, and the
+  // decision is identical to one where the check never ran.
+  const stored = clean({
+    health: h({
+      invoice_date: "2026-01-02",
+      field_confidence: {
+        vendor: 0.98, invoice_number: 0.97, invoice_date: 0.99, amount: 0.96,
+        _doccheck: { total: "anchored", date: "absent", invoiceNumber: "found", btwContradiction: null },
+      },
+    }),
+  });
+  const d = shouldAutoAdvanceInvoice(stored);
   assert.equal(d.advance, true,
-    "if this now HOLDS, a vendor witness was added — update docs/ESCAPE_RATE.md and delete this pin");
+    "if this now HOLDS, _doccheck.date was wired into the auto-booking door — " +
+    "update docs/ESCAPE_RATE.md, move this case into MOETEN_WACHTEN and delete this pin");
+  assert.equal(d.reason, "clean_high_confidence");
+  // And the proof that it is the DATE being ignored rather than the whole blob: the same blob with
+  // a bad TOTAL verdict does hold, through placementOf().
+  const badTotal = clean({ totalPlacement: "present" });
+  assert.equal(shouldAutoAdvanceInvoice(badTotal).advance, false,
+    "_doccheck.total has a reader and a veto; _doccheck.date has neither");
 });

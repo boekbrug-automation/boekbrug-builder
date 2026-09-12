@@ -1696,6 +1696,62 @@ test("[DOCCHECK] an excl-label must never anchor the total it is not", () => {
   );
 });
 
+test("[DOCCHECK-TAAL] the date witness reads the languages the module already receives", () => {
+  // Measured on 12 September 2026: of 86 incoming invoices carrying a stored _doccheck, seven said
+  // the date was 'absent' — and all seven were English-language SaaS invoices whose date was
+  // correct. TOTAL_WORDS had carried English and German from the start; the month table had not,
+  // so the one witness the date has was wrong every single time it spoke in production.
+  const mod = code("src/lib/document-verify.ts");
+  const start = mod.indexOf("const MONTHS:");
+  assert.ok(start > 0, "the month table must be findable — this gate measures nothing otherwise");
+  const end = mod.indexOf("export function verifyDate", start);
+  assert.ok(end > start, "and verifyDate must follow it");
+  const table = mod.slice(start, end);
+
+  for (const m of ["'january'", "'march'", "'may'", "'october'", "'december'"]) {
+    assert.ok(table.includes(m), `the month table lost the English ${m} — an English invoice's date reads as absent`);
+  }
+  for (const m of ["'januar'", "'märz'", "'dezember'"]) {
+    assert.ok(table.includes(m), `the month table lost the German ${m}, which TOTAL_WORDS' own languages promise`);
+  }
+  // The short forms are LISTED, never derived. Slicing the Dutch name to three letters happened to
+  // give the English one for nine months and silently failed on the three that matter most here.
+  assert.doesNotMatch(
+    mod, /\.slice\(0,\s*3\)/,
+    "a sliced short month is right by coincidence in nine cases and wrong in maart/mei/oktober",
+  );
+  for (const m of ["'mar'", "'may'", "'oct'"]) {
+    assert.ok(table.includes(m), `${m} is one of the three the slice shortcut missed`);
+  }
+});
+
+test("[DOCCHECK-VOLGORDE] month-first numeric stays behind the day>12 guard", () => {
+  // This is the one loosening that would cost the witness its whole value. verifyDate is the only
+  // check in the app that can see a day/month swap — 1 February read as 2 January is a valid date,
+  // the reader is confident, and no amount changes — and it can only see it because it refuses to
+  // read an ambiguous string both ways. Above 12 there is one reading and matching is free.
+  const mod = code("src/lib/document-verify.ts");
+  const start = mod.indexOf("export function verifyDate");
+  assert.ok(start > 0, "verifyDate must be findable");
+  const end = mod.indexOf("export function verifyInvoiceNumber", start);
+  assert.ok(end > start, "and the next export must bound it — an unbounded window measures the file");
+  const fn = mod.slice(start, end);
+
+  assert.match(
+    fn, /if \(Number\(d\) > 12\) \{[\s\S]{0,400}?forms\.add\(`\$\{mo\}\$\{sep\}\$\{d\}\$\{sep\}\$\{y\}`\)/,
+    "the American order may only be generated when the day cannot be read as a month",
+  );
+  // And it must not be generated anywhere else in the function, guard or no guard.
+  const monthFirst = fn.match(/forms\.add\(`\$\{mo(?:Num)?\}\$\{sep\}/g) ?? [];
+  const guardAt = fn.indexOf("if (Number(d) > 12)");
+  const guardEnd = fn.indexOf("}", fn.indexOf("${moNum}${sep}${dNum}${sep}${yy}"));
+  for (const m of monthFirst) {
+    const at = fn.indexOf(m);
+    assert.ok(at > guardAt && at < guardEnd,
+      `a month-first numeric form outside the guard: ${m} — this blesses the day/month swap`);
+  }
+});
+
 test("[DOCCHECK-SPLIT] the error this whole line of work started from is finally held", () => {
   // Measured with the total-placement check already shipped: the € 0,46 error STILL booked. Right
   // total, anchored; consistent arithmetic; only the split invented — and the split held nothing,
