@@ -55,6 +55,7 @@ import {
 } from "./verification";
 import { euVatShape as euVatShapeFor, isOtherEuCountry as isOtherEuCountryFor } from "./eu-vat-format";
 import { parseViesAnswer as parseViesAnswerFor } from "./vies-parse";
+import { parseKvkProfile as parseKvkProfileFor } from "./kvk-parse";
 import {
   normaliseAddress as normaliseAddressFor, compareToRegister as compareToRegisterFor,
   mergeAccepted as mergeAcceptedFor,
@@ -33623,4 +33624,60 @@ test("[GEEN-ACHTERDEUR] no administrative surface may write to the books", () =>
   assert.ok(gezien >= 1,
     "the walker found no administrative files at all — the paths were renamed and this gate is " +
       "now guarding nothing, which is worse than not existing");
+});
+
+
+// ─── [KVK-OPTIONEEL] The one paid register may be absent, and nothing may notice ──────────────
+//
+// VIES and PDOK are free and keyless, so they answer for everyone from the first day. KvK is the
+// exception: the Basisprofiel that returns a company's name and address costs a subscription plus
+// a fee per request. That is a fair price and exactly the wrong thing to make a signup depend on
+// — an owner whose onboarding stalls because an API key was never installed is an owner who
+// leaves, and he never learns why.
+//
+// So "no key" must be an ordinary state that reads as one: unknown("KvK", "de koppeling staat
+// niet aan"), the field stays typeable, and nothing waits. This gate keeps that true, because the
+// natural next edit is a `throw new Error("Missing KVK_API_KEY")` that turns a missing optional
+// integration into a broken screen.
+test("[KVK-OPTIONEEL] a missing key is a normal state, and a bad answer is never a verdict", () => {
+  const route = code("src/app/api/kvk/route.ts");
+
+  // Absent key → unknown, and nothing louder.
+  assert.match(route, /if \(key === ""\) \{[\s\S]{0,400}unknown<KvkCompany>\("KvK", "De KvK-koppeling staat niet aan"\)/,
+    "a missing KVK_API_KEY no longer reads as 'not connected' — check it did not become a throw");
+  const voorSleutel = route.slice(0, route.indexOf('process.env.KVK_API_KEY'));
+  assert.ok(voorSleutel.length > 0, "the key read is gone — the cut is broken, not the route");
+  assert.doesNotMatch(route, /throw new Error\([^)]*KVK/i,
+    "a missing key throws — an optional integration became a broken screen");
+
+  // A typo is refused here rather than paid for: eight digits is decidable without a request.
+  assert.match(route, /isKvkShaped\(nummer\)/, "the shape check before the paid call is gone");
+
+  // 404 is the ONLY status that is a statement about the company. Everything else is our problem.
+  assert.match(route, /res\.status === 404[\s\S]{0,200}refused<KvkCompany>/,
+    "a 404 no longer reads as 'the register does not know this number'");
+
+  // And the parser may never manufacture a verdict out of an answer it did not understand. This
+  // is the bug a test caught while it was being written: an empty array came back as "de KvK kent
+  // dit nummer niet" — a statement about someone's company, produced by not reading the answer.
+  for (const rommel of [null, 42, "profiel", [], {}, { kvkNummer: "" }]) {
+    assert.strictEqual(parseKvkProfileFor(rommel, "12345678").reading, "unusable",
+      `${JSON.stringify(rommel)} produced something other than "unusable"`);
+  }
+  // A number where a string was expected is ordinary, not garbage.
+  assert.strictEqual(
+    parseKvkProfileFor({ kvkNummer: 12345678, statutaireNaam: "ABC B.V." }, "12345678").reading,
+    "found",
+  );
+  // The visiting address, never the postbus: an invoice that says Postbus where the law wants an
+  // address is a different document.
+  const metBeide = parseKvkProfileFor({
+    kvkNummer: "12345678", statutaireNaam: "ABC B.V.",
+    adressen: [
+      { type: "correspondentieadres", straatnaam: "Postbus", huisnummer: 1, plaats: "Tilburg" },
+      { type: "bezoekadres", straatnaam: "Tilburgseweg", huisnummer: 42, plaats: "Tilburg" },
+    ],
+  }, "12345678");
+  assert.strictEqual(metBeide.reading, "found");
+  if (metBeide.reading === "found") assert.strictEqual(metBeide.company.address, "Tilburgseweg 42");
 });
