@@ -2342,8 +2342,10 @@ test("[MAILTEKST] a body-only invoice is found, stored as a document, and never 
 
   // Filtered MECHANICALLY before anything is sent anywhere — this path starts from ordinary mail,
   // where almost everything carrying a euro amount is not an invoice.
+  // [MAILTEKST-TELLING] The refusal now says WHY instead of collapsing to null — the ORDER this
+  // asserts is unchanged and is the whole point: the filter still returns before textToPdf.
   assert.match(
-    src, /const verdict = bodyLooksLikeInvoice\(m\.text, m\.subject\)\s*\n\s*if \(!verdict\.candidate\) return null/,
+    src, /const verdict = bodyLooksLikeInvoice\(m\.text, m\.subject\)\s*\n\s*if \(!verdict\.candidate\) return \{ refused: verdict\.reason \}\s*\n\s*const pdf = await textToPdf\(/,
     "the filter runs before the render and before any AI call",
   );
 
@@ -28663,6 +28665,41 @@ test("[RUSTIG] the screen does not grow wordier than the day this was measured",
 // counted RAW pages against its budget, the ceiling was reached before the older messages were
 // listed, the watermark advanced past them anyway — a permanent, silent miss, on precisely the
 // mailbox shape this gate is about.
+test("[MAILTEKST-TELLING] the body scan reports itself when it finds NOTHING", () => {
+  // The state worth investigating is the empty one. A pass that scans sixty messages and admits
+  // none is, from outside, indistinguishable from a mailbox that held no body invoice — and the
+  // old log line fired only on `body.items.length > 0`, so it was silent in exactly that case.
+  //
+  // This matters because the pass is deliberately strict and its own header argues for that
+  // ("A missed body invoice costs the owner the same as today. A FALSE one becomes a cost that
+  // never existed"). Choosing that trade-off correctly requires knowing which side it errs on, and
+  // bodyLooksLikeInvoice's reason — the only instrument that can say — was being discarded one
+  // line after it was computed.
+  const sync = code("src/lib/email-integration.ts");
+
+  // The refusal is carried out of the builder rather than collapsed into null.
+  assert.match(sync, /if \(!verdict\.candidate\) return \{ refused: verdict\.reason \}/,
+    "a refused body candidate must say WHY — returning null here is what made the pass unmeasurable");
+  // …and a failed render is not a filter verdict. Counting the two together hides a rendering bug
+  // inside a tally that reads like ordinary strictness.
+  assert.match(sync, /if \(!pdf\) return \{ refused: 'pdf_render_failed' \}/,
+    "a failed PDF render must not be counted as a filter refusal");
+
+  // The log fires on LOOKING, not on finding.
+  assert.match(sync, /if \(body\.scanned > 0\) \{[\s\S]{0,400}?refused: body\.refused,/,
+    "the body scan must report every run it actually looked at, and carry the refusal tally");
+  assert.doesNotMatch(sync, /if \(body\.items\.length > 0\) \{\s*\n\s*console\.log/,
+    "the scan is silent again in the one case worth investigating: it looked and found nothing");
+
+  // Both providers tally, or the number is a half-truth that reads like a whole one.
+  const tallies = (sync.match(/countRefusal\(refused,/g) ?? []).length;
+  assert.ok(tallies >= 5,
+    `countRefusal is called ${tallies}× — Gmail and Outlook both refuse on several paths and each ` +
+      "uncounted one makes 'scanned' and the tally disagree");
+  assert.match(sync, /const refused: BodyScanTally = \{\}/,
+    "the tally must exist in the provider loops");
+});
+
 test("[SCAN-EVERYWHERE] neither provider listing may be scoped to one folder", () => {
   const sync = code("src/lib/email-integration.ts");
 
@@ -28757,7 +28794,9 @@ test("[EIGEN-POST] every mail path refuses our own sender, and does it before it
   assert.ok(bodyAt > 0, "the Outlook body scan is gone, or renamed — this half of the gate is blind");
   const bodyFn = sync.slice(bodyAt, sync.indexOf("\n}", bodyAt));
   const lees = bodyFn.indexOf("htmlToReadableText(m.body?.content");
-  const vraag = bodyFn.indexOf("if (isOwnAppMail(addr)) continue");
+  // [MAILTEKST-TELLING] The skip now also COUNTS itself, so the tally and `scanned` agree. The
+  // assertion below is about POSITION and is unchanged: the question still stands ahead of the read.
+  const vraag = bodyFn.indexOf("if (isOwnAppMail(addr)) { countRefusal(refused, 'own_app_mail'); continue }");
   assert.ok(vraag > 0, "the Outlook body scan does not ask whether we sent this message at all");
   assert.ok(lees > vraag,
     "the Outlook body scan reads the message text before asking whether we sent it");

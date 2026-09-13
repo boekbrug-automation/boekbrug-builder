@@ -87,6 +87,29 @@ const INVOICE_WORDS = [
   'invoice', 'invoice number', 'tax invoice', 'rechnung',
 ]
 
+// [MAILTEKST-TELLING] An OPEN QUESTION about this list, deliberately left open.
+//
+// 'receipt' is not here, and it is not in BODY_SEARCH_WORDS in email-integration.ts either — so a
+// body-only bill whose subject is "Your receipt from …" fails twice: it is never listed by the
+// provider search, and it would be refused as `no_invoice_word` if it were. The word is in neither
+// the include list nor the NOT_AN_INVOICE list; it is simply absent, while English ('invoice',
+// 'tax invoice') and German ('rechnung') are deliberately present.
+//
+// That this owner receives such documents is not a guess — `Receipt-2848-5529-4965.pdf` and
+// `Receipt-2043-7432.pdf` are in their bestanden. Both arrived as ATTACHMENTS, so the main path
+// caught them and this pass was never needed. Whether any arrive as body-only text is exactly what
+// nobody could know, because the refusal reason was discarded before anything could count it.
+//
+// So: not changed here, on purpose. This file's own header argues for strictness — "A missed body
+// invoice costs the owner the same as today. A FALSE one becomes a cost that never existed and a
+// voorbelasting claim on it" — and widening the vocabulary moves in the direction that header
+// chose against. A 'receipt' is also not an invoice in this product's vocabulary: ar-decisions.ts
+// keeps «bon» and «factuur» apart as a ruling, with its reason written down.
+//
+// The tally is what turns this from an argument into a measurement. When runs start reporting
+// `no_invoice_word` on a mailbox that is receiving bills in message text, the question becomes
+// which words — and that is a product decision the numbers should precede, not follow.
+
 /**
  * A tax line. This is the single strongest signal that a document is an invoice and not a receipt
  * for someone else's money: an invoice states the BTW, because the recipient needs it to claim
@@ -212,6 +235,34 @@ export function bodyLooksLikeInvoice(text: string, subject: string): BodyInvoice
  * of the `${messageId}:${filename}` key that stops the same mail importing twice. Derived from the
  * subject, never from a clock.
  */
+/**
+ * [MAILTEKST-TELLING] Why a body scan found nothing, counted.
+ *
+ * bodyLooksLikeInvoice already names its refusal on every message — `no_invoice_word`,
+ * `no_tax_line`, `no_euro_amount`, `not_an_invoice:offerte` — and until now every one of those was
+ * computed and thrown away one line later, at `if (!verdict.candidate) return null`.
+ *
+ * That left the one question about this pass unanswerable. It is deliberately strict, and its own
+ * header says so: "A missed body invoice costs the owner the same as today. A FALSE one becomes a
+ * cost that never existed." Choosing that trade-off correctly needs to know which side it is
+ * erring on — and a scan of sixty messages that admits none is indistinguishable, from outside,
+ * from a mailbox that contained no body invoice at all.
+ *
+ * So this counts, and it decides nothing. A run whose tally is dominated by `no_tax_line` is a
+ * filter working as designed on ordinary mail; one dominated by `no_invoice_word` while the owner
+ * is receiving bills in their message text is a vocabulary that is too narrow — and that is a
+ * question about which WORDS, which is a product decision the numbers should precede.
+ */
+export type BodyScanTally = Record<string, number>;
+
+/** Count one refusal. Separate from the filter so the filter stays pure and free of bookkeeping. */
+export function countRefusal(tally: BodyScanTally, reason: string): void {
+  // The reason for a NOT_AN_INVOICE match carries the matched word (`not_an_invoice:offerte`), and
+  // keeping it whole is the point: "eighteen refused" says nothing, "eighteen were order
+  // confirmations" says the filter is doing exactly its job.
+  tally[reason] = (tally[reason] ?? 0) + 1;
+}
+
 export function bodyDocumentName(subject: string | null | undefined): string {
   const clean = (subject ?? '')
     .replace(/[\\/:*?"<>|]/g, '-')
