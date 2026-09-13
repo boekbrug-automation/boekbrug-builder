@@ -33891,3 +33891,90 @@ test("[KANTOORGIDS-TAAL] the language filters, never ranks, and is never chosen 
   const RANG2 = /\b(rank|ranking|score|tier|featured|sponsored|promoted|boost|priority|paid_position)\b/i;
   assert.doesNotMatch(lijst, RANG2, "the rendered list grew something to rank offices by");
 });
+
+test("[GEEN-MODEL-BIJ-GELD] no model reaches the code that books money", () => {
+  // ── THE PRINCIPLE, AND WHY IT NEEDED A GATE ────────────────────────────────────────────────
+  // The model may SUGGEST. Rules decide. The accounting engine records. That is how this app is
+  // already built — bank-matching.ts says so in its own header, and matchTransaction has sat
+  // exported in ai.ts with not one caller since the day it was written.
+  //
+  // Nothing held it. The separation lived in a comment beside the code it governs and in the
+  // habits of whoever was editing, which is exactly the kind of rule that survives until one tired
+  // session adds one import line — and then nothing goes red, because a model's answer looks like
+  // any other value once it is a number in a variable. By the time it is visible, it is visible as
+  // a wrong booking in someone's administratie.
+  //
+  // What this gate does NOT claim: that the app must not use a model. It reads documents all day
+  // (intake, e-mail, the bon reader) and that is the product. The rule is narrower and absolute:
+  // the modules that decide WHICH invoice a payment settles, and that write the booking, may not
+  // ask a model anything.
+  const GELD_MODULES = [
+    "src/lib/bank-matching.ts",        // decides which invoice a payment belongs to
+    "src/lib/bank-auto-confirm.ts",    // writes the booking, unattended
+    "src/lib/bank-batch-reconcile.ts", // decides which invoices a bundle settles
+    "src/lib/bank-match-confidence.ts",// the one-directional veto over all of it
+    "src/lib/bank-auto-categorize.ts", // decides the ledger account a line lands on
+    "src/lib/bank-ingest.ts",          // the door every statement comes through
+  ];
+  for (const pad of GELD_MODULES) {
+    assert.ok(existsSync(pad), `${pad} is gone — if it was renamed, this list must follow it`);
+    const src = code(pad);
+    assert.doesNotMatch(src, /from\s+["'](?:@\/lib\/ai|\.\/ai|\.\.\/lib\/ai)["']/,
+      `${pad} imports the model. It decides or writes a booking; a suggestion may reach it only ` +
+        "through a rule that can refuse, never as a value it trusts");
+    assert.doesNotMatch(src, /@anthropic-ai|openai|['"]anthropic['"]/i,
+      `${pad} reaches a model provider directly`);
+  }
+
+  // And the arbiter that was deliberately never wired stays unwired. It is a real exported
+  // function; the day something calls it, that call is the decision this gate exists to make
+  // visible — not a detail inside a diff.
+  const loopSrc = (dir: string): string[] => {
+    const uit: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const pad = `${dir}/${e}`;
+      if (statSync(pad).isDirectory()) uit.push(...loopSrc(pad));
+      else if (/\.tsx?$/.test(pad)) uit.push(pad);
+    }
+    return uit;
+  };
+  const roepers = loopSrc("src").filter(
+    (pad) => pad !== "src/lib/ai.ts" && /\bmatchTransaction\s*\(/.test(code(pad)),
+  );
+  assert.deepStrictEqual(roepers, [],
+    "something now calls ai.ts:matchTransaction. That is the AI arbiter over bank matching, and " +
+      "wiring it is an architecture decision (AI suggests → rules decide → engine records), not a " +
+      "code change: route it through a rule that can refuse and a human that can see it first");
+});
+
+test("[VETO-BLIJFT] the one-directional veto stays wired into the booking loop", () => {
+  // applyConfidenceVeto is the last thing between the tier machine and a write. Its contract is
+  // one-directional — it may turn an automatic booking into a human one and never the reverse —
+  // and today it refuses NOTHING, which is exactly why it needs this gate rather than a test.
+  //
+  // A guard that never fires on current inputs cannot be caught by a behavioural test: there is no
+  // input where deleting it changes an answer. Measured, not assumed — with the call replaced by a
+  // plain tier filter, all 799 gates, all 11 confidence tests and the four new pass tests stayed
+  // green. So the only thing that can notice its removal is a rule about the code itself.
+  //
+  // It is worth that: the veto exists so that the day a Low-confidence pairing becomes bookable,
+  // it stops here instead of in somebody's quarter.
+  const auto = code("src/lib/bank-auto-confirm.ts");
+  assert.match(auto, /const autoMatches = applyConfidenceVeto\(\{/,
+    "the booking pass no longer runs its matches through applyConfidenceVeto — the last guard " +
+      "before an unattended write is gone, and nothing else in this repo can see that");
+  assert.match(auto, /for \(const \{ m, tier \} of autoMatches\)/,
+    "the booking loop reads something other than the veto's output, so the veto is computed and " +
+      "then ignored — which looks exactly like a working guard");
+
+  // And the contract it rests on: the veto may only ever REMOVE. If it can hand back a tier the
+  // tiers did not give, bank-matching's guards — each earned from a real wrong booking — become
+  // overrulable by a table imported from another product.
+  const veto = code("src/lib/bank-match-confidence.ts");
+  const fn = veto.slice(veto.indexOf("export function applyConfidenceVeto"));
+  assert.ok(fn.length > 0, "applyConfidenceVeto not found");
+  const body = fn.slice(0, fn.indexOf("\n}"));
+  assert.ok(body.length > 0 && body.length < fn.length, "could not cut applyConfidenceVeto's body");
+  assert.doesNotMatch(body, /tier:\s*["'](certain|amount_only)["']/,
+    "the veto assigns a tier instead of only clearing one — it can now promote a booking");
+});
