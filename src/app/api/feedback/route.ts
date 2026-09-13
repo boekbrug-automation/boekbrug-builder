@@ -20,6 +20,7 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit
 import { parseFeedback, feedbackImageExtension } from "@/lib/feedback";
 import { sendFeedbackNotification } from "@/lib/email";
 import { isMissingRelation } from "@/lib/pg-missing";
+import { storeOriginal } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -53,9 +54,7 @@ export async function POST(req: NextRequest) {
   if (image) {
     const pipeline = createPipelineClient();
     const candidate = `${user.id}/feedback/${Date.now()}.${feedbackImageExtension(image.mimeType)}`;
-    const { error: upErr } = await pipeline.storage
-      .from("documents")
-      .upload(candidate, image.bytes, { contentType: image.mimeType, upsert: false });
+    const { error: upErr } = await storeOriginal(pipeline, candidate, image.bytes, { contentType: image.mimeType, upsert: false });
     if (upErr) {
       console.error("[FEEDBACK] screenshot upload failed — storing the message without it", upErr);
       imageFailed = true;

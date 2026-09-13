@@ -23,6 +23,7 @@ import { ownedStoragePath } from "./storage-path";
 import { toExportRowFull, invoicesToCsv, fmtAmountNL, type InvRow } from "./export";
 import { csvCell } from "./csv-safe";
 import { isMissingRelation } from "./pg-missing";
+import { getOriginal } from "./document-storage";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -581,9 +582,7 @@ export async function buildAccountExportZip(args: {
         };
       }
       try {
-        const { data, error } = await supabase.storage
-          .from("documents")
-          .download(path);
+        const { data, error } = await getOriginal(supabase, path);
         if (error || !data) {
           return {
             ok: false as const,

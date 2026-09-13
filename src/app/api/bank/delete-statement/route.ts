@@ -42,6 +42,7 @@ import { planStatementReversal } from "@/lib/statement-reversal";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 // [ALARM] Opgevangen fouten die tóch iemand moeten bereiken — zie report-handled.ts.
 import { reportHandledFailure } from "@/lib/report-handled"
+import { removeOriginals } from "@/lib/document-storage";
 
 export async function POST(req: NextRequest) {
   // 1. Auth — the owner acting on their own data.
@@ -435,9 +436,7 @@ export async function POST(req: NextRequest) {
   //    request. Never leave a row pointing at a deleted file (avoided by order).
   let storageWarning = false;
   if (doc.file_url) {
-    const { error: storageErr } = await supabase.storage
-      .from("documents")
-      .remove([doc.file_url]);
+    const { error: storageErr } = await removeOriginals(supabase, [doc.file_url]);
     if (storageErr) {
       console.error("[BANK-STATEMENT-DELETE] storage delete failed (orphan file):", storageErr.message);
       storageWarning = true;

@@ -47,6 +47,7 @@ import { sniffReadableMime } from "@/lib/detect-file";
 // [ACTING-FOR] A sales member does not do the bookkeeping on a booked purchase invoice — the same
 // boundary /api/invoice/[id]/amounts draws for correcting one. See owner-only.ts.
 import { requireOwner } from "@/lib/owner-only";
+import { removeOriginals, storeOriginal } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -182,9 +183,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   } else {
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
     storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`;
-    const { error: uploadError } = await supabase.storage
-      .from("documents")
-      .upload(storagePath, buffer, { contentType: mime, upsert: false });
+    const { error: uploadError } = await storeOriginal(supabase, storagePath, buffer, { contentType: mime, upsert: false });
     // [R7] A swallowed upload error would leave the invoice pointing at a path holding nothing —
     // evidence that reads as present and cannot be retrieved, which is worse than the gap we came
     // here to close. Fail loudly so the owner retries.
@@ -216,7 +215,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (docErr || !doc) {
       // Roll the file back — an orphaned object in storage is retention we owe on evidence that
       // belongs to nothing.
-      await supabase.storage.from("documents").remove([storagePath]);
+      await removeOriginals(supabase, [storagePath]);
       console.error("[ORIGINEEL] documents insert failed", { userId: user.id, id, error: docErr?.message });
       return NextResponse.json({ error: "opslaan_mislukt" }, { status: 500 });
     }

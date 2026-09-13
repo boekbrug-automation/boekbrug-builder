@@ -21,6 +21,7 @@ import { createClient } from "@supabase/supabase-js";
 import { toStoragePath, pathBelongsToOwner } from "@/lib/storage-path";
 // [IN-CHUNK] Een id-lijst gaat in brokken de URL in — zie supabase-paginate.ts.
 import { chunkIds } from "@/lib/supabase-paginate";
+import { removeOriginals } from "@/lib/document-storage";
 
 function createServiceRoleClient() {
   return createClient(
@@ -112,7 +113,7 @@ export async function DELETE(_req: NextRequest) {
       // maar een lijst van duizenden keys in één aanroep is nog steeds de aanroep die als geheel
       // faalt — en dan blijft er niets verwijderd in plaats van bijna alles.
       for (const chunk of chunkIds(paths)) {
-        await serviceSupabase.storage.from("documents").remove(chunk);
+        await removeOriginals(serviceSupabase, chunk);
       }
     }
 

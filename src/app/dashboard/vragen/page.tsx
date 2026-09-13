@@ -32,6 +32,7 @@ import {
 } from '@/lib/vragen'
 import VragenClient, { type VraagView, type VoorstelView } from './VragenClient'
 import type { ProposedChange } from '@/lib/correction-proposal'
+import { signedUrl } from '@/lib/document-storage'
 
 export const dynamic = 'force-dynamic'
 export const metadata = { title: 'Vragen van je boekhouder — BoekBrug' }
@@ -199,7 +200,7 @@ export default async function VragenPage() {
       // belongs to this owner simply gets no link — the question still renders without one.
       const pad = toStoragePath(d.file_url)
       if (!pathBelongsToOwner(pad, user.id)) return
-      const { data } = await pipeline.storage.from('documents').createSignedUrl(pad, 3600)
+      const { data } = await signedUrl(pipeline, pad, 3600)
       if (data?.signedUrl) urlByDoc.set(d.id, data.signedUrl)
     }),
   )

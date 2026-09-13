@@ -39,6 +39,7 @@ import { trashedDuplicateCleared } from "@/lib/trashed-dedup";
 import { supplierBtwForInvoice } from "@/lib/vendor-identity"
 // [NUL-GRONDSLAG] What may be stored when the split was not read — see read-amounts.ts.
 import { amountsToStore, markUnexplainedZeroBtw } from "@/lib/read-amounts";
+import { removeOriginals, storeOriginal } from "@/lib/document-storage";
 
 export async function POST(req: NextRequest) {
   return withCrashNet(
@@ -407,9 +408,7 @@ const dup = await findSemanticDuplicate(
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`;
 
-  const { error: uploadError } = await supabase.storage
-    .from("documents")
-    .upload(storagePath, buffer, { contentType: file.type, upsert: false });
+  const { error: uploadError } = await storeOriginal(supabase, storagePath, buffer, { contentType: file.type, upsert: false });
   // [R7] A swallowed upload error used to let the flow insert an invoice with
   // pdf_url/document_id = null — a counted invoice whose evidence is UNRETRIEVABLE (the
   // closing package resolves an incoming invoice's PDF via document_id). Fail loudly so
@@ -460,7 +459,7 @@ const dup = await findSemanticDuplicate(
   // [R7] The document row IS the evidence link. If it fails to write, roll back the
   // stored file and stop — never create an evidence-less invoice.
   if (docErr || !doc) {
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     // [DEDUP-ATOMIC] A concurrent double-submit that raced past the byte-hash SELECT above trips the
     // (user_id, content_hash) UNIQUE index here (23505). Treat it like the SELECT-found duplicate so
     // no second invoice is created — return a duplicate, not a 500 that invites a retry.
@@ -579,7 +578,7 @@ const dup = await findSemanticDuplicate(
     // its content_hash would otherwise make the byte-hash dedup BLOCK a re-upload (409),
     // trapping the owner with a file they can neither re-add nor see as an invoice.
     await pipeline.from("documents").delete().eq("id", documentId);
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     return NextResponse.json({ error: dbError.message }, { status: 500 });
   }
 

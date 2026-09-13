@@ -64,6 +64,7 @@ import { toStoragePath, pathBelongsToOwner } from "@/lib/storage-path"
 import { payBlockForInvoice } from "@/lib/pay-link";
 import { collectOpenInvoiceProof } from "@/lib/open-invoice-proof-collect";
 import { describeHit } from "@/lib/open-invoice-proof-text";
+import { getOriginal } from "@/lib/document-storage"
 
 const EUR_NL = new Intl.NumberFormat("nl-NL", { style: "currency", currency: "EUR" });
 // [TZ] timeZone PINNED — same reason as lib/incasso.ts: formatDayNL builds midnight UTC from the
@@ -80,7 +81,6 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 // Storage bucket that holds rendered invoice PDFs (see invoice/send route).
-const PDF_BUCKET = "documents";
 
 type OwnerProfile = {
   id: string;
@@ -635,7 +635,7 @@ export async function GET(req: NextRequest) {
       const pdfPath = toStoragePath(inv.pdf_url);
       if (inv.pdf_url && pathBelongsToOwner(pdfPath, ownerId)) {
         try {
-          const { data: blob } = await pipeline.storage.from(PDF_BUCKET).download(pdfPath);
+          const { data: blob } = await getOriginal(pipeline, pdfPath);
           if (blob) pdfBuffer = Buffer.from(await blob.arrayBuffer());
         } catch {
           /* non-blocking — reminder goes out without the PDF */

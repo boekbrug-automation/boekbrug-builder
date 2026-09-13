@@ -51,6 +51,7 @@ import { logAuditAction, getClientIP } from "@/lib/audit";
 import { pathBelongsToOwner, toStoragePath } from "@/lib/storage-path";
 import type { Database } from "@/types/database.types";
 import { supplierBtwForInvoice } from "@/lib/vendor-identity"
+import { getOriginal } from "@/lib/document-storage";
 
 type InvoiceFieldConfidence = Database["public"]["Tables"]["invoices"]["Insert"]["field_confidence"];
 
@@ -117,7 +118,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ error: "Kon het bestand niet lezen" }, { status: 403 });
   }
   const pipeline = createPipelineClient();
-  const { data: blob, error: dlErr } = await pipeline.storage.from("documents").download(storagePath);
+  const { data: blob, error: dlErr } = await getOriginal(pipeline, storagePath);
   if (dlErr || !blob) {
     console.error("[TWEEDE-KANS] download failed", { id, storagePath, dlErr });
     return NextResponse.json({ error: "Kon het bestand niet lezen." }, { status: 502 });

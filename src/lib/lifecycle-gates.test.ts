@@ -6367,7 +6367,8 @@ test("[DOC-VERSE-LINK] the open button carries no signature, and a failed tab ge
   );
 
   // ORDER: the signature has to be minted in this request, not read from anywhere earlier.
-  const signAt = route.indexOf("createSignedUrl(storagePath");
+  // [EEN-KLUIS] The bytes now go through document-storage.ts, so the needle is the door's name.
+  const signAt = route.indexOf("signedUrl(pipeline, storagePath");
   const redirectAt = route.indexOf('searchParams.get("open") === "1"');
   assert.ok(signAt > 0 && redirectAt > signAt, "the redirect must follow a fresh createSignedUrl");
 
@@ -12219,7 +12220,8 @@ test("[FACTUUR-BIJLAGE] the attachment is resolved BEFORE a number is minted", (
     "the attachment must be fetched and judged before a number exists — after it, no outcome is good");
 
   // En het downloaden zelf ook, niet alleen de keuring.
-  const downloadAt = send.indexOf(".storage.from('documents').download(");
+  // [EEN-KLUIS] Same call, through the one door.
+  const downloadAt = send.indexOf("getOriginal(createPipelineClient(), pad)");
   assert.ok(downloadAt > 0 && downloadAt < nummerAt, "the bytes must be in hand before the number");
 });
 
@@ -12825,7 +12827,20 @@ test("[SEC-STORAGE-PATH] geen service_role raakt bytes op een pad dat het NIET z
     }
     return uit;
   };
-  const OPS = "remove|download|createSignedUrl|createSignedUrls|copy|move";
+  // [EEN-KLUIS] De vorm is veranderd en deze scan is meeveranderd — en dat is precies wat de
+  // twee tellers onderaan moesten afdwingen. De bytes lopen nu via document-storage.ts, dus
+  // `client.storage.from(...).remove(...)` bestaat nergens meer; een scan die daar nog naar zocht
+  // zou NUL treffers hebben gemeld en er schoon hebben uitgezien. serviceRolls zakte naar 0 en de
+  // poort viel om. Zo hoort het: een beveiligingsscan die zijn onderwerp niet meer kan vinden is
+  // stuk, niet geslaagd.
+  //
+  // De nieuwe vorm is strikter te lezen dan de oude: de client is nu het EERSTE ARGUMENT en staat
+  // er altijd expliciet, in plaats van ergens links van een punt te hangen.
+  //
+  // storeOriginal staat er net zo min bij als `upload` er ooit bij stond: een pad waar wij naartoe
+  // SCHRIJVEN bouwen we zelf. listOriginals evenmin, om dezelfde reden als `list` er nooit bij
+  // stond — dat is een prefixwandeling, geen aanraking van andermans bytes.
+  const OPS = "removeOriginals|getOriginal|signedUrls|signedUrl";
 
   const overtreders: string[] = [];
   let serviceRolls = 0;
@@ -12833,10 +12848,13 @@ test("[SEC-STORAGE-PATH] geen service_role raakt bytes op een pad dat het NIET z
   for (const f of loop("src")) {
     const src = code(f);
     for (const m of src.matchAll(new RegExp(
-      String.raw`([A-Za-z_$][\w$]*)\s*\.\s*storage\s*\.\s*from\s*\([^)]*\)\s*\.\s*(${OPS})\s*\(\s*(\[?[^)\]]{0,120})`, "g"))) {
-      const client = m[1], op = m[2], arg = m[3];
-      // Hoe is DEZE client in DIT bestand gebonden? Naam is geen bewijs; de binding wel.
+      String.raw`\b(${OPS})\s*\(\s*([^,()]{1,60}(?:\([^()]{0,40}\)[^,()]{0,40})?)\s*,\s*(\[?[^)\]]{0,120})`, "g"))) {
+      const op = m[1], clientExpr = m[2].trim(), arg = m[3];
+      const client = (clientExpr.match(/[A-Za-z_$][\w$]*$/) ?? [clientExpr])[0];
+      // Hoe is DEZE client in DIT bestand gebonden? Naam is geen bewijs; de binding wel. Een
+      // rechtstreekse createPipelineClient() in het argument is het duidelijkste bewijs dat er is.
       const serviceRol =
+        /createPipelineClient\s*\(/.test(clientExpr) ||
         new RegExp(String.raw`(const|let)\s+${client}\s*(:[^=]*)?=\s*(await\s+)?createPipelineClient\s*\(`).test(src) ||
         new RegExp(String.raw`\b${client}\s*:\s*PipelineClient\b`).test(src);
       if (!serviceRol) continue; // sessieclient: daar is het bucketbeleid de grens
@@ -12850,7 +12868,7 @@ test("[SEC-STORAGE-PATH] geen service_role raakt bytes op een pad dat het NIET z
       if (zelf) { zelfGebouwd++; continue; }
       const voor = src.slice(Math.max(0, (m.index ?? 0) - 1500), m.index);
       if (/ownedStoragePath\s*\(|pathBelongsToOwner\s*\(/.test(voor)) continue;
-      overtreders.push(`${f}:${src.slice(0, m.index).split("\n").length} — ${client}.storage…${op}(${arg.replace(/\s+/g, " ").slice(0, 50)})`);
+      overtreders.push(`${f}:${src.slice(0, m.index).split("\n").length} — ${op}(${client}, ${arg.replace(/\s+/g, " ").slice(0, 50)})`);
     }
   }
 
@@ -21257,7 +21275,8 @@ test("[BULK-PDF] several invoices taken away at once, and the bundle rule now si
   // received. Re-drawing it would produce something that merely LOOKS like the original — a logo
   // since changed, an address since corrected — and hand it over as the original. Rendering is
   // only ever the fallback.
-  const storedAt = route.indexOf('.download(stored)');
+  // [EEN-KLUIS] Same call, through the one door.
+  const storedAt = route.indexOf('getOriginal(supabase, stored)');
   const renderAt = route.indexOf('renderInvoicePdf(');
   assert.ok(storedAt > 0 && renderAt > 0 && storedAt < renderAt,
     "the route re-renders the invoice before it tries the stored file");
@@ -34059,4 +34078,52 @@ test("[VETO-BLIJFT] the one-directional veto stays wired into the booking loop",
   assert.ok(body.length > 0 && body.length < fn.length, "could not cut applyConfidenceVeto's body");
   assert.doesNotMatch(body, /tier:\s*["'](certain|amount_only)["']/,
     "the veto assigns a tier instead of only clearing one — it can now promote a booking");
+});
+
+test("[EEN-KLUIS] the bucket is reached through one door", () => {
+  // Fifty-six call sites in twenty-six files each named the bucket themselves and each decided for
+  // itself what a storage failure meant. That is survivable until the bucket is renamed, a second
+  // one appears, or the bytes move to another provider — and then it is twenty-six diffs on the
+  // path that holds documents somebody must keep for seven years.
+  //
+  // The rule: only document-storage.ts may touch storage.from(). Everything else asks it.
+  const loopSrc = (dir: string): string[] => {
+    const uit: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const pad = `${dir}/${e}`;
+      if (statSync(pad).isDirectory()) uit.push(...loopSrc(pad));
+      else if (/\.tsx?$/.test(pad)) uit.push(pad);
+    }
+    return uit;
+  };
+  const overtreders = loopSrc("src").filter(
+    (pad) =>
+      pad !== "src/lib/document-storage.ts" &&
+      !pad.endsWith("lifecycle-gates.test.ts") && // this file names the pattern to forbid it
+      /\.storage\s*\.from\(/.test(code(pad)),
+  );
+  assert.deepStrictEqual(overtreders, [],
+    "these files reach into the storage bucket directly instead of through document-storage.ts — " +
+      "the point of the one door is that WHERE the bytes live can change without them knowing");
+
+  // And the door itself keeps its shape. The bucket is named exactly once…
+  const kluis = code("src/lib/document-storage.ts");
+  assert.strictEqual((kluis.match(/["']documents["']/g) ?? []).length, 1,
+    "the bucket name is written more than once inside the one place that is allowed to write it");
+  assert.match(kluis, /export const DOCUMENT_BUCKET/, "the bucket is no longer named in one place");
+
+  // …an upload does not overwrite unless the caller says so. The originals are evidence, and
+  // evidence a second upload can silently replace is not evidence.
+  assert.match(kluis, /upsert: opts\.upsert === true/,
+    "storeOriginal defaults to overwriting — an accidental re-upload would replace an original");
+
+  // …and the client stays an ARGUMENT. Which client acts is a security decision: a session client
+  // is bound by RLS to one owner, the pipeline client is not. A service that picked the client for
+  // the caller would make the most dangerous line in a route the invisible one.
+  for (const fn of ["storeOriginal", "getOriginal", "removeOriginals", "signedUrl", "signedUrls"]) {
+    assert.match(kluis, new RegExp(`export function ${fn}\\(\\s*client: StorageCapableClient`),
+      `${fn} no longer takes the client from its caller`);
+  }
+  assert.doesNotMatch(kluis, /createPipelineClient|createServerSupabaseClient|createClient\(/,
+    "document-storage.ts builds its own client — then the caller can no longer see who is acting");
 });

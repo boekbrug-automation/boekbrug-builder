@@ -36,6 +36,7 @@ import { checkOfferteSendable, offerteFileName } from '@/lib/offerte-send'
 import { renderInvoicePdf } from '@/lib/invoice-pdf-server'
 import { sendOfferteToClient } from '@/lib/email'
 import { logAuditAction, getClientIP } from '@/lib/audit'
+import { storeOriginal } from '@/lib/document-storage'
 
 export const dynamic = 'force-dynamic'
 
@@ -184,9 +185,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // Only now. `status` and `pdf_url` — never a number, never a type.
   const pipeline = createPipelineClient()
   const pdfPath = `${ownerId}/offertes/${id}.pdf`
-  const { error: upErr } = await pipeline.storage
-    .from('documents')
-    .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
+  const { error: upErr } = await storeOriginal(pipeline, pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
   if (upErr) console.error('[OFFERTE-VERSTUREN] pdf upload failed (mail already sent)', upErr.message)
 
   const { error: statusErr } = await pipeline

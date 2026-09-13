@@ -12,6 +12,7 @@ import type { DocumentReference } from "./document-references";
 // [BRIDGE-EXTRACT] byte-hash dedup — één bestand → één hash → één record
 import { computeContentHashFromFile } from "./content-hash";
 import { logAuditAction } from "./audit";
+import { removeOriginals, signedUrl, storeOriginal } from "./document-storage";
 
 export { inferDocType } from "./documents-utils";
 
@@ -203,9 +204,7 @@ export async function uploadDocument(
   const path = buildStoragePath(userId, file.name, opts.year, opts.quarter);
 
   // 1. Upload to Storage
-  const { error: storageError } = await supabase.storage
-    .from("documents")
-    .upload(path, file, { upsert: false });
+  const { error: storageError } = await storeOriginal(supabase, path, file, { upsert: false });
 
   if (storageError) {
     return { id: "", error: storageError.message };
@@ -295,7 +294,7 @@ export async function uploadDocument(
 
   if (dbError) {
     // Rollback storage upload
-    await supabase.storage.from("documents").remove([path]);
+    await removeOriginals(supabase, [path]);
     return { id: "", error: dbError.message };
   }
 
@@ -373,9 +372,7 @@ export interface DocumentRow {
 /** Get a signed URL for a private document (1 hour expiry) */
 export async function getDocumentUrl(filePath: string): Promise<string | null> {
   const supabase = await createServerSupabaseClient();
-  const { data } = await supabase.storage
-    .from("documents")
-    .createSignedUrl(filePath, 3600);
+  const { data } = await signedUrl(supabase, filePath, 3600);
   return data?.signedUrl ?? null;
 }
 
@@ -440,7 +437,7 @@ export async function deleteDocument(
 
   // Then remove the storage object. A failed remove leaves an orphaned object (a
   // background sweep can reclaim it) but never a dangling row that would sign 404 URLs.
-  const { error: rmErr } = await supabase.storage.from("documents").remove([doc.file_url]);
+  const { error: rmErr } = await removeOriginals(supabase, [doc.file_url]);
   if (rmErr) return { error: rmErr.message };
 
   return {};

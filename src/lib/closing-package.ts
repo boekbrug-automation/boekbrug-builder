@@ -257,6 +257,7 @@ export interface ClosingPackageResult {
 export { isVerifiedForPackage, effectiveDirection } from "./package-attribution";
 import { isVerifiedForPackage, effectiveDirection } from "./package-attribution";
 import { telWoord, vervoeg } from "./nl-plural";
+import { getOriginal } from "./document-storage";
 
 // ─── Helpers (pure) ─────────────────────────────────────────────────────────────
 
@@ -2433,7 +2434,7 @@ export async function buildClosingPackageZip(args: {
     const path = ownedStoragePath(stored, ownerId);
     if (!path) return null;
     try {
-      const { data, error } = await supabase.storage.from("documents").download(path);
+      const { data, error } = await getOriginal(supabase, path);
       if (error || !data) return null;
       const bytes = new Uint8Array(await data.arrayBuffer());
       return { path, name, bytes };

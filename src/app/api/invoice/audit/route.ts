@@ -42,6 +42,7 @@ import { groundMoneyFields } from "@/lib/amount-grounding";
 import { extractEmbeddedInvoiceXml, parseEInvoice, looksLikeInvoiceXmlBytes } from "@/lib/e-invoice";
 import { summarizeAudit, type AuditedInvoice } from "@/lib/books-audit";
 import { requireOwner } from "@/lib/owner-only";
+import { getOriginal } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -148,7 +149,7 @@ export async function POST(req: NextRequest) {
     let mime: string | null = null;
     if (path) {
       try {
-        const { data } = await pipeline.storage.from("documents").download(path);
+        const { data } = await getOriginal(pipeline, path);
         if (data) {
           const buf = Buffer.from(await data.arrayBuffer());
           bytes = buf;

@@ -21,6 +21,7 @@ import {
   type BridgeFolder,
 } from '@/lib/bridge-tree'
 import BrugClient from './BrugClient'
+import { signedUrls } from '@/lib/document-storage'
 
 export const dynamic = 'force-dynamic'
 export const metadata = { title: 'Brug — BoekBrug' }
@@ -170,7 +171,7 @@ export default async function BrugServerPage() {
   }
   const signedByPath = new Map<string, string>()
   for (const chunk of chunkIds(toSign, 100)) {
-    const { data } = await pipeline.storage.from('documents').createSignedUrls(chunk, 3600)
+    const { data } = await signedUrls(pipeline, chunk, 3600)
     for (const s of data ?? []) {
       if (s.path && s.signedUrl && !s.error) signedByPath.set(s.path, s.signedUrl)
     }

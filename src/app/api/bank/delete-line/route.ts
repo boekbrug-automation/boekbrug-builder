@@ -17,6 +17,7 @@ import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { requireOwner } from "@/lib/owner-only";
 import { fetchAllRowsForIds, chunkIds } from "@/lib/supabase-paginate";
+import { removeOriginals } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -69,7 +70,7 @@ export async function POST(req: NextRequest) {
 
   if (docIds.length > 0) {
     for (const chunk of chunkIds(docIds)) await pipeline.from("documents").delete().eq("user_id", user.id).in("id", chunk);
-    if (paths.length > 0) await supabase.storage.from("documents").remove(paths).catch(() => undefined);
+    if (paths.length > 0) await removeOriginals(supabase, paths).catch(() => undefined);
   }
   await logAuditAction({
     userId: user.id, action: "bank.line_deleted", entityType: "bank_transaction", entityId: transactionId,

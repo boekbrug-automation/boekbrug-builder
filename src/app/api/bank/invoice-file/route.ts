@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
+import { signedUrl } from "@/lib/document-storage";
 
 export async function GET(req: NextRequest) {
   const supabase = await createServerSupabaseClient();
@@ -46,9 +47,7 @@ export async function GET(req: NextRequest) {
   }
 
   // 2. Sign the storage path (1 hour). pdf_url is the raw path, signed on read.
-  const { data: signed, error: signErr } = await supabase.storage
-    .from("documents")
-    .createSignedUrl(invoice.pdf_url, 3600);
+  const { data: signed, error: signErr } = await signedUrl(supabase, invoice.pdf_url, 3600);
 
   if (signErr || !signed?.signedUrl) {
     return NextResponse.json({ error: "sign_failed", detail: signErr?.message }, { status: 500 });

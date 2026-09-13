@@ -13,6 +13,7 @@ import { toStoragePath, pathBelongsToOwner } from "@/lib/storage-path";
 // [DOC-GEEN-BLADZIJDE] Één regel voor "kan dit als bladzijde getoond worden", gedeeld met het
 // scherm dat het antwoord gebruikt.
 import { previewKind } from "@/lib/document-preview";
+import { signedUrl } from "@/lib/document-storage";
 
 /**
  * [DOC-VERSE-LINK] An answer the CALLER can read.
@@ -126,9 +127,7 @@ export async function GET(
   // the owner-segment check on the path itself. The row proof alone was the bug — it says the
   // caller may see the record, not that the record points at their own bytes.
   const pipeline = createPipelineClient();
-  const { data: signed, error } = await pipeline.storage
-    .from("documents")
-    .createSignedUrl(storagePath, 300);
+  const { data: signed, error } = await signedUrl(pipeline, storagePath, 300);
 
   if (error || !signed) {
     console.error("[BOEK-011] createSignedUrl failed", {

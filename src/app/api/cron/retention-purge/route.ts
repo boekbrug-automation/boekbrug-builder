@@ -54,6 +54,7 @@ import { appUrl } from "@/lib/app-origin";
 import { logAuditAction } from "@/lib/audit";
 // [CRON-HARTSLAG] Vastleggen DAT deze cron draaide — zie src/lib/cron-heartbeat.ts.
 import { beginCronRun, finishCronRun } from "@/lib/cron-heartbeat";
+import { listOriginals, removeOriginals } from "@/lib/document-storage"
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -471,9 +472,7 @@ async function removePrefixRecursive(
 
   // ── Phase 1: read the entire level, deleting nothing ───────────────
   for (let offset = 0; ; offset += LIST_PAGE) {
-    const { data: entries, error } = await pipeline.storage
-      .from(BUCKET)
-      .list(prefix.replace(/\/$/, ""), { limit: LIST_PAGE, offset });
+    const { data: entries, error } = await listOriginals(pipeline, prefix.replace(/\/$/, ""), { limit: LIST_PAGE, offset });
 
     if (error) throw new Error(`storage list failed at ${prefix}: ${error.message}`);
     if (!entries || entries.length === 0) break;
@@ -496,7 +495,7 @@ async function removePrefixRecursive(
   let removed = 0;
   for (let i = 0; i < files.length; i += LIST_PAGE) {
     const batch = files.slice(i, i + LIST_PAGE);
-    const { error: rmErr } = await pipeline.storage.from(BUCKET).remove(batch);
+    const { error: rmErr } = await removeOriginals(pipeline, batch);
     if (rmErr) throw new Error(`storage remove failed at ${prefix}: ${rmErr.message}`);
     removed += batch.length;
   }

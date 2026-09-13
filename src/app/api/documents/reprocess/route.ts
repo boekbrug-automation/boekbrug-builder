@@ -26,6 +26,7 @@ import { looksLikeDailySalesReport, parseDailySalesReport } from "@/lib/daily-sa
 import { bookTurnoverRows, bookLedgerRows } from "@/lib/turnover-book";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
+import { getOriginal } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -104,7 +105,7 @@ export async function POST(req: NextRequest) {
     // Download the stored bytes (RLS: the query above already pinned to this user's docs).
     let buffer: Buffer;
     try {
-      const { data: blob, error } = await supabase.storage.from("documents").download(doc.file_url);
+      const { data: blob, error } = await getOriginal(supabase, doc.file_url);
       if (error || !blob) { results.push({ file: doc.file_name || doc.file_url, status: "error", message: "kon het bestand niet ophalen" }); failed++; continue; }
       buffer = Buffer.from(await blob.arrayBuffer());
     } catch {

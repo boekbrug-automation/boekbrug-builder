@@ -29,6 +29,7 @@ import { applyLearnedBankCategories } from "./bank-auto-categorize";
 import { reconcileStatementBalance, balanceWarning, type BalanceReconciliation } from "./bank-statement-balance";
 // [STATEMENT-CONTINUITY] gaten TUSSEN afschriften (ontbrekende periode / saldobreuk).
 import { findStatementGaps } from "./bank-statement-continuity";
+import { storeOriginal } from "./document-storage";
 
 export interface BankImportResult {
   format: string | null;
@@ -399,9 +400,7 @@ export async function importBankStatement(args: {
     } else {
       const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
       const storagePath = `${userId}/bank/${Date.now()}-${safeName}`;
-      const { error: upErr } = await pipeline.storage
-        .from("documents")
-        .upload(storagePath, buffer, { contentType: fileType, upsert: false });
+      const { error: upErr } = await storeOriginal(pipeline, storagePath, buffer, { contentType: fileType, upsert: false });
       if (!upErr) {
         const folderId = await resolveImportTarget(userId, min ?? null, "bank", "pipeline");
         const stmtYear = min ? Number(min.slice(0, 4)) : null;

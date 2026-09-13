@@ -58,6 +58,7 @@ import { trashedDuplicateCleared } from "@/lib/trashed-dedup";
 import { amsterdamToday } from "@/lib/format-nl";
 // [NUL-BTW-STIL] The zero-BTW question, shared with the verify queue that this door skips.
 import { zeroBtwUnexplained } from "@/lib/zero-btw";
+import { removeOriginals, storeOriginal } from "@/lib/document-storage";
 
 // Amount agreement tolerance between the AI-read invoice total and the bank
 // transaction. Within this → link silently. Outside → still allow, but flag a
@@ -609,9 +610,7 @@ async function runAttachInvoice(req: NextRequest) {
   // 7. Store the file in Storage + documents (same shape as manual upload).
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`;
-  const { error: uploadError } = await supabase.storage
-    .from("documents")
-    .upload(storagePath, buffer, { contentType: file.type, upsert: false });
+  const { error: uploadError } = await storeOriginal(supabase, storagePath, buffer, { contentType: file.type, upsert: false });
   if (uploadError) {
     return NextResponse.json({ error: "Opslaan van bestand mislukt" }, { status: 500 });
   }
@@ -645,7 +644,7 @@ async function runAttachInvoice(req: NextRequest) {
   // make this (auto-PAID) invoice's file unreachable there. Roll back the stored file
   // and stop rather than create an evidence-less paid invoice.
   if (docErr || !doc) {
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     // [DEDUP-ATOMIC] A concurrent double-submit (or a retry) that raced PAST the byte-hash SELECT
     // above trips the (user_id, content_hash) UNIQUE index here (23505). Treat it exactly like the
     // SELECT-found duplicate: the other request already created the document + its (auto-PAID)
@@ -813,7 +812,7 @@ async function runAttachInvoice(req: NextRequest) {
     // [R7/M4] Roll back the document row + stored file so the evidence isn't orphaned —
     // its content_hash would otherwise make byte-hash dedup BLOCK a re-upload (409).
     await pipeline.from("documents").delete().eq("id", documentId);
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     return NextResponse.json({ error: dbError?.message || "Aanmaken factuur mislukt" }, { status: 500 });
   }
 
@@ -855,7 +854,7 @@ async function runAttachInvoice(req: NextRequest) {
     );
     await pipeline.from("invoices").delete().eq("id", invoice.id);
     await pipeline.from("documents").delete().eq("id", documentId);
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     return NextResponse.json(
       {
         error: "Koppelen aan de banktransactie is niet gelukt — probeer het opnieuw.",

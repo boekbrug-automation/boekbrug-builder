@@ -67,12 +67,12 @@ import { runBankAutoConfirm } from '@/lib/bank-auto-confirm'
 // [BETAALBLOK] De betaalgegevens die in de mail horen — zie stap 13c en src/lib/pay-block.ts.
 import { payBlockForInvoice } from '@/lib/pay-link'
 import * as Sentry from '@sentry/nextjs'
+import { getOriginal, storeOriginal } from '@/lib/document-storage'
 
 // [FACTUUR-A] Storage bucket for generated invoice PDFs.
 // TODO(M): verify this bucket name in Supabase Storage before deploy —
 // upload is best-effort and never blocks legal delivery, but pdf_url
 // storage only works once the name is right.
-const PDF_BUCKET = 'documents'
 
 // [SEND-DURATION] This route had no ceiling, and it is the heaviest — and legally the most
 // consequential — request in the app: mint the number, commit it, render the PDF (with a retry),
@@ -583,7 +583,7 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         )
       }
-      const { data: blob, error: dlErr } = await createPipelineClient().storage.from('documents').download(pad)
+      const { data: blob, error: dlErr } = await getOriginal(createPipelineClient(), pad)
       if (dlErr || !blob) {
         return NextResponse.json(
           { error: 'De bijlage kon niet worden gelezen. Er is nog niets verstuurd — probeer het zo meteen opnieuw of kies een ander bestand.' },
@@ -920,9 +920,7 @@ export async function POST(request: NextRequest) {
       // zou zijn: een verstuurde factuur ligt vast ([ISSUED-STAYS]), dus de PDF die onder dit
       // nummer staat hoort nooit te veranderen. Bestaat het object al, dan is dat de JUISTE
       // eindtoestand en niet een mislukking — pdf_url wijst er al naar sinds de eerste verzending.
-      const { error: uploadError } = await supabase.storage
-        .from(PDF_BUCKET)
-        .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: false })
+      const { error: uploadError } = await storeOriginal(supabase, pdfPath, pdfBuffer, { contentType: 'application/pdf' })
 
       if (!uploadError) {
         await supabase

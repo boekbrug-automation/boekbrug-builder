@@ -124,6 +124,7 @@ import { supplierBtwForInvoice } from "@/lib/vendor-identity"
 import { telWoord, vervoeg } from "@/lib/nl-plural";
 // [NUL-GRONDSLAG] What may be stored when the split was not read — see read-amounts.ts.
 import { amountsToStore, markUnexplainedZeroBtw } from "@/lib/read-amounts";
+import { removeOriginals, storeOriginal } from "@/lib/document-storage"
 type InvoiceFieldConfidence =
   Database["public"]["Tables"]["invoices"]["Insert"]["field_confidence"]
 
@@ -345,8 +346,7 @@ async function runIntake(req: NextRequest) {
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_")
     const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`
     const contentType = file.type || "application/octet-stream"
-    const { error: upErr } = await supabase.storage
-      .from("documents").upload(storagePath, buffer, { contentType, upsert: false })
+    const { error: upErr } = await storeOriginal(supabase, storagePath, buffer, { contentType, upsert: false })
     if (upErr) {
       return NextResponse.json({ error: "Bestand kon niet worden opgeslagen — probeer het opnieuw." }, { status: 502 })
     }
@@ -361,7 +361,7 @@ async function runIntake(req: NextRequest) {
       })
       .select("id").single()
     if (docErr || !doc) {
-      await supabase.storage.from("documents").remove([storagePath])
+      await removeOriginals(supabase, [storagePath])
       // [DEDUP-ATOMIC] Same race the invoice and UBL inserts already handle: a concurrent
       // double-submit slips past the SELECT above and trips the (user_id, content_hash) UNIQUE
       // index (23505). This path alone still turned that into a generic 500. It is the same
@@ -971,9 +971,7 @@ async function runIntake(req: NextRequest) {
   // ── Store the file in Storage (shared by all destinations) ──────────────────
   const safeName = upload.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
   const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`
-  const { error: uploadError } = await supabase.storage
-    .from("documents")
-    .upload(storagePath, upload.buffer, { contentType: uploadType, upsert: false })
+  const { error: uploadError } = await storeOriginal(supabase, storagePath, upload.buffer, { contentType: uploadType, upsert: false })
   // [R1] A swallowed storage failure was the silent-loss bug: the flow continued and
   // wrote a documents/invoice row whose file_url points at a file that was NEVER stored,
   // while telling the owner "opgeslagen" / "factuur herkend". The evidence is then gone
@@ -1028,7 +1026,7 @@ async function runIntake(req: NextRequest) {
     // [R1] Don't report success on a failed write. Roll back the stored file so it isn't
     // orphaned in Storage (a leaked object with no row), and tell the owner to retry.
     if (docErr || !doc) {
-      await supabase.storage.from("documents").remove([storagePath])
+      await removeOriginals(supabase, [storagePath])
       // [23505] De drie zuster-inserts vertalen een verloren race al naar een nette 409 — dit was
       // de enige zonder. Een dubbelklik op uploaden kreeg hier een 500 "probeer opnieuw" over een
       // bestand dat er net wél in kwam, vermomd als opslagfout.
@@ -1173,7 +1171,7 @@ async function runIntake(req: NextRequest) {
   // to write, an invoice with document_id=null has unreachable evidence. Stop and roll
   // back the stored file rather than create a half-linked, evidence-less invoice.
   if (docErr || !doc) {
-    await supabase.storage.from("documents").remove([storagePath])
+    await removeOriginals(supabase, [storagePath])
     // [DEDUP-ATOMIC] A concurrent double-submit that raced past the byte-hash SELECT above trips the
     // (user_id, content_hash) UNIQUE index here (23505). Treat it like the SELECT-found duplicate —
     // the other request already stored the document + created its invoice, so returning a duplicate
@@ -1535,7 +1533,7 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
     // make the byte-hash dedup BLOCK a re-upload (409), trapping the owner with a file
     // they can neither re-add nor see as an invoice. Best-effort; then surface the error.
     await pipeline.from("documents").delete().eq("id", documentId)
-    await supabase.storage.from("documents").remove([storagePath])
+    await removeOriginals(supabase, [storagePath])
     return NextResponse.json({ error: dbError.message }, { status: 500 })
   }
 
@@ -1875,8 +1873,7 @@ async function handleUblInvoice(
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_")
   const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
   const contentType = file.type || "application/xml"
-  const { error: upErr } = await supabase.storage
-    .from("documents").upload(storagePath, buffer, { contentType, upsert: false })
+  const { error: upErr } = await storeOriginal(supabase, storagePath, buffer, { contentType, upsert: false })
   if (upErr) {
     return NextResponse.json({ error: "E-factuur kon niet worden opgeslagen — probeer het opnieuw." }, { status: 502 })
   }
@@ -1894,7 +1891,7 @@ async function handleUblInvoice(
     })
     .select("id").single()
   if (docErr || !doc) {
-    await supabase.storage.from("documents").remove([storagePath])
+    await removeOriginals(supabase, [storagePath])
     // [DEDUP-ATOMIC] A concurrent double-submit racing past the byte-hash SELECT trips the
     // (user_id, content_hash) UNIQUE index (23505) — treat it as the duplicate it is, not a 500,
     // so a second invoice is never created for the same file (the race the old path allowed).
@@ -1935,8 +1932,7 @@ async function handleUblInvoice(
     if (ingesloten) {
       const pdfNaam = ingesloten.filename ?? `${(v.invoiceNumber || "e-factuur").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf`
       const pdfPath = `${userId}/incoming/${Date.now()}-${pdfNaam.replace(/\.pdf$/i, "")}.pdf`
-      const { error: pdfErr } = await supabase.storage
-        .from("documents").upload(pdfPath, ingesloten.bytes, { contentType: "application/pdf", upsert: false })
+      const { error: pdfErr } = await storeOriginal(supabase, pdfPath, ingesloten.bytes, { contentType: "application/pdf", upsert: false })
       if (!pdfErr) openUrl = pdfPath
     }
   } catch {
@@ -2052,7 +2048,7 @@ async function handleUblInvoice(
   if (dbError) {
     // Roll back OUR document row + stored blob (never a pre-existing row — this file was fresh).
     await pipeline.from("documents").delete().eq("id", documentId)
-    await supabase.storage.from("documents").remove([storagePath])
+    await removeOriginals(supabase, [storagePath])
     return NextResponse.json({ error: dbError.message }, { status: 500 })
   }
   if (invoice?.id) {

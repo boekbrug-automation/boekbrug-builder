@@ -119,6 +119,7 @@ import { reportHandledFailure } from '@/lib/report-handled'
 import { supplierBtwForInvoice } from "./vendor-identity"
 // [NUL-GRONDSLAG] What may be stored when the split was not read — see read-amounts.ts.
 import { amountsToStore, markUnexplainedZeroBtw } from './read-amounts'
+import { removeOriginals, storeOriginal } from './document-storage'
 type InvoiceFieldConfidence =
   Database['public']['Tables']['invoices']['Insert']['field_confidence']
 
@@ -3194,8 +3195,7 @@ export async function syncUserEmails(
       {
         const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
         const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
-        const { error: upErr } = await supabase.storage
-          .from('documents').upload(storagePath, buf, { contentType: att.mimeType, upsert: false })
+        const { error: upErr } = await storeOriginal(supabase, storagePath, buf, { contentType: att.mimeType, upsert: false })
         if (!upErr) {
           const folderId = await resolveImportTarget(userId, null, 'facturen', 'pipeline')
           const { data: docRow, error: docErr } = await supabase.from('documents').insert({
@@ -3216,7 +3216,7 @@ export async function syncUserEmails(
             ai_doc_type: aiDocType,
             content_hash: hash,
           }).select('id').single()
-          if (docErr) await supabase.storage.from('documents').remove([storagePath])
+          if (docErr) await removeOriginals(supabase, [storagePath])
           else return (docRow as { id: string } | null)?.id ?? null
         }
       }
@@ -4187,9 +4187,7 @@ export async function syncUserEmails(
         const safeName = attachment.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
         const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
 
-        const { error: uploadErr } = await supabase.storage
-          .from('documents')
-          .upload(storagePath, fileBuffer, {
+        const { error: uploadErr } = await storeOriginal(supabase, storagePath, fileBuffer, {
             contentType: attachment.mimeType,
             upsert: false,
           })
@@ -4258,7 +4256,7 @@ export async function syncUserEmails(
           }
 
           if (recovered) {
-            await supabase.storage.from('documents').remove([storagePath])
+            await removeOriginals(supabase, [storagePath])
             documentId = recovered.id
             pdfUrl = recovered.file_url
           } else if (docErr || !doc) {
@@ -4267,7 +4265,7 @@ export async function syncUserEmails(
             // the closing package). Remove the file; the invoice still saves (the sync
             // deliberately never loses extracted invoice data), but without a broken link.
             console.error('[BOEK-011] Document insert failed:', docErr?.message)
-            await supabase.storage.from('documents').remove([storagePath])
+            await removeOriginals(supabase, [storagePath])
             documentId = null
             pdfUrl = null
           } else {
@@ -4287,9 +4285,7 @@ export async function syncUserEmails(
                 const ingesloten = extractEmbeddedPdf(Buffer.from(attachment.data, 'base64').toString('utf8'))
                 if (ingesloten) {
                   const pdfPad = `${storagePath.replace(/\.[^./]*$/, '')}.pdf`
-                  const { error: pdfErr } = await supabase.storage
-                    .from('documents')
-                    .upload(pdfPad, ingesloten.bytes, { contentType: 'application/pdf', upsert: false })
+                  const { error: pdfErr } = await storeOriginal(supabase, pdfPad, ingesloten.bytes, { contentType: 'application/pdf', upsert: false })
                   if (!pdfErr) pdfUrl = pdfPad
                 }
               } catch (e) {
@@ -4806,7 +4802,7 @@ export async function syncUserEmails(
             // bucket policy, and this call DELETES. An unattributable key is left alone: an
             // orphaned object is reclaimable by the retention sweep, another tenant's bill is not.
             const teVerwijderen = ownedStoragePath(pdfUrl, userId)
-            if (teVerwijderen) await supabase.storage.from('documents').remove([teVerwijderen])
+            if (teVerwijderen) await removeOriginals(supabase, [teVerwijderen])
           }
           // [XML-PDF] Sinds een e-factuur ook een uitgepakte PDF kan opleveren, is `pdfUrl` niet
           // meer altijd hetzelfde object als het bestand dat hierboven is geüpload. Zonder deze
@@ -4814,7 +4810,7 @@ export async function syncUserEmails(
           // — precies de wees die het blok hierboven komt opruimen, één bestand verderop.
           if (uploadedPath && pdfUrl !== uploadedPath) {
             const xmlWees = ownedStoragePath(uploadedPath, userId)
-            if (xmlWees) await supabase.storage.from('documents').remove([xmlWees])
+            if (xmlWees) await removeOriginals(supabase, [xmlWees])
           }
           // [watermark] NOT complete — a genuine save failure; the mark stops here so the next
           // sync re-fetches and retries this email … unless this attachment has now failed

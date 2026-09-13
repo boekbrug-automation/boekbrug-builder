@@ -16,6 +16,7 @@ import { createPipelineClient } from "@/lib/supabase-pipeline"
 import { ensureImportedFolder } from "@/lib/bestanden"
 import { computeContentHash } from "@/lib/content-hash"
 import { releaseTrashedHash } from "@/lib/trashed-dedup"
+import { removeOriginals, storeOriginal } from "./document-storage"
 
 export async function storeRawIncoming(
   buffer: Buffer,
@@ -41,8 +42,7 @@ export async function storeRawIncoming(
     if (existing?.id) await releaseTrashedHash(supabase, userId, existing.id)
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_")
     const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
-    const { error: upErr } = await supabase.storage
-      .from("documents").upload(storagePath, buffer, { contentType: file.type || "application/octet-stream", upsert: false })
+    const { error: upErr } = await storeOriginal(supabase, storagePath, buffer, { contentType: file.type || "application/octet-stream", upsert: false })
     if (upErr) {
       console.error("[STORE-RAW] storage upload failed — the file is NOT kept", { userId, file: file.name, error: upErr.message })
       return null
@@ -57,7 +57,7 @@ export async function storeRawIncoming(
     }).select("id").single()
     if (docErr || !doc) {
       console.error("[STORE-RAW] documents insert failed — the file is NOT kept", { userId, file: file.name, error: docErr?.message })
-      await supabase.storage.from("documents").remove([storagePath]).catch(() => {})
+      await removeOriginals(supabase, [storagePath]).catch(() => {})
       return null
     }
     return doc.id

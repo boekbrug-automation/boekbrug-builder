@@ -15,6 +15,7 @@ import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { attachmentsByTransaction, attachmentTypeAllowed, ATTACHMENT_MAX_BYTES } from "@/lib/bank-attachments";
 import { fetchAllRowsForIds } from "@/lib/supabase-paginate";
+import { removeOriginals, signedUrl, storeOriginal } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -54,7 +55,7 @@ export async function GET(req: NextRequest) {
     const path = pathById.get(a.documentId);
     if (!path) return { ...a, url: null };
     // Signed with the SESSION client (RLS on storage): the owner can only ever reach their own file.
-    const { data: signed } = await ctx.supabase.storage.from("documents").createSignedUrl(path, 3600);
+    const { data: signed } = await signedUrl(ctx.supabase, path, 3600);
     return { ...a, url: signed?.signedUrl ?? null };
   }));
   return NextResponse.json({ ok: true, attachments: withUrls });
@@ -80,7 +81,7 @@ export async function POST(req: NextRequest) {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "bijlage";
   const storagePath = `${user.id}/bank/${transactionId}/${Date.now()}-${safeName}`;
   const buffer = Buffer.from(await file.arrayBuffer());
-  const { error: upErr } = await supabase.storage.from("documents").upload(storagePath, buffer, { contentType: file.type || "application/octet-stream", upsert: false });
+  const { error: upErr } = await storeOriginal(supabase, storagePath, buffer, { contentType: file.type || "application/octet-stream", upsert: false });
   if (upErr) return NextResponse.json({ error: "upload_failed", detail: upErr.message }, { status: 500 });
 
   // The documents row: processed, typed 'overig', never an invoice candidate. The note names the
@@ -97,7 +98,7 @@ export async function POST(req: NextRequest) {
     .select("id")
     .single();
   if (docErr || !doc) {
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     return NextResponse.json({ error: "document_insert_failed", detail: docErr?.message }, { status: 500 });
   }
   const { data: link, error: linkErr } = await pipeline
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest) {
     .single();
   if (linkErr || !link) {
     await pipeline.from("documents").delete().eq("id", (doc as { id: string }).id).eq("user_id", user.id);
-    await supabase.storage.from("documents").remove([storagePath]);
+    await removeOriginals(supabase, [storagePath]);
     return NextResponse.json({ error: "attach_failed", detail: linkErr?.message }, { status: 500 });
   }
   await logAuditAction({
@@ -136,7 +137,7 @@ export async function DELETE(req: NextRequest) {
   if (delErr) return NextResponse.json({ error: "delete_failed", detail: delErr.message }, { status: 500 });
   if (doc) {
     await pipeline.from("documents").delete().eq("id", doc.id).eq("user_id", user.id);
-    await supabase.storage.from("documents").remove([doc.file_url]).catch(() => undefined);
+    await removeOriginals(supabase, [doc.file_url]).catch(() => undefined);
   }
   await logAuditAction({
     userId: user.id, action: "bank.attachment_removed", entityType: "bank_transaction", entityId: row.transaction_id,

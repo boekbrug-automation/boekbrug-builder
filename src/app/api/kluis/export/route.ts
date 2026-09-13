@@ -12,6 +12,7 @@ import JSZip from 'jszip'
 import { keepThroughYear } from '@/lib/compliance-vault'
 import { fetchAllRows } from '@/lib/supabase-paginate'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { getOriginal } from '@/lib/document-storage'
 
 export const dynamic = 'force-dynamic'
 
@@ -126,7 +127,7 @@ export async function GET(req: NextRequest) {
     } else if (!d.file_url) {
       status = 'geen bestand'
     } else {
-      const { data: blob, error } = await supabase.storage.from('documents').download(d.file_url)
+      const { data: blob, error } = await getOriginal(supabase, d.file_url)
       if (error || !blob) {
         status = 'niet gevonden in opslag'
         skipped.push(`${d.file_name} (${status})`)

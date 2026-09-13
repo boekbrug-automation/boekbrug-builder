@@ -45,6 +45,7 @@ import { hasSettledMoney } from "@/lib/invoice-removal";
 import { CLAUDE_MODEL } from "@/lib/ai";
 import { resolveModel, isModelUnavailableError, isAiConfigError, MODEL_UNAVAILABLE_MESSAGE } from "@/lib/ai-model";
 import type { Database } from "@/types/database.types";
+import { getOriginal } from "@/lib/document-storage";
 
 type InvoiceUpdate = Database["public"]["Tables"]["invoices"]["Update"];
 
@@ -277,7 +278,7 @@ async function runReimport(
     return NextResponse.json({ error: "Kon het bestand niet lezen" }, { status: 403 });
   }
   const pipeline = createPipelineClient();
-  const { data: blob, error: dlErr } = await pipeline.storage.from("documents").download(storagePath);
+  const { data: blob, error: dlErr } = await getOriginal(pipeline, storagePath);
   if (dlErr || !blob) {
     console.error("[REIMPORT] download failed", { invoiceId: id, storagePath, dlErr });
     return NextResponse.json({ error: "Kon het bestand niet lezen" }, { status: 500 });

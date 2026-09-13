@@ -69,6 +69,7 @@ import {
   type LineSelection,
 } from '@/lib/partial-credit'
 import { creditedTotalsFrom } from '@/lib/credited-invoices'
+import { storeOriginal } from '@/lib/document-storage'
 
 // ── [CREDIT-NAMENS] De boekhouder corrigeert wat hij zelf heeft uitgereikt ──────────────────────
 //
@@ -102,7 +103,6 @@ import { creditedTotalsFrom } from '@/lib/credited-invoices'
 // use. A creditnota's PDF MUST be stored here and its path written to
 // invoices.pdf_url, or the correction document is missing from the accountant's
 // closing package (the package resolves an outgoing invoice's PDF via pdf_url).
-const PDF_BUCKET = 'documents'
 
 export async function POST(request: NextRequest) {
   try {
@@ -643,9 +643,7 @@ export async function POST(request: NextRequest) {
         // storage.objects, dus een overschrijving kan niet slagen. Hier is dat sowieso nooit aan
         // de orde — creditnotaNumber komt vers uit de reeks, dus het pad is per definitie nieuw —
         // maar `upsert: true` suggereerde een mogelijkheid die niet bestaat.
-        const { error: uploadError } = await (boekhouder ? createPipelineClient() : supabase).storage
-          .from(PDF_BUCKET)
-          .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: false })
+        const { error: uploadError } = await storeOriginal(boekhouder ? createPipelineClient() : supabase, pdfPath, pdfBuffer, { contentType: 'application/pdf' })
         if (!uploadError) {
           await db
             .from('invoices')

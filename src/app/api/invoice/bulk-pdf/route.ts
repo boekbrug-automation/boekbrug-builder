@@ -39,6 +39,7 @@ import { planBulkPdf, bulkZipName, BULK_PDF_MAX } from "@/lib/invoice-bulk-pdf";
 import { renderInvoicePdf } from "@/lib/invoice-pdf-server";
 // [CREDITNOTA-EXTERN] The linked original first, the typed external reference second.
 import { creditReferenceOf } from "@/lib/creditnota";
+import { getOriginal } from "@/lib/document-storage";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -240,7 +241,7 @@ export async function POST(req: NextRequest) {
 
     // 1. The stored file — the document that was actually sent, and therefore the evidence.
     if (stored) {
-      const { data: blob } = await supabase.storage.from("documents").download(stored);
+      const { data: blob } = await getOriginal(supabase, stored);
       if (blob) {
         files.push({ name, bytes: new Uint8Array(await blob.arrayBuffer()) });
         continue;
