@@ -93,23 +93,30 @@ export const LIMITS = {
   website: 200,
 } as const;
 
-/** Dutch, and about what the office must fix — this is shown next to the field. */
-export type DirectoryProblem =
-  | "Vul de naam van je kantoor in"
-  | "Vul de plaats in"
-  | "Vul een e-mailadres in waarop ondernemers je mogen benaderen"
-  | "Dat e-mailadres klopt niet"
-  | "Een website begint met https://"
-  | "Naam van het kantoor is te lang"
-  | "Plaats is te lang"
-  | "Eén specialisatie is te lang"
-  | "Kies er maximaal zes"
-  | "Kies minstens één taal waarin je een ondernemer kunt helpen";
-
 /**
- * Trim, drop the empties, and cap the list — before validation, so "  " is an empty field and not
- * a passing one. Returns a NEW object; the caller's input is never modified.
+ * [TAAL] What the office must fix, as KEYS — the module holds no language of its own.
+ *
+ * These sentences are read by a boekhouder on their own screen, and the accountant module follows
+ * the same rule as every other screen: Dutch is the source language and the screen may be shown in
+ * another one. The first accountants on this product read Arabic, so a Dutch-only validation
+ * message is the difference between a form they can finish and one they abandon.
+ *
+ * Note the contrast with EMPTY_LIST and emptyAfterFilter further down, which ARE Dutch strings:
+ * those render on /boekhouders, a public Dutch page with no session and no language setting. Same
+ * file, two audiences, and the rule follows the audience rather than the file.
  */
+export type DirectoryProblem =
+  | "gids.eis.naam"
+  | "gids.eis.plaats"
+  | "gids.eis.mail"
+  | "gids.eis.mailFout"
+  | "gids.eis.site"
+  | "gids.eis.naamLang"
+  | "gids.eis.plaatsLang"
+  | "gids.eis.specialisatieLang"
+  | "gids.eis.specialisatiesMax"
+  | "gids.eis.taal";
+
 export function normaliseLanguages(raw: unknown): Locale[] {
   const wanted = Array.isArray(raw) ? raw : [];
   // Walked in DIRECTORY_LANGUAGES order rather than the caller's, so two offices that ticked the
@@ -153,33 +160,33 @@ export function normaliseEntry(raw: {
  */
 export function entryProblems(entry: DirectoryEntry): DirectoryProblem[] {
   const problems: DirectoryProblem[] = [];
-  if (entry.officeName.length === 0) problems.push("Vul de naam van je kantoor in");
-  else if (entry.officeName.length > LIMITS.officeName) problems.push("Naam van het kantoor is te lang");
+  if (entry.officeName.length === 0) problems.push("gids.eis.naam");
+  else if (entry.officeName.length > LIMITS.officeName) problems.push("gids.eis.naamLang");
 
-  if (entry.city.length === 0) problems.push("Vul de plaats in");
-  else if (entry.city.length > LIMITS.city) problems.push("Plaats is te lang");
+  if (entry.city.length === 0) problems.push("gids.eis.plaats");
+  else if (entry.city.length > LIMITS.city) problems.push("gids.eis.plaatsLang");
 
   if (entry.contactEmail.length === 0) {
-    problems.push("Vul een e-mailadres in waarop ondernemers je mogen benaderen");
+    problems.push("gids.eis.mail");
   } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(entry.contactEmail) ||
              entry.contactEmail.length > LIMITS.contactEmail) {
-    problems.push("Dat e-mailadres klopt niet");
+    problems.push("gids.eis.mailFout");
   }
 
   // http:// is refused rather than upgraded: a link we rewrote is a link the office did not check,
   // and it is their name under it.
   if (entry.website !== null && !/^https:\/\/[^\s]+\.[^\s]{2,}/.test(entry.website)) {
-    problems.push("Een website begint met https://");
+    problems.push("gids.eis.site");
   }
-  if (entry.specialisms.some((s) => s.length > LIMITS.specialism)) problems.push("Eén specialisatie is te lang");
-  if (entry.specialisms.length > LIMITS.specialisms) problems.push("Kies er maximaal zes");
+  if (entry.specialisms.some((s) => s.length > LIMITS.specialism)) problems.push("gids.eis.specialisatieLang");
+  if (entry.specialisms.length > LIMITS.specialisms) problems.push("gids.eis.specialisatiesMax");
 
   // [KANTOORGIDS-TAAL] Required, unlike the specialisms. An entry with no language cannot answer
   // the question the owner actually opened this page with, and it is invisible to every language
   // filter — so it would sit in the list being passed over, which is worse for the office than
   // not being listed. One tick is the whole cost.
   if (entry.languages.length === 0) {
-    problems.push("Kies minstens één taal waarin je een ondernemer kunt helpen");
+    problems.push("gids.eis.taal");
   }
 
   return problems;

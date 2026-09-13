@@ -34,9 +34,9 @@ test("[KANTOORGIDS] whitespace is not a filled-in field", () => {
   const entry = normaliseEntry({ accountantId: "a1", officeName: "   ", city: "\t", contactEmail: " " });
   assert.strictEqual(entry.officeName, "");
   assert.deepStrictEqual(entryProblems(entry).slice(0, 3), [
-    "Vul de naam van je kantoor in",
-    "Vul de plaats in",
-    "Vul een e-mailadres in waarop ondernemers je mogen benaderen",
+    "gids.eis.naam",
+    "gids.eis.plaats",
+    "gids.eis.mail",
   ]);
 });
 
@@ -80,24 +80,24 @@ test("[KANTOORGIDS] a complete entry has nothing to fix", () => {
 });
 
 test("[KANTOORGIDS] a website must be https, and is never silently rewritten", () => {
-  assert.deepStrictEqual(entryProblems(heel({ website: "http://deboer.nl" })), ["Een website begint met https://"]);
-  assert.deepStrictEqual(entryProblems(heel({ website: "deboer.nl" })), ["Een website begint met https://"]);
+  assert.deepStrictEqual(entryProblems(heel({ website: "http://deboer.nl" })), ["gids.eis.site"]);
+  assert.deepStrictEqual(entryProblems(heel({ website: "deboer.nl" })), ["gids.eis.site"]);
   // The one that matters: a link that would run script if a page ever rendered it unguarded.
-  assert.deepStrictEqual(entryProblems(heel({ website: "javascript:alert(1)" })), ["Een website begint met https://"]);
+  assert.deepStrictEqual(entryProblems(heel({ website: "javascript:alert(1)" })), ["gids.eis.site"]);
 });
 
 test("[KANTOORGIDS] a bad e-mail is named as bad, not as missing", () => {
   for (const bad of ["info", "info@", "@deboer.nl", "info@deboer", "in fo@deboer.nl"]) {
-    assert.deepStrictEqual(entryProblems(heel({ contactEmail: bad })), ["Dat e-mailadres klopt niet"], bad);
+    assert.deepStrictEqual(entryProblems(heel({ contactEmail: bad })), ["gids.eis.mailFout"], bad);
   }
 });
 
 test("[KANTOORGIDS] too long is refused per field", () => {
   assert.deepStrictEqual(entryProblems(heel({ officeName: "x".repeat(LIMITS.officeName + 1) })),
-    ["Naam van het kantoor is te lang"]);
-  assert.deepStrictEqual(entryProblems(heel({ city: "x".repeat(LIMITS.city + 1) })), ["Plaats is te lang"]);
+    ["gids.eis.naamLang"]);
+  assert.deepStrictEqual(entryProblems(heel({ city: "x".repeat(LIMITS.city + 1) })), ["gids.eis.plaatsLang"]);
   assert.deepStrictEqual(entryProblems(heel({ specialisms: ["x".repeat(LIMITS.specialism + 1)] })),
-    ["Eén specialisatie is te lang"]);
+    ["gids.eis.specialisatieLang"]);
 });
 
 test("[KANTOORGIDS] the order is availability, then name — and nothing else", () => {
@@ -151,7 +151,7 @@ test("[KANTOORGIDS-TAAL] an entry with no language may not be published", () => 
   const zonder = normaliseEntry({
     accountantId: "a1", officeName: "Kantoor De Boer", city: "Utrecht", contactEmail: "info@deboer.nl",
   });
-  assert.deepStrictEqual(entryProblems(zonder), ["Kies minstens één taal waarin je een ondernemer kunt helpen"]);
+  assert.deepStrictEqual(entryProblems(zonder), ["gids.eis.taal"]);
   // One tick is the whole cost, and it is the difference between being findable and being scrolled past.
   assert.deepStrictEqual(entryProblems({ ...zonder, languages: ["nl"] }), []);
 });

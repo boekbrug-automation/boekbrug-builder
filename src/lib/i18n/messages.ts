@@ -15847,6 +15847,49 @@ export const MESSAGES = {
   'beh.vast.verspreid': { nl: 'verspreid', ar: 'متفرّق', en: 'spread out' },
   'beh.vast.geen': { nl: 'Geen enkele vastgelegde reden in deze periode.', ar: 'لا أسباب مسجّلة في هذه الفترة.', en: 'No recorded reason at all in this period.' },
 
+  // ── [KANTOORGIDS] Het kantoor vult zijn eigen vermelding in ────────────────────────────────
+  // De boekhouder is een ingelogde gebruiker met een eigen taalinstelling: wat hij op ZIJN scherm
+  // leest volgt zijn eigen keuze, niet die van een ondernemer. Zie AGENTS.md.
+  'gids.titel': { nl: 'Je kantoor in de gids', ar: 'مكتبك في الدليل', en: 'Your office in the directory' },
+  'gids.uitleg': { nl: 'Je staat er alleen in als je hem aanzet, en je kunt hem altijd weer uitzetten.', ar: 'لا تظهر في الدليل إلا إذا شغّلته بنفسك، ويمكنك إيقافه متى شئت.', en: 'You only appear once you switch it on, and you can switch it off again at any time.' },
+  'gids.uitleg.volgorde': { nl: 'Er is geen betaalde plek: kantoren met ruimte eerst, daarna op naam.', ar: 'لا مكان مدفوع: المكاتب التي لديها متّسع أولًا، ثم بالاسم.', en: 'There is no paid place: offices with room first, then by name.' },
+  'gids.staat.laden': { nl: 'Bezig met laden…', ar: 'جارٍ التحميل…', en: 'Loading…' },
+  'gids.staat.in': { nl: 'Je staat in de gids', ar: 'أنت مُدرَج في الدليل', en: 'You are in the directory' },
+  'gids.staat.uit': { nl: 'Je staat niet in de gids', ar: 'لست مُدرَجًا في الدليل', en: 'You are not in the directory' },
+  'gids.veld.naam': { nl: 'Naam van je kantoor', ar: 'اسم مكتبك', en: 'Your office name' },
+  'gids.veld.plaats': { nl: 'Plaats', ar: 'المدينة', en: 'Town' },
+  'gids.veld.specialisaties': { nl: 'Waar ben je aan gewend? (maximaal zes, komma ertussen)', ar: 'ما الذي اعتدت عليه؟ (ستة كحدّ أقصى، بينها فاصلة)', en: 'What are you used to? (six at most, comma between)' },
+  'gids.veld.specialisaties.hint': { nl: 'Dit is geen keurmerk en wordt door ons niet gecontroleerd — het staat er zoals jij het typt.', ar: 'هذه ليست شهادة اعتماد ولا نتحقّق منها — تظهر كما تكتبها أنت.', en: 'This is not a certification and we do not check it — it appears exactly as you type it.' },
+  'gids.veld.specialisaties.voorbeeld': { nl: 'zzp, transport, horeca', ar: 'zzp، نقل، مطاعم', en: 'zzp, transport, hospitality' },
+  'gids.veld.talen': { nl: 'In welke talen kun je een ondernemer helpen?', ar: 'بأي اللغات يمكنك مساعدة صاحب عمل؟', en: 'Which languages can you help an entrepreneur in?' },
+  'gids.veld.talen.hint': { nl: 'Ondernemers filteren hierop. Wij controleren het niet: er staat dat jij dit zegt.', ar: 'أصحاب الأعمال يصفّون بها. نحن لا نتحقّق منها: مكتوب أنك أنت من يقول ذلك.', en: 'Entrepreneurs filter on this. We do not check it: it says that you say so.' },
+  'gids.veld.mail': { nl: 'E-mailadres waarop ondernemers je mogen benaderen', ar: 'بريد إلكتروني يجوز لأصحاب الأعمال مراسلتك عليه', en: 'E-mail address entrepreneurs may approach you on' },
+  'gids.veld.mail.hint': { nl: 'Dit adres staat openbaar op de gids. Gebruik je kantooradres, niet je inlogadres.', ar: 'هذا العنوان يظهر علنًا في الدليل. استخدم عنوان مكتبك، لا عنوان تسجيل دخولك.', en: 'This address is public on the directory. Use your office address, not your login address.' },
+  'gids.veld.site': { nl: 'Website (mag leeg)', ar: 'الموقع الإلكتروني (يجوز تركه فارغًا)', en: 'Website (may be left empty)' },
+  'gids.veld.ruimte': { nl: 'Ik neem nieuwe klanten aan. Kantoren die dit aanvinken staan bovenaan.', ar: 'أقبل عملاء جددًا. المكاتب التي تحدّد هذا تظهر في الأعلى.', en: 'I take on new clients. Offices that tick this appear at the top.' },
+  'gids.knop.bijwerken': { nl: 'Bijwerken', ar: 'تحديث', en: 'Update' },
+  'gids.knop.aanzetten': { nl: 'Zet mij in de gids', ar: 'أدرجني في الدليل', en: 'Put me in the directory' },
+  'gids.knop.uitzetten': { nl: 'Haal mij uit de gids', ar: 'أخرجني من الدليل', en: 'Take me out of the directory' },
+  'gids.knop.opslaan': { nl: 'Alleen opslaan', ar: 'حفظ فقط', en: 'Save only' },
+  'gids.knop.verwijderen': { nl: 'Alles verwijderen', ar: 'حذف الكل', en: 'Delete everything' },
+  'gids.fout.lezen': { nl: 'Je vermelding is niet te lezen.', ar: 'تعذّرت قراءة إدراجك.', en: 'Your listing cannot be read.' },
+  'gids.fout.opslaan': { nl: 'Opslaan is niet gelukt.', ar: 'لم ينجح الحفظ.', en: 'Saving did not work.' },
+  'gids.fout.verwijderen': { nl: 'Verwijderen is niet gelukt.', ar: 'لم ينجح الحذف.', en: 'Deleting did not work.' },
+  'gids.opgeslagen.in': { nl: 'Je kantoor staat in de gids.', ar: 'مكتبك مُدرَج في الدليل.', en: 'Your office is in the directory.' },
+  'gids.opgeslagen.uit': { nl: 'Opgeslagen. Je staat niet in de gids.', ar: 'تم الحفظ. لست مُدرَجًا في الدليل.', en: 'Saved. You are not in the directory.' },
+  'gids.weg': { nl: 'Je vermelding is weggehaald.', ar: 'تمت إزالة إدراجك.', en: 'Your listing has been removed.' },
+  // Wat het kantoor moet aanpassen — de zin staat bij het veld, nooit als "er klopt iets niet".
+  'gids.eis.naam': { nl: 'Vul de naam van je kantoor in', ar: 'أدخل اسم مكتبك', en: 'Fill in your office name' },
+  'gids.eis.naamLang': { nl: 'Naam van het kantoor is te lang', ar: 'اسم المكتب طويل جدًا', en: 'The office name is too long' },
+  'gids.eis.plaats': { nl: 'Vul de plaats in', ar: 'أدخل المدينة', en: 'Fill in the town' },
+  'gids.eis.plaatsLang': { nl: 'Plaats is te lang', ar: 'اسم المدينة طويل جدًا', en: 'The town is too long' },
+  'gids.eis.mail': { nl: 'Vul een e-mailadres in waarop ondernemers je mogen benaderen', ar: 'أدخل بريدًا إلكترونيًا يجوز لأصحاب الأعمال مراسلتك عليه', en: 'Fill in an e-mail address entrepreneurs may approach you on' },
+  'gids.eis.mailFout': { nl: 'Dat e-mailadres klopt niet', ar: 'هذا البريد الإلكتروني غير صحيح', en: 'That e-mail address is not right' },
+  'gids.eis.site': { nl: 'Een website begint met https://', ar: 'الموقع الإلكتروني يبدأ بـ https://', en: 'A website starts with https://' },
+  'gids.eis.specialisatieLang': { nl: 'Eén specialisatie is te lang', ar: 'أحد التخصصات طويل جدًا', en: 'One specialism is too long' },
+  'gids.eis.specialisatiesMax': { nl: 'Kies er maximaal zes', ar: 'اختر ستة كحدّ أقصى', en: 'Pick six at most' },
+  'gids.eis.taal': { nl: 'Kies minstens één taal waarin je een ondernemer kunt helpen', ar: 'اختر لغة واحدة على الأقل يمكنك مساعدة صاحب عمل بها', en: 'Pick at least one language you can help an entrepreneur in' },
+
 } satisfies Record<string, Message>
 
 export type MessageKey = keyof typeof MESSAGES

@@ -33887,6 +33887,28 @@ test("[KANTOORGIDS-TAAL] the language filters, never ranks, and is never chosen 
   assert.match(lijst, /Dit kantoor zegt/, "the gids presents a language as something we verified");
   assert.match(paneel, /DIRECTORY_LANGUAGES\.map/, "the office types its languages instead of ticking them");
 
+  // 4b — and the panel holds no language of its own. The boekhouder is a logged-in user with their
+  // OWN preferred_language, and the first offices on this product read Arabic: this is exactly the
+  // screen where a Dutch-only validation message is the difference between a form they finish and
+  // one they abandon. Every sentence goes through the translator, and entryProblems returns KEYS
+  // rather than sentences so the pure module cannot smuggle one in either.
+  assert.match(paneel, /const t = translator\(locale\)/, "the gids panel stopped translating");
+  //
+  // Both shapes are checked, and the second is the one that matters: a string literal is the
+  // obvious way Dutch comes back, but the LIKELY way is bare JSX text between two tags — which is
+  // exactly how this panel was written before it was translated, and what a quoted-string scan
+  // walks straight past. Measured: with `{t('gids.veld.plaats')}` swapped for the words themselves,
+  // a literal-only check stayed green.
+  const zinnen = [
+    ...[...paneel.matchAll(/'([A-Z][a-z]+ [^']{4,})'/g)].map((m) => m[1]),
+    ...[...paneel.matchAll(/>\s*([A-Z][a-z]+(?:\s+[a-z]{2,}){2,}[^<{]*)</g)].map((m) => m[1].trim()),
+  ];
+  assert.deepStrictEqual(zinnen, [],
+    `the gids panel carries Dutch of its own again: ${zinnen.join(" | ")}`);
+  assert.match(puur, /export type DirectoryProblem =\n\s*\| "gids\.eis\./,
+    "entryProblems went back to returning sentences — a pure module holding one language is how " +
+      "a translated screen stays permanently half-finished");
+
   // 5 — and still nothing to buy, on the file the rows now render from.
   const RANG2 = /\b(rank|ranking|score|tier|featured|sponsored|promoted|boost|priority|paid_position)\b/i;
   assert.doesNotMatch(lijst, RANG2, "the rendered list grew something to rank offices by");

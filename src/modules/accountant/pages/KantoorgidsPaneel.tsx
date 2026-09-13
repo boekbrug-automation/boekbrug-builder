@@ -17,11 +17,18 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
   DIRECTORY_LANGUAGES, LANGUAGE_LABEL, LIMITS, entryProblems, normaliseEntry,
+  type DirectoryProblem,
 } from '@/lib/accountant-directory'
 import type { Locale } from '@/lib/i18n/locale'
 // [SERVER-ZIN] Een code is geen zin: wat de route stuurt gaat hier langs failureText, dat een
 // Nederlandse zin doorlaat en een machinewoord vervangt door wat dit scherm zelf zegt.
 import { failureText } from '@/lib/server-message'
+// [TAAL] Een component houdt geen eigen taal. De boekhouder is een ingelogde gebruiker met een
+// eigen taalinstelling — de eerste kantoren op dit product lezen Arabisch — en dit is precies het
+// scherm waarop een Nederlandse foutmelding het verschil is tussen een formulier dat hij afmaakt
+// en een dat hij laat staan.
+import { translator } from '@/lib/i18n/t'
+import { useLocale } from '@/lib/i18n/use-locale'
 
 const card: React.CSSProperties = {
   background: '#fff', border: '1px solid #e8eaed', borderRadius: 12, padding: 24, maxWidth: 720,
@@ -42,6 +49,8 @@ const knop: React.CSSProperties = {
 const knopUit: React.CSSProperties = { ...knop, background: '#fff', color: '#1a73e8' }
 
 export default function KantoorgidsPaneel() {
+  const locale = useLocale()
+  const t = translator(locale)
   const [officeName, setOfficeName] = useState('')
   const [city, setCity] = useState('')
   const [specialisms, setSpecialisms] = useState('')
@@ -53,7 +62,10 @@ export default function KantoorgidsPaneel() {
 
   const [laden, setLaden] = useState(true)
   const [bezig, setBezig] = useState(false)
-  const [problemen, setProblemen] = useState<string[]>([])
+  // [TAAL] Sleutels, geen zinnen: entryProblems geeft message-keys terug en dit scherm rendert ze.
+  // Als string[] zou een willekeurige string hier langs de vertaler glippen en als sleutel op het
+  // scherm belanden — 'gids.eis.naam' onder een veld is erger dan Nederlands onder een veld.
+  const [problemen, setProblemen] = useState<DirectoryProblem[]>([])
   const [fout, setFout] = useState<string | null>(null)
   const [gelukt, setGelukt] = useState<string | null>(null)
 
@@ -65,7 +77,7 @@ export default function KantoorgidsPaneel() {
         const json = await res.json().catch(() => null)
         if (!levend) return
         if (!res.ok) {
-          setFout(failureText(res.status, json, 'Je vermelding is niet te lezen.'))
+          setFout(failureText(res.status, json, t('gids.fout.lezen')))
           return
         }
         if (json?.entry) {
@@ -79,7 +91,7 @@ export default function KantoorgidsPaneel() {
         }
         setPublished(json?.published === true)
       } catch {
-        if (levend) setFout('Je vermelding is niet te lezen.')
+        if (levend) setFout(t('gids.fout.lezen'))
       } finally {
         if (levend) setLaden(false)
       }
@@ -127,15 +139,15 @@ export default function KantoorgidsPaneel() {
       const json = await res.json().catch(() => null)
       if (!res.ok) {
         if (Array.isArray(json?.problems) && json.problems.length > 0) setProblemen(json.problems)
-        else setFout(failureText(res.status, json, 'Opslaan is niet gelukt.'))
+        else setFout(failureText(res.status, json, t('gids.fout.opslaan')))
         return
       }
       setPublished(json?.published === true)
       setGelukt(json?.published === true
-        ? 'Je kantoor staat in de gids.'
-        : 'Opgeslagen. Je staat niet in de gids.')
+        ? t('gids.opgeslagen.in')
+        : t('gids.opgeslagen.uit'))
     } catch {
-      setFout('Opslaan is niet gelukt.')
+      setFout(t('gids.fout.opslaan'))
     } finally {
       setBezig(false)
     }
@@ -145,11 +157,11 @@ export default function KantoorgidsPaneel() {
     setBezig(true); setFout(null); setGelukt(null); setProblemen([])
     try {
       const res = await fetch('/api/kantoorgids', { method: 'DELETE' })
-      if (!res.ok) { setFout('Verwijderen is niet gelukt.'); return }
+      if (!res.ok) { setFout(t('gids.fout.verwijderen')); return }
       setPublished(false)
-      setGelukt('Je vermelding is weggehaald.')
+      setGelukt(t('gids.weg'))
     } catch {
-      setFout('Verwijderen is niet gelukt.')
+      setFout(t('gids.fout.verwijderen'))
     } finally {
       setBezig(false)
     }
@@ -158,12 +170,10 @@ export default function KantoorgidsPaneel() {
   return (
     <div style={{ padding: 24 }}>
       <h1 style={{ fontSize: 24, fontWeight: 700, color: '#202124', margin: '0 0 8px' }}>
-        Je kantoor in de gids
+        {t('gids.titel')}
       </h1>
       <p style={{ fontSize: 15, lineHeight: 1.7, color: '#5f6368', maxWidth: 720, margin: '0 0 20px' }}>
-        Ondernemers die zich bij BoekBrug aanmelden zonder boekhouder krijgen deze lijst te zien.
-        Je staat er alleen in als je hem aanzet, en je kunt hem altijd weer uitzetten. Er is geen
-        betaalde plek in de lijst: kantoren met ruimte staan bovenaan, daarna op naam.
+        {t('gids.uitleg')} {t('gids.uitleg.volgorde')}
       </p>
 
       <div style={card}>
@@ -173,27 +183,27 @@ export default function KantoorgidsPaneel() {
           background: published ? '#e6f4ea' : '#f1f3f4',
           display: 'inline-block', borderRadius: 999, padding: '4px 12px',
         }}>
-          {laden ? 'Bezig met laden…' : published ? 'Je staat in de gids' : 'Je staat niet in de gids'}
+          {laden ? t('gids.staat.laden') : published ? t('gids.staat.in') : t('gids.staat.uit')}
         </div>
 
         <div style={veld}>
-          <label style={label} htmlFor="kantoornaam">Naam van je kantoor</label>
+          <label style={label} htmlFor="kantoornaam">{t('gids.veld.naam')}</label>
           <input id="kantoornaam" style={input} value={officeName} maxLength={LIMITS.officeName}
                  onChange={(e) => setOfficeName(e.target.value)} disabled={laden} />
         </div>
 
         <div style={veld}>
-          <label style={label} htmlFor="plaats">Plaats</label>
+          <label style={label} htmlFor="plaats">{t('gids.veld.plaats')}</label>
           <input id="plaats" style={input} value={city} maxLength={LIMITS.city}
                  onChange={(e) => setCity(e.target.value)} disabled={laden} />
         </div>
 
         <div style={veld}>
-          <label style={label} htmlFor="specialisaties">Waar ben je aan gewend? (maximaal zes, komma ertussen)</label>
+          <label style={label} htmlFor="specialisaties">{t('gids.veld.specialisaties')}</label>
           <input id="specialisaties" style={input} value={specialisms}
                  onChange={(e) => setSpecialisms(e.target.value)} disabled={laden}
-                 placeholder="zzp, transport, horeca" />
-          <p style={hint}>Dit is geen keurmerk en wordt door ons niet gecontroleerd — het staat er zoals jij het typt.</p>
+                 placeholder={t('gids.veld.specialisaties.voorbeeld')} />
+          <p style={hint}>{t('gids.veld.specialisaties.hint')}</p>
         </div>
 
         <div style={veld}>
@@ -201,7 +211,7 @@ export default function KantoorgidsPaneel() {
               tekst kan niet gefilterd worden — "Arabisch", "arabic" en "العربية" zouden drie talen
               zijn. De lijst is precies wat BoekBrug zelf spreekt, dus we bieden nooit een taal aan
               waarin het product een klant niet kan bedienen. */}
-          <span style={label}>In welke talen kun je een ondernemer helpen?</span>
+          <span style={label}>{t('gids.veld.talen')}</span>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 2 }}>
             {DIRECTORY_LANGUAGES.map((cd) => (
               <label key={cd} htmlFor={`taal-${cd}`}
@@ -218,21 +228,18 @@ export default function KantoorgidsPaneel() {
               </label>
             ))}
           </div>
-          <p style={hint}>
-            Ondernemers filteren hierop — het is voor veel mensen de eerste vraag. Wij controleren
-            het niet: er staat dat jij dit zegt.
-          </p>
+          <p style={hint}>{t('gids.veld.talen.hint')}</p>
         </div>
 
         <div style={veld}>
-          <label style={label} htmlFor="mail">E-mailadres waarop ondernemers je mogen benaderen</label>
+          <label style={label} htmlFor="mail">{t('gids.veld.mail')}</label>
           <input id="mail" style={input} type="email" value={contactEmail} maxLength={LIMITS.contactEmail}
                  onChange={(e) => setContactEmail(e.target.value)} disabled={laden} />
-          <p style={hint}>Dit adres staat openbaar op de gids. Gebruik je kantooradres, niet je inlogadres.</p>
+          <p style={hint}>{t('gids.veld.mail.hint')}</p>
         </div>
 
         <div style={veld}>
-          <label style={label} htmlFor="site">Website (mag leeg)</label>
+          <label style={label} htmlFor="site">{t('gids.veld.site')}</label>
           <input id="site" style={input} value={website} maxLength={LIMITS.website}
                  onChange={(e) => setWebsite(e.target.value)} disabled={laden}
                  placeholder="https://" />
@@ -243,7 +250,7 @@ export default function KantoorgidsPaneel() {
                  onChange={(e) => setAcceptingClients(e.target.checked)}
                  style={{ marginTop: 3, width: 18, height: 18 }} />
           <label htmlFor="ruimte" style={{ fontSize: 15, color: '#3c4043', lineHeight: 1.6 }}>
-            Ik neem nieuwe klanten aan. Kantoren die dit aanvinken staan bovenaan.
+            {t('gids.veld.ruimte')}
           </label>
         </div>
 
@@ -251,7 +258,7 @@ export default function KantoorgidsPaneel() {
           <ul style={{
             margin: '18px 0 0', paddingInlineStart: 20, fontSize: 14, lineHeight: 1.8, color: '#c5221f',
           }}>
-            {problemen.map((p) => <li key={p}>{p}</li>)}
+            {problemen.map((p) => <li key={p}>{t(p)}</li>)}
           </ul>
         )}
         {fout !== null && (
@@ -263,21 +270,21 @@ export default function KantoorgidsPaneel() {
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 22 }}>
           <button type="button" style={knop} disabled={laden || bezig} onClick={() => bewaar(true)}>
-            {published ? 'Bijwerken' : 'Zet mij in de gids'}
+            {published ? t('gids.knop.bijwerken') : t('gids.knop.aanzetten')}
           </button>
           {published && (
             <button type="button" style={knopUit} disabled={laden || bezig} onClick={() => bewaar(false)}>
-              Haal mij uit de gids
+              {t('gids.knop.uitzetten')}
             </button>
           )}
           {!published && (
             <button type="button" style={knopUit} disabled={laden || bezig} onClick={() => bewaar(false)}>
-              Alleen opslaan
+              {t('gids.knop.opslaan')}
             </button>
           )}
           <button type="button" style={{ ...knopUit, borderColor: '#dadce0', color: '#5f6368' }}
                   disabled={laden || bezig} onClick={haalWeg}>
-            Alles verwijderen
+            {t('gids.knop.verwijderen')}
           </button>
         </div>
       </div>
