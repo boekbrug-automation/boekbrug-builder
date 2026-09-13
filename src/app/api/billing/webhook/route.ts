@@ -36,6 +36,9 @@ import {
   subscriptionPeriodEnd,
 } from "@/lib/billing";
 import { normalizeStripeStatus } from "@/lib/subscription";
+// [PRIJS-MOMENT] What is CHARGED, which is not the same number as what is published — see the
+// header of subscription-price.ts for the day those two come apart.
+import { priceFromSubscription } from "@/lib/subscription-price";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { amsterdamYear } from "@/lib/format-nl";
 import { sendPaymentFailedEmail } from "@/lib/email";
@@ -231,6 +234,35 @@ async function handleEvent(event: Stripe.Event): Promise<void> {
       `[BILLING] plan label '${plan}' rejected for profile ${profileId} ` +
         `(access was still granted): ${planErr.message}`
     );
+  }
+
+  // WRITE 3 — [PRIJS-MOMENT] what this subscription is actually charged.
+  //
+  // Best-effort by the same reasoning as the label, and for one extra reason: these columns are
+  // added by a migration applied by hand, so on a deployment where it has not run yet the write
+  // fails with "column does not exist". A record of the agreement is worth having; it is not
+  // worth an access outage, and it is not worth Stripe retrying a deterministic failure for three
+  // days over a number the customer can also read on their own invoice.
+  //
+  // Written only when Stripe named an amount. A null would replace what we knew yesterday with
+  // nothing, and "Stripe answered oddly once" is not new information about the price.
+  const priced = priceFromSubscription(sub);
+  if (priced) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error: priceErr } = await (pipeline as any)
+      .from("profiles")
+      .update({
+        subscription_price_cents: priced.cents,
+        subscription_price_currency: priced.currency,
+        subscription_priced_at: new Date().toISOString(),
+      })
+      .eq("id", profileId);
+    if (priceErr) {
+      console.error(
+        `[PRIJS-MOMENT] could not record ${priced.cents} ${priced.currency} for profile ` +
+          `${profileId} (access and plan were still set): ${priceErr.message}`
+      );
+    }
   }
 
   console.log(`[BILLING] ${event.type} → profile ${profileId} is ${status}/${plan}`);

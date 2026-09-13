@@ -20,8 +20,11 @@ import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { getSessionUser } from '@/lib/session-user'
 import { decidePlan, type PlanDecision } from '@/lib/subscription'
 import { daysLeftOnGrant, grantStanding, type PlanGrantRow } from '@/lib/plan-grants'
-import { PLUS } from '@/lib/plan'
-import { FAIR_USE_LIMITS, NEAR_LIMIT_RATIO, evaluateFairUse, formatLimit } from '@/lib/fair-use'
+import { PLUS, euroLabel } from '@/lib/plan'
+// [PRIJS-MOMENT] Wat DIT account betaalt is niet hetzelfde getal als wat wij vandaag publiceren —
+// zie de kop van subscription-price.ts voor de dag waarop die twee uit elkaar lopen.
+import { readChargedPrice, chargedEuros, payingOldTariff } from '@/lib/subscription-price'
+import { FAIR_USE_LIMITS, NEAR_LIMIT_RATIO, evaluateFairUse, formatLimit, PLUS_PRICE_EUR } from '@/lib/fair-use'
 import { measureUsage } from '@/lib/fair-use-usage'
 import { limitsPlanFor } from '@/lib/subscription'
 import ManageSubscriptionButton from './ManageSubscriptionButton'
@@ -39,6 +42,10 @@ type BillingProfile = {
   subscription_plan?: string | null
   current_period_end?: string | null
   stripe_customer_id?: string | null
+  /** [PRIJS-MOMENT] De afspraak, niet het aanbod. Zie subscription-price.ts. */
+  subscription_price_cents?: number | string | null
+  subscription_price_currency?: string | null
+  subscription_priced_at?: string | null
 }
 
 const dateNL = (iso: string | null | undefined) => {
@@ -76,7 +83,7 @@ export default async function FactureringPage({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (supabase as any)
       .from('profiles')
-      .select('role, created_at, subscription_status, subscription_plan, current_period_end, stripe_customer_id')
+      .select('role, created_at, subscription_status, subscription_plan, current_period_end, stripe_customer_id, subscription_price_cents, subscription_price_currency, subscription_priced_at')
       .eq('id', user.id)
       .single() as Promise<{ data: BillingProfile | null; error: unknown }>,
     // [TOEKENNING] Lopende toekenningen — de welkomstperiode, een pilot, een verlenging. Eigen
@@ -127,6 +134,18 @@ export default async function FactureringPage({
   })
 
   const hasCustomer = Boolean(profile?.stripe_customer_id)
+
+  // [PRIJS-MOMENT] Voor wie NIET betaalt is de prijsregel een AANBOD, en dan is de gepubliceerde
+  // prijs het juiste getal. Voor wie wél betaalt is het een AFSPRAAK, en die kan een ander bedrag
+  // zijn: Stripe rekent een lopend abonnement af tegen het prijsobject waarop het is aangegaan.
+  // De vastlegging wordt daarom alleen gelezen als er ook echt een incasso tegenover staat — een
+  // opgezegd abonnement laat zijn kolommen staan, en die mogen het aanbod niet gaan bepalen.
+  const paysStripe = hasCustomer && decision.plan === 'plus' && decision.reason !== 'toekenning'
+  const charged = paysStripe ? readChargedPrice(profile ?? null) : null
+  const ownTariff = payingOldTariff(charged, PLUS_PRICE_EUR)
+  // Er wordt geïncasseerd en wij weten niet hoeveel. Dan noemt dit scherm geen bedrag: het
+  // gepubliceerde getal zou hier een gok zijn die er precies zo uitziet als een feit.
+  const priceUnknown = paysStripe && charged === null
 
   // [FAIR-USE] De werkelijke stand. Dit is regel 4 uit fair-use.ts — "waarschuwen vóórdat
   // het gebeurt, niet erna" — en die regel kan alleen waar zijn als de gebruiker zijn eigen
@@ -184,7 +203,20 @@ export default async function FactureringPage({
         )}
 
         {decision.plan !== 'boekhouder' && (
-          <Row label={t('plan.prijsPlus')} value={`${PLUS.priceLabel} ${PLUS.period} (${PLUS.btwNote}, ${PLUS.cancelNote})`} />
+          <Row
+            label={t('plan.prijsPlus')}
+            value={
+              priceUnknown
+                ? t('plan.prijsOpFactuur')
+                : `${charged ? euroLabel(chargedEuros(charged)) : PLUS.priceLabel} ${PLUS.period} (${PLUS.btwNote}, ${PLUS.cancelNote})`
+            }
+          />
+        )}
+
+        {ownTariff && (
+          <p style={{ fontSize: 13, color: '#5f6368', margin: '8px 0 0', lineHeight: 1.5 }}>
+            {t('plan.eigenTarief', { prijs: PLUS.priceLabel })}
+          </p>
         )}
 
         {decision.plan !== 'boekhouder' && (

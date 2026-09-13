@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 155 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 156 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 17 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -165,11 +165,11 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('bank_tx_statement_link.sql', 'index', 'idx_bank_transactions_statement_doc', null, 'public'),
   ('betaalverzoek.sql', 'column', 'pay_token', 'invoices', 'public'),
   ('betaalverzoek.sql', 'index', 'idx_invoices_pay_token', null, 'public'),
+  ('billing_subscription.sql', 'function_body', 'prevent_billing_self_grant', '.current_period_end,.id,.stripe_customer_id,.subscription_plan,.subscription_status,.subscription_stripe_id', 'public'),
   ('billing_subscription.sql', 'column', 'current_period_end', 'profiles', 'public'),
   ('billing_subscription.sql', 'column', 'stripe_customer_id', 'profiles', 'public'),
   ('billing_subscription.sql', 'column', 'subscription_status', 'profiles', 'public'),
   ('billing_subscription.sql', 'constraint', 'profiles_subscription_status_check', null, 'public'),
-  ('billing_subscription.sql', 'function', 'prevent_billing_self_grant', null, 'public'),
   ('billing_subscription.sql', 'index', 'profiles_stripe_customer_id_key', null, 'public'),
   ('book_bank_batch_atomic.sql', 'function', 'book_bank_batch', null, 'public'),
   ('bookkeeping_date_sane.sql', 'function', 'assert_bookkeeping_date_sane', null, 'public'),
@@ -447,6 +447,10 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('snelstart_connection.sql', 'table', 'snelstart_connections', null, 'public'),
   ('snelstart_connection.sql', 'table', 'snelstart_exports', null, 'public'),
   ('subscription_plans_fair_use.sql', 'constraint', 'profiles_subscription_plan_check', null, 'public'),
+  ('subscription_price_snapshot.sql', 'function_body', 'prevent_billing_self_grant', '.current_period_end,.id,.stripe_customer_id,.subscription_plan,.subscription_status,.subscription_stripe_id', 'public'),
+  ('subscription_price_snapshot.sql', 'column', 'subscription_price_cents', 'profiles', 'public'),
+  ('subscription_price_snapshot.sql', 'column', 'subscription_price_currency', 'profiles', 'public'),
+  ('subscription_price_snapshot.sql', 'column', 'subscription_priced_at', 'profiles', 'public'),
   ('supplier_aliases.sql', 'index', 'idx_supplier_aliases_supplier', null, 'public'),
   ('supplier_aliases.sql', 'index', 'supplier_aliases_unique_key', null, 'public'),
   ('supplier_aliases.sql', 'policy', 'supplier_aliases_delete_own', 'supplier_aliases', 'public'),
@@ -576,7 +580,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 
 -- ── WAT DEEL 1 OVER DEZE FUNCTIES WÉL EN NIET ZEGT ──────────────────
 --
---   9 functies worden door meer dan één migratie geschreven. Voor die functies zegt TOEGEPAST: de
+--   10 functies worden door meer dan één migratie geschreven. Voor die functies zegt TOEGEPAST: de
 --   body in de database bevat elke kolomverwijzing die de map er unaniem in verwacht. Het zegt NIET
 --   welk van die bestanden hem daar gezet heeft — en dat is niet vast te stellen, want een CREATE OR
 --   REPLACE laat geen spoor van zijn herkomst achter. OPEN betekent hier dus: de functie in de
@@ -634,6 +638,10 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --     · invoice_accountant_write_guard.sql
 --     · vat_exemption.sql
 --
+--   prevent_billing_self_grant
+--     · billing_subscription.sql
+--     · subscription_price_snapshot.sql
+--
 --   prevent_verwerkt_invoice_changes
 --     · invoice_accountant_write_guard.sql
 --     · verwerkt_freeze_level.sql
@@ -647,7 +655,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 172
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 173
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen

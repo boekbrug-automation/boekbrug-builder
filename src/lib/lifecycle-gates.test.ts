@@ -34419,3 +34419,73 @@ test("[TERUGBETALING] the reversal RPC derives, refuses a bank line, and is gran
   // The accountant's lock wins here as everywhere.
   assert.match(sql, /verwerkt/, "the accountant lock is not checked before un-paying an invoice");
 });
+
+// ── [PRIJS-MOMENT] The agreement, beside the offer ───────────────────────────────────────────
+//
+// PLUS_PRICE_EUR is what a NEW customer would pay. What an EXISTING subscription is charged lives
+// in a Stripe price object it was created on, and the two come apart the day the published price
+// changes — silently, in the direction of an owner reading one amount and seeing another leave
+// their account. Nothing recorded what was agreed, and it cannot be derived afterwards.
+
+test("[PRIJS-MOMENT] the recorded price never falls back to the published one", () => {
+  // A fallback would show the right number on every day except the days it matters, and nobody
+  // would ever see it be wrong. So the module may not even know the constant.
+  const pure = code("src/lib/subscription-price.ts");
+  assert.doesNotMatch(pure, /PLUS_PRICE_EUR|fair-use/,
+    "subscription-price.ts reaches for the published price — then 'unknown' can render as a number");
+  // Zero, a fraction of a cent and a currency we do not book are all refused rather than shown.
+  for (const guard of [/cents <= 0/, /Number\.isInteger\(cents\)/, /currency !== "eur"/]) {
+    assert.match(pure, guard, `a price the app cannot honestly render is accepted: ${guard}`);
+  }
+});
+
+test("[PRIJS-MOMENT] the billing screen reads the agreement only where money actually moves", () => {
+  const scherm = code("src/app/dashboard/settings/facturering/page.tsx");
+  // For a free account the price row is an OFFER, and the published price is the right number.
+  // For a payer it is an AGREEMENT. A cancelled subscription keeps its columns, so the record is
+  // read only when there is a live customer AND a plan that is not a grant.
+  assert.match(scherm, /const paysStripe = hasCustomer && decision\.plan === 'plus' && decision\.reason !== 'toekenning'/,
+    "the recorded price is read outside the case it describes");
+  assert.match(scherm, /const charged = paysStripe \? readChargedPrice/,
+    "the record is read for accounts that pay nothing — then it would overwrite the offer");
+  // Charging happens and we do not know the amount: say where it is, never guess it.
+  assert.match(scherm, /priceUnknown\s*\?\s*t\('plan\.prijsOpFactuur'\)/,
+    "the screen names the published amount for a subscription whose price it never recorded");
+});
+
+test("[PRIJS-MOMENT] the webhook records the price, and cannot fail access doing it", () => {
+  const hook = code("src/app/api/billing/webhook/route.ts");
+  const van = hook.indexOf("const priced = priceFromSubscription(sub)");
+  assert.ok(van > 0, "the webhook no longer records what the subscription is charged");
+  // AFTER the access write. That write throws on failure (Stripe retries); this one may not, or a
+  // column that has not been migrated yet would keep a paying customer looking unpaid.
+  //
+  // Anchored on REAL CODE. The first version cut on "WRITE 1", which lives in a comment — and
+  // code() strips comments, so indexOf returned -1 and the gate failed for the wrong reason. A
+  // marker in a comment is not in the string being measured; see the note in AGENTS.md.
+  const toegang = hook.indexOf("subscription_status: status,");
+  assert.ok(toegang > 0, "the access write is gone — this gate is measuring the wrong file");
+  assert.ok(toegang < van, "the price write moved ahead of the access write");
+  const eind = hook.indexOf("console.log(", van);
+  assert.ok(eind > van, "the end of the price write could not be found on real code");
+  assert.doesNotMatch(hook.slice(van, eind), /throw new Error/,
+    "a failed price record throws — that is an access outage over a number on the customer's own invoice");
+  // Nothing readable from Stripe means the columns are left alone: a blank must not replace a
+  // real record because Stripe answered oddly once.
+  assert.match(hook, /if \(priced\) \{/, "the webhook writes a price it could not read");
+});
+
+test("[PRIJS-MOMENT] the new columns go through the same lock as the rest of the subscription", () => {
+  // A price the browser can set is not a record, and it would look exactly as trustworthy.
+  const sql = readFileSync("supabase/migrations/subscription_price_snapshot.sql", "utf8");
+  for (const col of ["subscription_price_cents", "subscription_price_currency", "subscription_priced_at"]) {
+    assert.match(sql, new RegExp(`NEW\\.${col}\\s+IS DISTINCT FROM OLD\\.${col}`),
+      `${col} is not guarded by prevent_billing_self_grant`);
+  }
+  // The guard rewrite must keep every column the original protected, or this migration widens a
+  // door while claiming to narrow one.
+  const origineel = readFileSync("supabase/migrations/billing_subscription.sql", "utf8");
+  for (const m of origineel.matchAll(/NEW\.(subscription_\w+|stripe_customer_id|current_period_end)\s+IS DISTINCT/g)) {
+    assert.ok(sql.includes(`NEW.${m[1]}`), `the rewritten guard dropped ${m[1]}`);
+  }
+});

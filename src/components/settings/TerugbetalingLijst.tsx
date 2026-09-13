@@ -11,7 +11,7 @@
 // [TAAL] Alle tekst via messages.ts — een component houdt geen taal van zichzelf.
 // [SERVER-ZIN] De route geeft codes; de kaart hieronder schrijft de zin.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
 import { formatEuroNL, formatDateNL } from '@/lib/format-nl'
@@ -37,23 +37,38 @@ const WEIGERING: Readonly<Record<string, MessageKey>> = {
   already_answered: 'terugbetaling.fout.already_answered',
 }
 
+/**
+ * The open questions, or an empty list.
+ *
+ * OUTSIDE the component on purpose. As a useCallback called from the effect, the React compiler
+ * reads its setState as a synchronous effect-body write and refuses it — the same rule MollieCard
+ * satisfies by keeping its fetch inline. Returning the rows instead of setting them keeps one
+ * reader for both callers (first paint, and after an answer) without that shape.
+ */
+async function fetchOpenRefunds(): Promise<OpenRefund[]> {
+  try {
+    const res = await fetch('/api/mollie/terugbetaling')
+    const json = await res.json().catch(() => ({}))
+    return res.ok && Array.isArray(json.refunds) ? (json.refunds as OpenRefund[]) : []
+  } catch {
+    return []
+  }
+}
+
 export function TerugbetalingLijst() {
   const t = translator(useLocale())
   const [refunds, setRefunds] = useState<OpenRefund[] | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
 
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch('/api/mollie/terugbetaling')
-      const json = await res.json().catch(() => ({}))
-      setRefunds(res.ok && Array.isArray(json.refunds) ? (json.refunds as OpenRefund[]) : [])
-    } catch {
-      setRefunds([])
-    }
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const rows = await fetchOpenRefunds()
+      if (!cancelled) setRefunds(rows)
+    })()
+    return () => { cancelled = true }
   }, [])
-
-  useEffect(() => { void load() }, [load])
 
   async function answer(refundId: string, action: 'reversed' | 'credited' | 'not_ours') {
     if (busy) return
@@ -71,10 +86,10 @@ export function TerugbetalingLijst() {
         setError(t(WEIGERING[code] ?? 'terugbetaling.fout.algemeen'))
         // Een 409 betekent dat de wereld anders is dan dit scherm dacht — opnieuw lezen, zodat de
         // volgende klik niet op dezelfde verouderde rij gaat.
-        if (res.status === 409) await load()
+        if (res.status === 409) setRefunds(await fetchOpenRefunds())
         return
       }
-      await load()
+      setRefunds(await fetchOpenRefunds())
     } catch {
       setError(t('terugbetaling.fout.algemeen'))
     } finally {

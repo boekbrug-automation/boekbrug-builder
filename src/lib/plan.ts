@@ -40,7 +40,12 @@ import {
 } from "@/lib/bewaarkluis";
 
 /** Nederlandse notatie van een maandbedrag: "€ 12,99". */
-function euroLabel(amount: number): string {
+/**
+ * [PRIJS-MOMENT] Exported, because the billing screen now renders a SECOND price beside the
+ * published one — what this account is actually charged. Two spellings of an amount on one card
+ * is how a reader starts wondering which of them is the real number.
+ */
+export function euroLabel(amount: number): string {
   return `€ ${amount.toFixed(2).replace(".", ",")}`;
 }
 

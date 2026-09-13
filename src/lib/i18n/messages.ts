@@ -13509,6 +13509,23 @@ export const MESSAGES = {
   'log.mollie.refund_reversed': { nl: 'Betaling teruggedraaid na terugbetaling', en: 'Payment reversed after a refund', ar: 'أُلغيت الدفعة بعد استرجاع', tr: 'İade sonrası ödeme geri alındı' },
   'log.mollie.refund_answered': { nl: 'Terugbetaling beantwoord', en: 'Refund answered', ar: 'تمت الإجابة عن الاسترجاع', tr: 'İade yanıtlandı' },
 
+  // ── [PRIJS-MOMENT] De afspraak naast het aanbod ─────────────────────────────────────────────
+  // Twee regels die alleen verschijnen voor wie ECHT betaalt: één als wij het bedrag niet konden
+  // vastleggen, één als het afwijkt van wat wij vandaag publiceren. Voor iedereen anders is de
+  // prijsregel een aanbod en verandert er niets. [RUSTIG]: geen van beide staat er in rust.
+  'plan.prijsOpFactuur': {
+    nl: 'staat op je factuur van Stripe',
+    en: 'on your Stripe invoice',
+    ar: 'مذكور في فاتورتك من Stripe',
+    tr: "Stripe faturanızda",
+  },
+  'plan.eigenTarief': {
+    nl: 'Dit is het tarief waarop je abonnement is aangegaan. Nieuw is het {prijs} per maand.',
+    en: 'This is the rate your subscription started on. A new one costs {prijs} a month.',
+    ar: 'هذا هو السعر الذي بدأ عليه اشتراكك. الاشتراك الجديد يكلّف {prijs} شهرياً.',
+    tr: 'Aboneliğinizin başladığı tarife budur. Yeni bir abonelik ayda {prijs} tutar.',
+  },
+
   // ── [TERUGBETALING] Geld dat via Mollie terugging ───────────────────────────────────────────
   // De kaart verschijnt alleen als er iets te beslissen valt ([RUSTIG]: niets in rust). De drie
   // knoppen zijn de drie antwoorden; de app kiest er geen van, want een chargeback hoort van de
