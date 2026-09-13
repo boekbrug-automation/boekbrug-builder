@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 157 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 158 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 18 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -48,12 +48,12 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('account_purpose_archief.sql', 'column', 'account_purpose', 'profiles', 'public'),
   ('account_purpose_archief.sql', 'constraint', 'profiles_account_purpose_check', null, 'public'),
   ('accountant_amount_guard_restore.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
-  ('accountant_confirm_mandate.sql', 'function_body', 'has_active_invoice_mandate', 'facturen', 'public'),
   ('accountant_confirm_mandate.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('accountant_confirm_mandate.sql', 'column', 'confirmed_by', 'invoices', 'public'),
   ('accountant_confirm_mandate.sql', 'column', 'kind', 'accountant_invoice_mandates', 'public'),
   ('accountant_confirm_mandate.sql', 'constraint', 'accountant_invoice_mandates_kind_check', null, 'public'),
   ('accountant_confirm_mandate.sql', 'function', 'has_active_confirm_mandate', null, 'public'),
+  ('accountant_confirm_mandate.sql', 'function', 'has_active_invoice_mandate', null, 'public'),
   ('accountant_directory.sql', 'constraint', 'accountant_directory_lengths', null, 'public'),
   ('accountant_directory.sql', 'constraint', 'accountant_directory_published_is_complete', null, 'public'),
   ('accountant_directory.sql', 'constraint', 'accountant_directory_website_https', null, 'public'),
@@ -360,6 +360,7 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('ledger_daily.sql', 'policy', 'ledger_daily_insert_own', 'ledger_daily', 'public'),
   ('ledger_daily.sql', 'policy', 'ledger_daily_select_own', 'ledger_daily', 'public'),
   ('ledger_daily.sql', 'policy', 'ledger_daily_update_own', 'ledger_daily', 'public'),
+  ('mandate_requires_accountant_role.sql', 'function_body', 'has_active_invoice_mandate', 'accountant,profiles', 'public'),
   ('mollie.sql', 'index', 'mollie_payment_links_open_uidx', null, 'public'),
   ('mollie.sql', 'index', 'mollie_payment_links_user_created_idx', null, 'public'),
   ('mollie.sql', 'policy', 'mollie_connections_select_own', 'mollie_connections', 'public'),
@@ -610,6 +611,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --   has_active_invoice_mandate
 --     · accountant_confirm_mandate.sql
 --     · accountant_invoice_mandate.sql
+--     · mandate_requires_accountant_role.sql
 --     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
 --     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
 --     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
@@ -657,7 +659,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 175
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 176
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen

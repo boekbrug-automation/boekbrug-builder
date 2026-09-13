@@ -34797,3 +34797,19 @@ test("[EEN-POORT] the context is the promotion of the existing resolver, not a s
   assert.match(ctx, /mandatedOwnerIds: acting\.role === "boekhouder" \? \[acting\.ownerId\] : \[\]/,
     "an accountant's mandate reaches further than the client that was asked for and proved");
 });
+
+test("[EEN-POORT] a mandate counts only for somebody who IS an accountant, in both spellings", () => {
+  // The same question was answered in two places and the answers differed: TypeScript refused
+  // before anything else on `facts.callerRole !== 'accountant'`, and the SQL looked only at the
+  // mandate row. The function sits in the EXCEPTION list of three amount guards, so the looser
+  // spelling exempted anybody whose role changed while their links stayed.
+  const sql = readFileSync("supabase/migrations/mandate_requires_accountant_role.sql", "utf8");
+  assert.match(sql, /JOIN public\.profiles p[\s\S]{0,120}?p\.role = 'accountant'/,
+    "the SQL spelling of the mandate rule no longer requires the accountant role");
+  assert.match(sql, /m\.revoked_at IS NULL/, "the SQL spelling stopped checking that the mandate lives");
+  assert.match(sql, /m\.kind\s+= 'facturen'/, "the SQL spelling stopped filtering on the mandate kind");
+  // And the TypeScript half still refuses first, or the two have simply swapped which one is loose.
+  const ts = code("src/lib/accountant-mandate.ts");
+  assert.match(ts, /callerRole/,
+    "resolveAccountantActing no longer reads the caller's role — then SQL is the only spelling again");
+});
