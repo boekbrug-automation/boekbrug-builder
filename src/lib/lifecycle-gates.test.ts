@@ -33742,3 +33742,90 @@ test("[CONTROL] the console reads only, and its door cannot be opened from the d
   assert.doesNotMatch(scherm, /PLUS_PRICE_EUR|mrr|MRR/,
     "the console screen reaches for a price — that number is Stripe's, not ours to multiply");
 });
+
+test("[BUNDEL-DREMPEL] the batch door refuses exactly what the single door refuses", () => {
+  // ── WHAT WENT WRONG ────────────────────────────────────────────────────────────────────────
+  // The 1:1 door asks isEligible, which refuses four statuses — paid, draft, archived and
+  // processing — plus the accountant's verwerkt lock. The BATCH door asked one thing: "not paid".
+  //
+  // So a bundle could be planned, suggested, and confirmed against an invoice that was never
+  // issued (draft), one that had been closed (archived), or one still sitting in the verify queue
+  // (processing) whose number and amount are an OCR reading nobody has looked at. The owner sees a
+  // card that adds up to the cent and taps Bevestig; the money lands on a document that is not a
+  // bill yet. And book_bank_batch — the last guard, under the row lock — checked only missing,
+  // paid and verwerkt, so nothing below the app caught it either.
+  //
+  // Three layers, one rule. This gate holds all three to it.
+  const matching = code("src/lib/bank-matching.ts");
+  const batch = code("src/lib/bank-batch-reconcile.ts");
+  const confirm = code("src/app/api/bank/confirm/route.ts");
+
+  // 1 — one predicate, exported, and isEligible itself asks it. If the two ever drift apart the
+  //     batch door starts refusing a different set from the door beside it, which is the whole
+  //     defect coming back wearing a helper function.
+  assert.match(matching, /export function isPayableInvoiceState\(/,
+    "the shared payability predicate is gone — every door is deciding for itself again");
+  const eligible = matching.slice(matching.indexOf("export function isEligible("));
+  assert.ok(eligible.length > 0, "isEligible not found in bank-matching.ts");
+  const eligibleBody = eligible.slice(0, eligible.indexOf("const isCreditNote"));
+  assert.ok(eligibleBody.length > 0 && eligibleBody.length < eligible.length,
+    "could not cut isEligible's status section — the window would have run to the end of the file");
+  assert.match(eligibleBody, /isPayableInvoiceState\(inv\)/,
+    "isEligible stopped asking the shared predicate, so the batch door now copies a rule instead of sharing one");
+
+  // 2 — both batch pools ask it, and neither has gone back to a bare "not paid" test.
+  assert.strictEqual((batch.match(/isPayableInvoiceState/g) ?? []).length, 3,
+    "bank-batch-reconcile must ask the predicate in both pools (plus its import) — one of them slipped back");
+  assert.doesNotMatch(batch, /status\s*\?\?\s*""\)\s*[!=]==?\s*"paid"/,
+    'a pool is testing "paid" by hand again — that is the exact filter that let a draft into a bundle');
+
+  // 3 — the owner-facing batch confirm sweeps before it books. The RPC re-asks under the lock and
+  //     that is the real guard, but a route that hands the database a known-bad batch and lets it
+  //     raise is a route that returns a 500 where the owner deserves a sentence.
+  const invoiceIdsBranch = confirm.slice(confirm.indexOf("if (invoiceIds) {"), confirm.indexOf("book_bank_batch"));
+  assert.ok(invoiceIdsBranch.length > 0 && invoiceIdsBranch.length < confirm.length,
+    "could not cut the batch branch of the confirm route");
+  assert.match(invoiceIdsBranch, /isPayableInvoiceState/,
+    "the batch confirm branch books without checking payability — the single-invoice branch has always checked");
+
+  // 4 — and the database says the same thing, in BOTH copies of the function.
+  for (const file of ["supabase/migrations/bank_confirm_atomic.sql", "supabase/migrations/book_bank_batch_atomic.sql"]) {
+    const raw = readFileSync(file, "utf8").replace(/--[^\n]*/g, " ");
+    const start = raw.indexOf("CREATE OR REPLACE FUNCTION public.book_bank_batch");
+    assert.ok(start > -1, `book_bank_batch is not in ${file}`);
+    const fn = raw.slice(start, raw.indexOf("$$;", start));
+    assert.ok(fn.length > 0, `could not cut book_bank_batch out of ${file}`);
+    assert.match(fn, /i\.status IN \('draft', 'archived', 'processing'\)/,
+      `${file} still lets a draft or an unverified reading be settled by a bundle`);
+    assert.match(fn, /i\.accountant_status = 'verwerkt'/, `${file} lost the B.4 lock`);
+  }
+});
+
+test("[BANK-BATCH-GELIJK] the two copies of book_bank_batch are the same function", () => {
+  // book_bank_batch_atomic.sql says it in a comment: this file and bank_confirm_atomic.sql BOTH
+  // define book_bank_batch, whichever migration is applied last wins, and the two bodies are
+  // therefore kept identical because a money function whose behaviour depends on migration order
+  // is not a money function.
+  //
+  // Nothing was checking it. The rule lived in a comment beside the code it governs, which is the
+  // one place a rule cannot be enforced from — and it is a rule that fails silently: applying the
+  // older file re-installs an older body, the tests still pass (they never call the database), and
+  // the loss shows up as a bundle that books something the newer version had learned to refuse.
+  //
+  // Compared with comments stripped and whitespace flattened, because the two files legitimately
+  // explain themselves differently. What must match is what runs.
+  const bodyOf = (file: string): string => {
+    const raw = readFileSync(file, "utf8");
+    const start = raw.indexOf("CREATE OR REPLACE FUNCTION public.book_bank_batch");
+    assert.ok(start > -1, `book_bank_batch is not in ${file}`);
+    const end = raw.indexOf("$$;", start);
+    assert.ok(end > start, `could not find the end of book_bank_batch in ${file}`);
+    return raw.slice(start, end + 3).replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+  };
+  const a = bodyOf("supabase/migrations/bank_confirm_atomic.sql");
+  const b = bodyOf("supabase/migrations/book_bank_batch_atomic.sql");
+  assert.ok(a.length > 500, "the extracted body is too short to be the real function");
+  assert.strictEqual(a, b,
+    "the two book_bank_batch bodies have drifted — which one runs now depends on which migration " +
+      "was applied last, and that is a coin toss with money on it");
+});

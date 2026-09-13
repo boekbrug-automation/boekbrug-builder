@@ -42,7 +42,7 @@ import { createNotification } from "@/lib/notifications";
 // [BANK-MULTI-LINK-PERSIST] Coverage logic (parseReferenceNumbers + isFullyCovered)
 // now lives in bank-matching.ts so this confirm path and the match path share ONE
 // definition — no drift between "is this tx done?" answered in two places.
-import { isEligible, normalizeRef, isFullyCovered, bankLineFullyApplied, parseReferenceNumbers } from "@/lib/bank-matching";
+import { isEligible, isPayableInvoiceState, normalizeRef, isFullyCovered, bankLineFullyApplied, parseReferenceNumbers } from "@/lib/bank-matching";
 import { recordPaymentLinks } from "@/lib/bank-tx-links";
 import { fetchAllRows } from "@/lib/supabase-paginate";
 import { resolveAllocation, openBalanceFromAmounts, paymentExceedsOpenBalance } from "@/lib/partial-payment";
@@ -121,6 +121,49 @@ export async function POST(req: NextRequest) {
   }
 
   if (invoiceIds) {
+    // [BUNDEL-DREMPEL] The payability sweep the single-invoice door has always done, done here
+    // too. Not the WHOLE of isEligible: a bundle the owner confirms by sum names no invoice
+    // numbers, and isEligible's direction rule only lets a netted creditnota through when the
+    // payment names it — so asking the whole question here would refuse exactly the credit notes
+    // [CREDIT-VERREKEN] exists to settle. What is asked is the half that holds on every door:
+    // paid, draft, archived, processing, verwerkt. book_bank_batch re-asks it under the row lock
+    // (that is the real guard); this one turns a raised exception into a plain 409 and keeps a
+    // database on which the newer migration is not yet applied exactly as safe as this route.
+    // [IN-CHUNK] The id list travels in the URL — chunked, like every other id read here.
+    let batchInvs: { id: string; invoice_number: string | null; status: string | null; accountant_status: string | null }[] = [];
+    try {
+      batchInvs = await fetchAllRowsForIds(invoiceIds, (chunk, from, to) =>
+        pipeline
+          .from("invoices")
+          .select("id, invoice_number, status, accountant_status")
+          .in("id", chunk)
+          .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
+          .order("id", { ascending: true })
+          .range(from, to),
+      );
+    } catch (e) {
+      return NextResponse.json(
+        { error: "invoice_lookup_failed", detail: e instanceof Error ? e.message : String(e) },
+        { status: 500 },
+      );
+    }
+    if (batchInvs.length !== invoiceIds.length) {
+      // Fewer rows than ids means at least one id is missing or belongs to someone else. Never a
+      // partial book: the whole batch is refused, exactly as the RPC would.
+      return NextResponse.json({ error: "invoice_not_found" }, { status: 404 });
+    }
+    const notPayable = batchInvs.filter((i) => !isPayableInvoiceState(i));
+    if (notPayable.length > 0) {
+      const verwerkt = notPayable.find((i) => i.accountant_status === "verwerkt");
+      if (verwerkt) {
+        return NextResponse.json({ error: "verwerkt", invoiceNumber: verwerkt.invoice_number }, { status: 409 });
+      }
+      if (notPayable.some((i) => i.status === "paid")) {
+        return NextResponse.json({ error: "invoice_already_paid" }, { status: 409 });
+      }
+      return NextResponse.json({ error: "not_eligible" }, { status: 409 });
+    }
+
     // [SOM-KLOPT-ÉÉN] The batch door. Everything the function checks — ownership, payability,
     // the 'verwerkt' guard, the cent-exact tie on the CURRENT open amounts with a creditnota
     // signed negative — it checks under the line's lock, and nothing half-books.

@@ -15,7 +15,7 @@
 //
 // Run: npx tsx src/lib/bank-batch-reconcile.test.ts
 
-import { normalizeRef, parseReferenceNumbers, referenceMatches, isStrongNameIdentity, ibanMatches } from "./bank-matching";
+import { normalizeRef, parseReferenceNumbers, referenceMatches, isStrongNameIdentity, ibanMatches, isPayableInvoiceState } from "./bank-matching";
 import { round2 } from "./invoice-totals";
 
 /** The payment text a batch is read from: the extracted reference AND the raw remittance. */
@@ -228,7 +228,11 @@ export interface BatchCandidateInvoice {
   amount_paid?: number | null;
   client_name: string | null;
   direction: "incoming" | "outgoing" | null;
-  status: string | null; // 'paid' invoices are excluded as candidates
+  /** [BUNDEL-DREMPEL] Excluded here exactly as on the 1:1 door: paid, draft, archived, processing. */
+  status: string | null;
+  /** [BUNDEL-DREMPEL] B.4 — an invoice the accountant has locked is not payable by a bank line
+   *  either. Optional so a caller that does not select the column simply does not assert it. */
+  accountant_status?: string | null;
 }
 
 export interface BatchAutoPlan {
@@ -254,7 +258,10 @@ export function planBatchAutoConfirm(args: {
   // THAN ONE invoice is ambiguous → the whole batch is unsafe to auto-book.
   const byNum = new Map<string, BatchCandidateInvoice[]>();
   for (const inv of invoices) {
-    if ((inv.status ?? "") === "paid") continue;
+    // [BUNDEL-DREMPEL] Not merely "not paid" — the same never-payable set the 1:1 door refuses.
+    // A bundle carries stronger evidence than a lone line about WHICH invoices a payment names; it
+    // carries none at all about whether those invoices may be paid at all.
+    if (!isPayableInvoiceState(inv)) continue;
     if ((inv.direction ?? "") !== wantDirection) continue;
     const key = normalizeRef(inv.invoice_number ?? "");
     if (key.length === 0) continue;
@@ -440,7 +447,10 @@ export function findSupplierSumMatch(args: {
   // the everyday shape of a supplier debit is invoice − credit, and refusing to see it left the
   // one line the owner could not reconcile at all: "Geen factuur", nothing offered.
   const pool = invoices
-    .filter((i) => (i.status ?? "") !== "paid")
+    // [BUNDEL-DREMPEL] Same rule as planBatchAutoConfirm above and as the 1:1 door: a draft was
+    // never issued, an archived invoice is closed, and a 'processing' row is still an unverified
+    // reading. Suggesting one is not a small cosmetic error — the owner taps Bevestig on it.
+    .filter(isPayableInvoiceState)
     .filter((i) => (i.direction ?? "") === wantDirection)
     .filter(
       (i) =>

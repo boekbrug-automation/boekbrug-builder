@@ -251,6 +251,30 @@ export const DEFAULT_OPTIONS: MatchOptions = {
 // (→ received/sent). This keeps "verify first, then reconcile" — the correct order.
 const EXCLUDED_STATUSES = new Set(["paid", "draft", "archived", "processing"]);
 
+/**
+ * [BUNDEL-DREMPEL] The status half of isEligible, on its own, so every door can ask it.
+ *
+ * isEligible answers a whole question — status, the accountant's lock, direction and sign — and
+ * its direction half is deliberately relaxed for a netted creditnota, but only when the payment
+ * NAMES the document ([CREDIT-NETTING]). A bundle the owner confirms by SUM names nothing: it is
+ * recognised by counterparty identity and by the arithmetic. Asking the whole question there
+ * would therefore refuse exactly the credit notes [CREDIT-VERREKEN] exists to settle.
+ *
+ * What must hold on EVERY door, with no exception anywhere, is this half. A paid, draft, archived
+ * or still-unverified invoice is not payable by a bank line, and neither is one the accountant has
+ * marked verwerkt. The batch door used to ask only "not paid", which made it the soft one: a
+ * bundle could be offered — and confirmed — against an invoice that was never issued, or against a
+ * row still sitting in the verify queue with an OCR number and an OCR amount nobody had looked at.
+ */
+export function isPayableInvoiceState(inv: {
+  status?: string | null;
+  accountant_status?: string | null;
+}): boolean {
+  if (inv.accountant_status === "verwerkt") return false; // B.4
+  if (inv.status && EXCLUDED_STATUSES.has(inv.status)) return false;
+  return true;
+}
+
 // ─── Text / number helpers (pure) ───────────────────────────────────────────
 
 /** Lowercase + strip everything except [a-z0-9] for robust reference matching. */
@@ -517,8 +541,8 @@ export function isEligible(
   inv: InvoiceForMatching
 ): boolean {
   if (tx.amount === 0) return false;
-  if (inv.accountant_status === "verwerkt") return false; // B.4
-  if (inv.status && EXCLUDED_STATUSES.has(inv.status)) return false;
+  // [BUNDEL-DREMPEL] The same predicate the batch door asks — one rule, one place.
+  if (!isPayableInvoiceState(inv)) return false; // B.4 + the never-payable statuses
 
   // Direction / sign guard (M-confirmed). [M7-CREDITNOTA] A creditnota (negative total) REVERSES
   // the money direction of its own settlement: a supplier's creditnota TO us (direction incoming)

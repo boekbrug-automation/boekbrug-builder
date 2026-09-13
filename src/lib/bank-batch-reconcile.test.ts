@@ -512,6 +512,51 @@ console.log("\n— a payment that names invoices we do not have —");
     undeclaredMissingInvoices({ reference: null, description: "factuur 2026045" }, ["2026-045"]).length === 0);
 }
 
+{
+  console.log("\n— [BUNDEL-DREMPEL] the batch door refuses what the single door refuses —");
+
+  // Two purchase invoices of one supplier, 400 + 600, against a 1000 debit. The tie is exact and
+  // both numbers are printed on the statement line, so this is a bundle both passes would take. Then the same
+  // pair with the second invoice in each never-payable state, one at a time.
+  const inv = (id: string, number: string, total: number, status: string, accountantStatus: string | null = null): BatchCandidateInvoice => ({
+    id, invoice_number: number, total_inc_btw: total, client_name: "Groothandel De Vries",
+    direction: "incoming", status, accountant_status: accountantStatus,
+  });
+  const plan = (second: BatchCandidateInvoice) => planBatchAutoConfirm({
+    reference: null, description: "Betaling facturen 2026-401 en 2026-402", bankAmount: -1000,
+    invoices: [inv("a", "2026-401", 400, "received"), second],
+  });
+
+  check("a healthy pair still books unattended",
+    plan(inv("b", "2026-402", 600, "received"))?.invoiceIds.length === 2);
+  for (const status of ["draft", "archived", "processing", "paid"]) {
+    check(`a '${status}' invoice can never be part of an auto-booked bundle`,
+      plan(inv("b", "2026-402", 600, status)) === null);
+  }
+  check("an invoice the accountant marked verwerkt can never be part of one",
+    plan(inv("b", "2026-402", 600, "received", "verwerkt")) === null);
+
+  // The same rule on the SUM suggestion — the path the owner confirms by hand. Nothing is quoted
+  // here: identity is the supplier name, and the arithmetic is the whole evidence.
+  const sum = (second: BatchCandidateInvoice) => findSupplierSumMatch({
+    amount: -1000, counterpartName: "Groothandel De Vries", counterpartIban: null,
+    invoices: [inv("a", "2026-401", 400, "received"), second],
+  });
+  check("a healthy pair is still suggested as a sum", sum(inv("b", "2026-402", 600, "received"))?.invoiceIds.length === 2);
+  for (const status of ["draft", "archived", "processing"]) {
+    check(`a '${status}' invoice is never offered inside a sum suggestion`,
+      sum(inv("b", "2026-402", 600, status)) === null);
+  }
+  check("a verwerkt invoice is never offered inside a sum suggestion",
+    sum(inv("b", "2026-402", 600, "received", "verwerkt")) === null);
+
+  // And the point of all of it, stated as the failure it prevents: a draft is not a bill yet.
+  // Before this rule the pair above tied to the cent, rendered as a card, and booked € 600 of a
+  // real payment against a document the customer had never been sent.
+  check("the refusal is about payability, not about the arithmetic — the tie itself is still exact",
+    (inv("a", "2026-401", 400, "received").total_inc_btw ?? 0) + (inv("b", "2026-402", 600, "draft").total_inc_btw ?? 0) === 1000);
+}
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
 

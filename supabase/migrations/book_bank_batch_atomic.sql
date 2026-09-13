@@ -130,6 +130,11 @@ BEGIN
    AND (i.sender_id = p_user_id OR i.receiver_id = p_user_id)
   WHERE i.id IS NULL                        -- missing / not owned by caller
      OR i.status = 'paid'                   -- already paid → would double-count
+     -- [BUNDEL-DREMPEL] The same never-payable set the app refuses on the 1:1 door: a draft was
+     -- never issued, an archived invoice is closed, and 'processing' is the verify queue, where
+     -- the number and the amount are still an unread OCR reading. The batch planner used to ask
+     -- only "not paid", so a bundle could be planned, offered and confirmed against one of these.
+     OR i.status IN ('draft', 'archived', 'processing')
      OR i.accountant_status = 'verwerkt';   -- B.4 locked by the accountant
 
   IF v_bad > 0 THEN
