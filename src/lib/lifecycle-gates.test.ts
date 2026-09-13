@@ -34351,47 +34351,110 @@ test("[TERUGBETALING] the partial rule lives in ONE place and the route asks for
     "mayReverse no longer refuses a partial refund — reversing would take the whole payment off");
 });
 
-test("[TERUGBETALING] the route answers in codes and the screen writes the sentences", () => {
+test("[TERUGBETALING] every refusal that can reach the screen has a sentence, and every sentence a refusal", () => {
   // [SERVER-ZIN] in both directions, and the two lists check each other: a code with no sentence
-  // shows the owner nothing, and a sentence for a code the route cannot return is dead weight
-  // that outlives the reason it was written.
+  // shows the owner nothing, and a sentence for a code nobody can produce is dead weight that
+  // outlives the reason it was written.
+  //
+  // The PRODUCERS are now two, and both are read rather than assumed: the route (its own
+  // refusals) and answer_mollie_refund (every code the locked door can return). Reading the SQL
+  // is the point — the door is where most refusals are decided now, so a gate that only read the
+  // route would be checking the smaller half.
   const route = readFileSync("src/app/api/mollie/terugbetaling/route.ts", "utf8");
+  const deur = readFileSync("supabase/migrations/mollie_refund_answer.sql", "utf8");
   const paneel = readFileSync("src/components/settings/TerugbetalingLijst.tsx", "utf8");
 
-  const refused = new Set<string>();
-  for (const m of route.matchAll(/refuse\('([a-z_]+)'/g)) refused.add(m[1]);
-  // The three that are the caller's fault, not a state the owner can read a sentence about.
-  for (const plumbing of ["invalid_body", "lookup_failed", "list_failed", "payment_lookup_failed", "save_failed", "reverse_failed", "not_found"]) {
-    refused.delete(plumbing);
-  }
-  assert.ok(refused.size >= 5, `expected the route to name the real refusals, saw ${[...refused].join(", ")}`);
+  const producible = new Set<string>();
+  for (const m of route.matchAll(/refuse\(['`]([a-z_]+\.[a-z_]+)['`]/g)) producible.add(m[1]);
+  for (const m of route.matchAll(/refund\.\$\{[^}]*\}|`refund\.\$\{/g)) void m; // the templated one, below
+  for (const m of deur.matchAll(/'(refund\.[a-z_]+)'/g)) producible.add(m[1]);
+  assert.ok(producible.size >= 8,
+    `expected the route and the door together to name the refusals, saw ${[...producible].sort().join(", ")}`);
 
-  const mapped = new Set<string>();
-  const kaart = paneel.slice(paneel.indexOf("const WEIGERING"), paneel.indexOf("export function TerugbetalingLijst"));
-  assert.ok(kaart.length > 40, "the WEIGERING map could not be cut out of the panel");
-  for (const m of kaart.matchAll(/^\s{2}([a-z_]+):/gm)) mapped.add(m[1]);
-
-  for (const c of refused) {
-    assert.ok(mapped.has(c), `the route refuses with '${c}' and the screen has no sentence for it`);
-  }
-  // The refusals mayReverse() produces reach the wire through `refusal.replace(/-/g, '_')`, so
-  // they never appear as a literal in the route. They are read from the pure module's own union
-  // instead of being waved through: an earlier version accepted ANY mapped code as soon as the
-  // route contained that replace() call, which made this whole direction vacuous.
-  assert.match(route, /verdict\.refusal\.replace\(\/-\/g, '_'\)/,
+  // The route forwards mayReverse()'s refusals through a template, so they never appear as a
+  // literal anywhere. They are read from the pure module's own union instead of being waved
+  // through — an escape hatch here would make this whole direction vacuous.
+  assert.match(route, /refuse\(`refund\.\$\{verdict\.refusal\.replace\(\/-\/g, '_'\)\}`/,
     "the route no longer forwards mayReverse's refusals — this list is reading the wrong thing");
   const pureSrc = readFileSync("src/lib/mollie-refund.ts", "utf8");
   const unionStart = pureSrc.indexOf("export type ReverseRefusal");
   assert.ok(unionStart > 0, "ReverseRefusal is gone — the refusals below cannot be enumerated");
   const union = pureSrc.slice(unionStart, pureSrc.indexOf(";", unionStart));
-  for (const m of union.matchAll(/"([a-z-]+)"/g)) refused.add(m[1].replace(/-/g, "_"));
+  for (const m of union.matchAll(/"([a-z-]+)"/g)) producible.add(`refund.${m[1].replace(/-/g, "_")}`);
 
+  const kaart = paneel.slice(paneel.indexOf("const WEIGERING"), paneel.indexOf("export function TerugbetalingLijst"));
+  assert.ok(kaart.length > 40, "the WEIGERING map could not be cut out of the panel");
+  const mapped = new Set<string>();
+  for (const m of kaart.matchAll(/'(refund\.[a-z_]+)':/g)) mapped.add(m[1]);
+
+  for (const c of producible) {
+    assert.ok(mapped.has(c), `'${c}' can reach the screen and the screen has no sentence for it`);
+  }
   for (const c of mapped) {
-    assert.ok(refused.has(c), `the screen has a sentence for '${c}' that the route can never return`);
+    assert.ok(producible.has(c), `the screen has a sentence for '${c}' that nothing can produce`);
+  }
+  // …and every one of them is in the shared vocabulary, not invented at the keyboard.
+  const woordenlijst = readFileSync("src/lib/contracts/reason-codes.ts", "utf8");
+  for (const c of mapped) {
+    assert.ok(woordenlijst.includes(`"${c}"`), `'${c}' is not declared in contracts/reason-codes.ts`);
   }
   // And the route never ships Dutch of its own.
   assert.doesNotMatch(route.replace(/\/\/[^\n]*/g, ""), /error:\s*['"][^'"]* [a-z]+ [a-z]+/,
     "the route writes a sentence instead of a code");
+});
+
+test("[TERUGBETALING-DEUR] the reversal and the answer are ONE transaction", () => {
+  // The half state this route documented in its own comment — "de betaling is er wél af en het
+  // antwoord niet vastgelegd" — cannot be closed from TypeScript, because supabase-js has no
+  // transaction. Two calls are two transactions, always. So both writes moved behind one locked
+  // plpgsql door, the same move [EEN-SCHRIJFPAD] made for "this invoice is paid".
+  const route = code("src/app/api/mollie/terugbetaling/route.ts");
+  assert.match(route, /rpc\('answer_mollie_refund'/, "the route no longer calls the atomic door");
+  assert.doesNotMatch(route, /rpc\('reverse_invoice_payment'/,
+    "the route reverses the payment itself again — that is one half of the fact, in its own transaction");
+  assert.doesNotMatch(route, /from\('mollie_refunds'\)[\s\S]{0,200}?\.update\(/,
+    "the route writes the answer itself again — that is the other half, in a second transaction");
+
+  const deur = readFileSync("supabase/migrations/mollie_refund_answer.sql", "utf8");
+  // The lock replaces the route's compare-and-set: "is it still open" and "write the answer" are
+  // now the same transaction rather than two.
+  assert.match(deur, /FROM public\.mollie_refunds r[\s\S]{0,200}?FOR UPDATE/,
+    "the door does not lock the refund row");
+  assert.match(deur, /FROM public\.bank_tx_invoices l[\s\S]{0,300}?FOR UPDATE/,
+    "the door does not lock the payment it is about to reverse");
+  // THE VALUE PIN, not a copy of the rule.
+  assert.match(deur, /abs\(v_applied - p_expected_applied\) > v_eps/,
+    "the value pin is gone — the owner could answer about a payment that has since moved");
+  assert.doesNotMatch(deur, /refundAmount|partial/i,
+    "the door re-implements the partial-refund rule; that rule lives in mollie-refund.ts");
+  // A 55000 is caught so a refusing money function becomes a verdict; 42501 is NOT.
+  assert.match(deur, /EXCEPTION WHEN SQLSTATE '55000'/,
+    "a business refusal from the money function aborts instead of being reported");
+  assert.doesNotMatch(deur, /WHEN SQLSTATE '42501'|WHEN OTHERS/,
+    "the door swallows a caller-guard breach — that must abort, not be answered politely");
+  assert.match(deur, /REVOKE ALL ON FUNCTION public\.answer_mollie_refund/,
+    "the door is left executable by PUBLIC");
+});
+
+test("[WERKSTROOM-REDEN] a reason code is a refusal the app produced, not the owner's note", () => {
+  // The five *-reason.ts modules are three different kinds of thing, and only one kind belongs in
+  // a shared vocabulary. archive-reason and bank-ignore-reason both say in their own headers that
+  // the reason is a NOTE and not a decision — and the two do not even agree on what niet_van_mij
+  // means. Folding them in would look tidy and would be a category error.
+  const woorden = code("src/lib/contracts/reason-codes.ts");
+  for (const notitie of ["dubbel", "niet_van_mij", "geen_factuur", "prive"]) {
+    assert.ok(!woorden.includes(`"${notitie}"`),
+      `${notitie} is an owner's disposition note, not a refusal this app produced`);
+  }
+  // Namespaced, because two domains will both want not_found.
+  for (const m of woorden.matchAll(/^\s+\| "([a-z_.]+)"/gm)) {
+    assert.match(m[1], /^[a-z]+\.[a-z_]+$/, `${m[1]} carries no domain — whose refusal is it?`);
+  }
+  // And the file says out loud what it is NOT taking over, so nobody unifies the five next quarter.
+  const raw = readFileSync("src/lib/contracts/reason-codes.ts", "utf8");
+  for (const naam of ["archive-reason", "bank-ignore-reason", "hold-reasons", "pay-toggle-reason"]) {
+    assert.ok(raw.includes(naam), `the vocabulary does not say where ${naam} stands`);
+  }
 });
 
 test("[TERUGBETALING] nothing at rest: the panel renders nothing when there is nothing to decide", () => {

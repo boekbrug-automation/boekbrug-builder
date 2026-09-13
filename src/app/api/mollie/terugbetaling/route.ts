@@ -20,6 +20,7 @@ import { createPipelineClient } from '@/lib/supabase-pipeline'
 import { requireOwner } from '@/lib/owner-only'
 import { logAuditAction, getClientIP } from '@/lib/audit'
 import { isRefundAnswer, mayReverse, type RefundKind } from '@/lib/mollie-refund'
+import { reportHandledFailure } from '@/lib/report-handled'
 import { fetchAllRowsForIds } from '@/lib/supabase-paginate'
 
 export const dynamic = 'force-dynamic'
@@ -41,6 +42,12 @@ type RefundRow = {
 
 const SELECT = 'id, refund_id, kind, amount, created_on, link_id, invoice_id, resolution'
 
+/**
+ * [SERVER-ZIN] Codes, never sentences. The refusals that belong to the refund domain carry their
+ * namespace (`refund.…`, see contracts/reason-codes.ts); the plumbing ones (a read that broke, a
+ * body that will not parse) do not, because they are not a state the owner can read a sentence
+ * about — they are this route failing.
+ */
 function refuse(code: string, status: number) {
   return NextResponse.json({ error: code, code }, { status })
 }
@@ -124,26 +131,33 @@ export async function POST(req: NextRequest) {
     .eq('refund_id', refundId)
     .maybeSingle()
   if (rowErr) return refuse('lookup_failed', 500)
-  if (!row) return refuse('not_found', 404)
+  if (!row) return refuse('refund.not_found', 404)
   const refund = row as RefundRow
   // Twee mensen die dezelfde vraag beantwoorden is een gewone dinsdag; twee ANTWOORDEN op één
   // feit is dat niet. Wie als tweede klikt krijgt te horen dat het al beantwoord is, en er wordt
   // niets overschreven — het eerste antwoord is het antwoord.
-  if (refund.resolution !== 'open') return refuse('already_answered', 409)
+  if (refund.resolution !== 'open') return refuse('refund.already_answered', 409)
 
   const amount = Number(refund.amount)
-  const now = new Date().toISOString()
 
+  // [TERUGBETALING-DEUR] De POORT leest het bewijs; de REGEL blijft in mollie-refund.ts; en het
+  // getal waarop die regel is toegepast reist mee de deur in als waardepin.
+  //
+  // Wat hier NIET meer gebeurt: twee schrijfacties in twee transacties. Deze route deed eerst de
+  // terugdraaiing en dan het antwoord, en noemde het gat zelf — "de betaling is er wél af en het
+  // antwoord niet vastgelegd". supabase-js kent geen transactie, dus dat was met TypeScript niet
+  // te sluiten. answer_mollie_refund doet beide onder één slot.
+  let expectedApplied: number | null = null
   if (action === 'reversed') {
     // De geboekte betaling is de bank_tx_invoices-rij die de webhook schreef met het id van de
-    // betaallinkrij als client_key — zie mollie/webhook/route.ts. Zonder link_id is er geen
-    // betaling om aan te wijzen.
-    if (!refund.link_id || !refund.invoice_id) return refuse('no_invoice', 409)
+    // betaallinkrij als client_key — zie mollie/webhook/route.ts.
+    if (!refund.link_id || !refund.invoice_id) return refuse('refund.no_invoice', 409)
     const { data: links, error: linkErr } = await pipeline
       .from('bank_tx_invoices')
       .select('id, amount_applied, transaction_id')
       .eq('user_id', user.id)
       .eq('client_key', refund.link_id)
+      .order('created_at')
     if (linkErr) return refuse('payment_lookup_failed', 500)
     const payment = ((links ?? []) as { id: string; amount_applied: number | string | null; transaction_id: string | null }[])[0] ?? null
 
@@ -152,38 +166,34 @@ export async function POST(req: NextRequest) {
       appliedAmount: payment ? Number(payment.amount_applied) : null,
       refundAmount: amount,
     })
-    if (!verdict.ok) return refuse(verdict.refusal.replace(/-/g, '_'), 409)
+    if (!verdict.ok) return refuse(`refund.${verdict.refusal.replace(/-/g, '_')}`, 409)
+    expectedApplied = Number(payment!.amount_applied)
+  }
 
-    const { error: rpcErr } = await pipeline.rpc('reverse_invoice_payment', {
-      p_user_id: user.id,
-      p_link_id: payment!.id,
+  const { data: answered, error: rpcErr } = await pipeline.rpc('answer_mollie_refund', {
+    p_user_id: user.id,
+    p_refund_id: refundId,
+    p_answer: action,
+    p_expected_applied: expectedApplied,
+  })
+  if (rpcErr) {
+    // De functie is er nog niet (de migratie wordt met de hand toegepast), of iets brak. Beide
+    // zijn "niet geboekt", en dat is het enige eerlijke antwoord — er is niets half gebeurd.
+    reportHandledFailure({
+      tag: 'TERUGBETALING-DEUR', severity: 'gate-unavailable',
+      message: 'antwoord op een terugbetaling kon niet worden vastgelegd',
+      context: { userId: user.id, refundId, error: rpcErr.message },
     })
-    if (rpcErr) {
-      const msg = String(rpcErr.message ?? '')
-      // De weigeringen van de functie zelf, elk met hun eigen code zodat het scherm kan zeggen
-      // WAT er in de weg staat in plaats van dat er iets misging.
-      if (/verwerkt/i.test(msg)) return refuse('accountant_lock', 409)
-      if (/bank line/i.test(msg)) return refuse('has_bank_line', 409)
-      if (/not found/i.test(msg)) return refuse('payment_gone', 409)
-      return refuse('reverse_failed', 500)
-    }
+    return refuse('save_failed', 500)
+  }
+  const verdictRow = ((answered ?? []) as { answer_ok: boolean; answer_reason_code: string | null }[])[0] ?? null
+  if (!verdictRow) return refuse('save_failed', 500)
+  if (!verdictRow.answer_ok) {
+    return refuse(verdictRow.answer_reason_code ?? 'refund.reverse_failed',
+      verdictRow.answer_reason_code === 'refund.reverse_failed' ? 500 : 409)
   }
 
-  const resolution = action === 'reversed' ? 'reversed' : action === 'credited' ? 'credited' : 'not_ours'
-  const { data: updated, error: updErr } = await pipeline
-    .from('mollie_refunds')
-    .update({ resolution, resolved_at: now, updated_at: now })
-    .eq('user_id', user.id)
-    .eq('refund_id', refundId)
-    .eq('resolution', 'open')
-    .select('id')
-  if (updErr) return refuse('save_failed', 500)
-  // De betaling is er wél af en het antwoord niet vastgelegd: dat is de enige half-af toestand
-  // hier, en hij mag niet stil blijven. De volgende synchronisatie repareert hem zelf — de
-  // factuur staat lager dan de momentopname, dus de rij sluit als 'reversed'.
-  if ((updated ?? []).length === 0 && action === 'reversed') {
-    console.error('[TERUGBETALING] betaling teruggedraaid maar het antwoord niet vastgelegd', { userId: user.id, refundId })
-  }
+  const resolution = action
 
   await logAuditAction({
     userId: user.id,

@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 156 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 157 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 18 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -365,6 +365,8 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('mollie.sql', 'policy', 'mollie_connections_select_own', 'mollie_connections', 'public'),
   ('mollie.sql', 'table', 'mollie_connections', null, 'public'),
   ('mollie.sql', 'table', 'mollie_payment_links', null, 'public'),
+  ('mollie_refund_answer.sql', 'function', 'answer_mollie_refund', null, 'public'),
+  ('mollie_refund_answer.sql', 'function', 'mollie_refund_reason_of', null, 'public'),
   ('mollie_refunds.sql', 'index', 'mollie_refunds_invoice_idx', null, 'public'),
   ('mollie_refunds.sql', 'index', 'mollie_refunds_open_idx', null, 'public'),
   ('mollie_refunds.sql', 'index', 'mollie_refunds_settlement_idx', null, 'public'),
@@ -655,7 +657,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 174
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 175
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen

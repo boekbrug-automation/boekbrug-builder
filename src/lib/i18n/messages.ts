@@ -13572,6 +13572,28 @@ export const MESSAGES = {
     ar: 'لم تعد الدفعة على الفاتورة.',
     tr: 'Ödeme artık faturada değil.',
   },
+  'terugbetaling.fout.not_found': {
+    nl: 'Deze terugbetaling staat er niet meer. Herlaad de pagina.',
+    en: 'This refund is no longer there. Reload the page.',
+    ar: 'لم يعد هذا الاسترجاع موجوداً. أعد تحميل الصفحة.',
+    tr: 'Bu iade artık mevcut değil. Sayfayı yenileyin.',
+  },
+  // Kan alleen ontstaan als een aanroeper iets anders dan de drie antwoorden stuurt — de route
+  // laat dat niet toe. Toch een zin, want de deur kan hem teruggeven en dan hoort er iets te staan.
+  'terugbetaling.fout.invalid_answer': {
+    nl: 'Dat is geen antwoord dat hier kan. Herlaad de pagina.',
+    en: 'That is not an answer this can take. Reload the page.',
+    ar: 'هذه ليست إجابة مقبولة هنا. أعد تحميل الصفحة.',
+    tr: 'Bu, burada geçerli bir yanıt değil. Sayfayı yenileyin.',
+  },
+  // [TERUGBETALING-DEUR] De waardepin sloeg aan: tussen wat het scherm liet zien en het slot in de
+  // database is de betaling veranderd. Geen fout — een reden om opnieuw te kijken.
+  'terugbetaling.fout.payment_changed': {
+    nl: 'De betaling is intussen veranderd. Herlaad de pagina en kijk opnieuw.',
+    en: 'The payment has changed in the meantime. Reload the page and look again.',
+    ar: 'تغيّرت الدفعة في هذه الأثناء. أعد تحميل الصفحة وانظر مرة أخرى.',
+    tr: 'Ödeme bu arada değişti. Sayfayı yenileyip tekrar bakın.',
+  },
   'terugbetaling.fout.accountant_lock': {
     nl: 'Je boekhouder heeft deze factuur verwerkt. Vraag hem dat eerst terug te draaien.',
     en: 'Your accountant has processed this invoice. Ask them to undo that first.',

@@ -27,14 +27,27 @@ interface OpenRefund {
   clientName: string | null
 }
 
-/** Elke code die de route kan teruggeven, met de zin erbij. Onbekend valt terug op de algemene. */
+/**
+ * Elke code die de route kan teruggeven, met de zin erbij. Onbekend valt terug op de algemene.
+ *
+ * [WERKSTROOM-REDEN] De codes dragen hun domein voorop (`refund.`), want twee domeinen willen
+ * ooit allebei `not_found` en dat is niet dezelfde weigering. De lijst staat in
+ * src/lib/contracts/reason-codes.ts; hier staan de zinnen erbij.
+ */
 const WEIGERING: Readonly<Record<string, MessageKey>> = {
-  partial_refund: 'terugbetaling.fout.partial_refund',
-  no_invoice: 'terugbetaling.fout.no_invoice',
-  payment_gone: 'terugbetaling.fout.payment_gone',
-  accountant_lock: 'terugbetaling.fout.accountant_lock',
-  has_bank_line: 'terugbetaling.fout.has_bank_line',
-  already_answered: 'terugbetaling.fout.already_answered',
+  'refund.not_found': 'terugbetaling.fout.not_found',
+  'refund.invalid_answer': 'terugbetaling.fout.invalid_answer',
+  'refund.partial_refund': 'terugbetaling.fout.partial_refund',
+  'refund.no_invoice': 'terugbetaling.fout.no_invoice',
+  'refund.payment_gone': 'terugbetaling.fout.payment_gone',
+  'refund.payment_changed': 'terugbetaling.fout.payment_changed',
+  'refund.accountant_lock': 'terugbetaling.fout.accountant_lock',
+  'refund.has_bank_line': 'terugbetaling.fout.has_bank_line',
+  'refund.already_answered': 'terugbetaling.fout.already_answered',
+  // De geldfunctie weigerde om een reden die de deur niet kon benoemen. De algemene zin is hier
+  // het eerlijke antwoord — maar hij staat EXPLICIET in de kaart, want een code die alleen via de
+  // terugval een zin krijgt is een code waarvan niemand meer weet dat hij bestaat.
+  'refund.reverse_failed': 'terugbetaling.fout.algemeen',
 }
 
 /**
