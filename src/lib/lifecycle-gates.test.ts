@@ -28614,6 +28614,66 @@ test("[RUSTIG] the screen does not grow wordier than the day this was measured",
 // The danger is created by the improvement the owner asked for in the same breath — a notification
 // naming WHICH invoice, from whom, for how much, supplies exactly those two missing conditions. So
 // this gate lands before that mail is made useful, and stays to say so.
+// ─── [SCAN-EVERYWHERE] The mailbox is not the inbox ────────────────────────────────────────────
+//
+// An owner does not keep invoices in the inbox. They make a folder — "Facturen", "Administratie" —
+// and a rule files supplier mail into it, often skipping the inbox entirely. On Gmail that mail
+// carries a custom label and no INBOX label; on Outlook it lives in a subfolder. A listing scoped to
+// the inbox would import nothing for that owner and say nothing about it, which is the worst shape a
+// bookkeeping failure can take: not a wrong number, an absent one.
+//
+// Both paths are already right, and both were REASONED right rather than accidentally right — the
+// [SCAN-EVERYWHERE] and [FOLDER-DEDUP] notes in email-integration.ts carry the argument. Until now
+// neither had a single test, and both are exactly the kind of thing a later reader optimises away in
+// good faith: `/me/mailFolders/inbox/messages` and `in:inbox` each return far fewer messages, which
+// looks like a clean win against MAX_API_CALLS until you notice which invoices stopped arriving.
+//
+// The second half is not hypothetical either. [FOLDER-DEDUP] records what a many-folder mailbox
+// already did in production: Graph returns the same message once per folder view, the old loop
+// counted RAW pages against its budget, the ceiling was reached before the older messages were
+// listed, the watermark advanced past them anyway — a permanent, silent miss, on precisely the
+// mailbox shape this gate is about.
+test("[SCAN-EVERYWHERE] neither provider listing may be scoped to one folder", () => {
+  const sync = code("src/lib/email-integration.ts");
+
+  // ── GMAIL. `in:anywhere` reaches every label, archived All Mail, Spam and Trash. Both listings
+  //    carry it: the attachment scan and the body scan.
+  const anywhere = [...sync.matchAll(/in:anywhere/g)].length;
+  assert.ok(anywhere >= 2,
+    `only ${anywhere} Gmail quer(ies) ask for in:anywhere — a listing was added that stops at the ` +
+      "inbox, or the scan is broken");
+  for (const scoped of ["in:inbox", "label:inbox", "in:sent -in:anywhere"]) {
+    assert.ok(!sync.includes(scoped),
+      `a Gmail query says ${scoped} — mail a rule filed into a folder is then never listed`);
+  }
+
+  // ── OUTLOOK. /me/messages is the whole mailbox; /me/mailFolders/<id>/messages is one folder.
+  //    The distinction is one path segment and it is the entire feature.
+  const mailbox = [...sync.matchAll(/graph\.microsoft\.com\/v1\.0\/me\/messages/g)].length;
+  assert.ok(mailbox >= 2,
+    `only ${mailbox} Graph listing(s) address the whole mailbox — the scan is broken, or a path moved`);
+  assert.ok(!/mailFolders/.test(sync),
+    "a Graph call is scoped to a mail FOLDER. /me/messages spans the mailbox; anything under " +
+      "/me/mailFolders/ sees one folder, and the owner's invoices are in the others");
+
+  // ── [FOLDER-DEDUP] And the budget must still be counted in UNIQUE messages, not in pages.
+  //    Graph returns the same message once per folder view, so on a many-folder mailbox a
+  //    page-counted budget is spent on repeats and the older tail is never listed — while the
+  //    watermark advances past it. That is the production bug this loop was rewritten to fix.
+  const loopAt = sync.indexOf("while (nextUrl && out.length < MAX_UNIQUE");
+  assert.ok(loopAt > 0,
+    "the Outlook paging loop no longer budgets by UNIQUE messages — a folder-view repeat can " +
+      "consume the ceiling again, and the older tail falls out of every future window");
+  const loopEnd = sync.indexOf("return { messages: out, complete, apiCalls }", loopAt);
+  assert.ok(loopEnd > loopAt, "the loop's end must be findable — an unbounded window measures the file");
+  const loop = sync.slice(loopAt, loopEnd);
+
+  // De-duplication INSIDE the loop, before anything is counted. Doing it afterwards is the old
+  // behaviour exactly: the repeats have already been paid for by then.
+  assert.match(loop, /if \(m\.id && !seen\.has\(m\.id\)\) \{[\s\S]{0,80}?seen\.add\(m\.id\)[\s\S]{0,40}?out\.push\(m\)/,
+    "the Graph listing no longer de-duplicates as it pages");
+});
+
 test("[EIGEN-POST] every mail path refuses our own sender, and does it before it reads anything", () => {
   const sync = code("src/lib/email-integration.ts");
 
