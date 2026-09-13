@@ -172,6 +172,124 @@ test("[DD-SIGNAL] the CSV mapper still has a role for the incasso columns", () =
   }
 });
 
+// ─── [DD-NAAR-MATCHER] …and it must reach the thing that decides where the money goes ────────
+//
+// The fourth place the same signal was dropped, and the most expensive. The three columns were
+// parsed from four formats, stored by bank_tx_direct_debit.sql, selected by name on /bank and used
+// to pair stornos — and then rowToTransaction, the single door every STORED row walks through on
+// its way to being scored, left them behind. `tx.mandateId` was therefore `undefined` in every
+// scorePair call the app has ever made.
+//
+// Measured cost, reproduced in bank-matching.test.ts: a supplier's bounced collection (money the
+// bank RETURNED: +€242,00, NDDT, a machtigingskenmerk) scored 0.950 against an open sales invoice
+// of the same amount to that same company, reached 'auto', and autoConfirmTier booked it
+// 'amount_only'. A customer marked paid, unattended, off money that came back from a supplier.
+//
+// Every gate below guards a line that is one deletion away from restoring exactly that.
+
+test("[DD-NAAR-MATCHER] the mapper into the matcher hands over all three markers", () => {
+  const src = code("src/lib/bank-import.ts");
+  const start = src.indexOf("export function rowToTransaction");
+  assert.ok(start > 0, "rowToTransaction is gone — the mapper the gate measures no longer exists");
+  const end = src.indexOf("}", src.indexOf("return {", start));
+  assert.ok(end > start, "rowToTransaction no longer returns an object literal");
+  const body = src.slice(start, end);
+  for (const [field, column, why] of [
+    ["typeCode", "type_code", "the bank's own classification (NDDT / RDDT / IC)"],
+    ["mandateId", "mandate_id", "the machtigingskenmerk — the strongest signal any format carries"],
+    ["creditorId", "creditor_id", "the incassant-ID of the collecting party"],
+  ] as const) {
+    assert.match(
+      body, new RegExp(`${field}:\\s*r\\.${column}`),
+      `rowToTransaction drops ${column} again — ${why} is stored, read by /bank, and then lost one ` +
+        `line before the matcher, which is precisely how a returned collection booked a sales invoice`,
+    );
+  }
+});
+
+test("[DD-NAAR-MATCHER] both callers of the matcher actually read the three columns", () => {
+  // A mapper that hands over `r.mandate_id` on a row whose SELECT never asked for it hands over
+  // undefined, and reads as wired. Both doors, because the unattended one is where it costs money.
+  for (const [path, why] of [
+    ["src/app/api/bank/match/route.ts", "the screen the owner reconciles on"],
+    ["src/lib/bank-auto-confirm.ts", "the hourly pass that books with nobody watching"],
+  ] as const) {
+    const src = code(path);
+    const selects = src.match(/\.select\("[^"]*bank_transactions[^"]*"\)|\.select\("id, date, amount[^"]*"\)/g) ?? [];
+    assert.ok(selects.length > 0, `${path}: the pending-transaction SELECT is not recognisable any more`);
+    for (const column of ["type_code", "mandate_id", "creditor_id"]) {
+      assert.ok(
+        selects.some((sel) => sel.includes(column)),
+        `${path} (${why}) no longer selects ${column} — the matcher is scoring incasso lines blind again`,
+      );
+    }
+  }
+});
+
+test("[STORNO-GEEN-BETALING] a returned collection is capped to a human choice, never removed", () => {
+  const matcher = code("src/lib/bank-matching.ts");
+  assert.match(
+    matcher, /isBankStatedReversal\(readDirectDebit\(\{/,
+    "the matcher no longer asks direct-debit.ts whether the bank returned this money",
+  );
+  // A CAP, not a refusal. Removing the candidate would be one character shorter and would break
+  // the owner who collects from their OWN customers by incasso — for whom that credit IS the
+  // payment. 0.6 sits under autoConfidence (0.7) so nothing pre-selects or books, and over
+  // choiceThreshold (0.5) so it stays listed with its reason.
+  const at = matcher.indexOf("isBankStatedReversal(readDirectDebit({");
+  const near = matcher.slice(at, at + 600);
+  assert.match(
+    near, /confidence = Math\.min\(confidence, 0\.6\);/,
+    "the reversal rule stopped being a cap — a candidate that is removed instead of lowered is " +
+      "invisible, and this file's own comments record what that costs every time",
+  );
+  assert.match(near, /reasons\.push\(/, "a capped candidate must say why it was capped");
+
+  // The BATCH pass never asks scorePair, so that cap does not reach it: it goes from "the printed
+  // numbers sum to the amount" straight to book_bank_batch, silently and all-or-nothing. There the
+  // only honest lowering is to leave the line for the human.
+  const auto = code("src/lib/bank-auto-confirm.ts");
+  assert.match(
+    auto, /if \(isBankStatedReversal\(readDirectDebit\(\{[\s\S]{0,300}?\}\)\)\) continue;/,
+    "the unattended batch pass no longer refuses a returned collection — a storno whose description " +
+      "prints numbers that happen to sum can book several invoices at once, with nobody watching",
+  );
+
+  // Only the BANK's fields may hold a payment back. A payer who types "terugbetaling incasso" in a
+  // payment note must not be able to freeze their own transfer.
+  const dd = code("src/lib/direct-debit.ts");
+  assert.match(
+    dd, /export function isBankStatedReversal\(read: DirectDebitRead\): boolean \{\s*return read\.reversal && read\.signal !== null && read\.signal !== 'wording'\s*\}/,
+    "isBankStatedReversal now accepts free-text wording, or is gone — either way a payer's own " +
+      "words can hold back a real payment",
+  );
+});
+
+test("[INCASSO-IDENTITEIT] the mandate and the incassant-ID are handles the memory remembers by", () => {
+  const mem = code("src/lib/match-memory.ts");
+  for (const index of ["byMandate", "byCreditor"]) {
+    assert.match(mem, new RegExp(`remember\\(${index},`), `the memory no longer folds ${index}`);
+    assert.match(mem, new RegExp(`remembersOnly\\(memory\\.${index},`), `the memory no longer asks ${index}`);
+  }
+  // Same one-party rule as every other handle, and it is what makes remembering an incassant-ID
+  // safe at all: one collector may serve several trade names, and such an ID must stop speaking.
+  assert.match(mem, /parties != null && parties\.size === 1 && parties\.has\(party\)/);
+  // The read half must actually fetch them, or the two indexes are permanently empty and the
+  // wiring reads as done.
+  const server = code("src/lib/match-memory-server.ts");
+  assert.match(server, /\.select\("id, counterpart_name, counterpart_iban, mandate_id, creditor_id"\)/);
+  assert.match(server, /mandateId: tx\.mandate_id \?\? null/);
+  assert.match(server, /creditorId: tx\.creditor_id \?\? null/);
+  // It identifies the PARTY, not the bill — so it must not have earned a cap of its own. The four
+  // identity ceilings stay exactly as [BANK-IDENTITY-OUTRANKS] set them.
+  const matcher = code("src/lib/bank-matching.ts");
+  assert.match(
+    matcher, /confidence = Math\.min\(confidence, ibanOk \? 0\.96 : supplierIbanOk \? 0\.955 : 0\.95\);/,
+    "the identity hierarchy moved — a remembered mandate is the owner's own confirmation read " +
+      "back, which is not stronger than the account printed on the document",
+  );
+});
+
 test("[DD-SIGNAL] a proposal is a question, never a decision", () => {
   const src = code("src/app/api/cron/reconcile/route.ts");
   assert.match(src, /proposeIncassoMandates\([^)]*uid/, "the cron no longer looks for mandates in the statement");

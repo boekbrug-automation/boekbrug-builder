@@ -188,6 +188,28 @@ export function isCertainDirectDebit(read: DirectDebitRead): boolean {
   return read.signal === 'mandate' || read.signal === 'creditor-id' || read.signal === 'type-code'
 }
 
+/**
+ * Did the BANK'S OWN FIELDS say this money came back?
+ *
+ * The mirror image of isCertainDirectDebit, and it exists for the same reason: a matcher may not
+ * act on a description someone typed. `reversal` on its own is not enough to refuse a payment with,
+ * because it also fires on the word "storno" appearing in free text — and a customer who types
+ * "terugbetaling incasso" in a payment note would then have their own transfer held back.
+ *
+ * So this asks the narrower question: the marker came from a machtigingskenmerk, an incassant-ID or
+ * the bank's own transaction code, AND the money went the wrong way for a collection. Every one of
+ * those three is written by the bank, not by a payer.
+ *
+ * What it does NOT claim is which reversal it is. A credit under a direct-debit marker is either a
+ * supplier's failed collection coming back, or — on a business account — the owner collecting from
+ * their own customers. Both are true things this cannot tell apart, and the caller must not treat
+ * this as "not a payment": bank-matching caps such a pair to a human choice rather than removing
+ * it, precisely because the second case is a real payment.
+ */
+export function isBankStatedReversal(read: DirectDebitRead): boolean {
+  return read.reversal && read.signal !== null && read.signal !== 'wording'
+}
+
 // [DD-SIGNAL] Er stond hier een directDebitEvidenceText(): de zin die de eigenaar zou vertellen
 // WAAROM een afschrijving als incasso is gelezen ("je bank noemt hier een machtiging"), en bij een
 // storno dat de factuur dus NIET betaald is. Geen enkel scherm toonde hem, en er is vandaag ook

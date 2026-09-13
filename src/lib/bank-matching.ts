@@ -21,7 +21,9 @@ import { round2 } from "./invoice-totals";
 // [GESTRUCTUREERD] The references a bank routes on, checksum and all — see structured-reference.ts.
 import { structuredReferenceMatches } from "./structured-reference";
 // [GEHEUGEN] The owner's own confirmations, read back as identity — see match-memory.ts.
-import { remembersParty, type MatchMemory } from "./match-memory";
+import { remembersPartyBy, type MatchMemory } from "./match-memory";
+// [STORNO-GEEN-BETALING] What the statement's own fields say about the instrument — direct-debit.ts.
+import { readDirectDebit, isBankStatedReversal } from "./direct-debit";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -84,7 +86,13 @@ export type MatchSignal =
   | "partial_amount"
   // [GEHEUGEN] The owner has confirmed a payment from this counterpart against this party before.
   // Their own answer, read back — see match-memory.ts.
-  | "memory";
+  | "memory"
+  // [STORNO-GEEN-BETALING] The bank's own fields say this money came BACK — a collection that
+  // bounced. Unlike every other entry here it is not a reason to offer the pair; it is the reason
+  // the pair is capped to a human choice. Declared as a signal because that is how the /bank card
+  // explains itself ([WAAROM-DEZE] maps this type to a sentence), and a candidate the app quietly
+  // refuses to pre-select with no word about why reads as a broken screen.
+  | "reversal";
 
 // [BIJNA-BEDRAG] How far a payment may sit from an open balance and still be worth showing.
 //
@@ -761,11 +769,22 @@ export function scorePair(
     // coincidence ceiling that amount + name + date already reached, so nothing books unattended
     // that did not before. What it changes is which invoice is on top when several could be, and
     // whether a counterparty is IDENTIFIED at all — which is what [BIJNA-BEDRAG] above needs.
-    const rememberedOk = remembersParty(opts.memory, tx, inv.client_name);
+    // [INCASSO-IDENTITEIT] …and the handle it is remembered BY now includes the machtigingskenmerk
+    // and the incassant-ID, which is where the memory was weakest and the need greatest. An incasso
+    // line is the one kind whose counterpart name is routinely not a name at all ("SEPA INCASSO
+    // ALGEMEEN DOORLOPEND") and whose account is the collector's clearing IBAN rather than the
+    // supplier's own — so neither handle the memory HAD could identify it, month after month, while
+    // the mandate reference on the line was the same string every time.
+    const rememberedBy = remembersPartyBy(opts.memory, tx, inv.client_name);
+    const rememberedOk = rememberedBy !== null;
     if (rememberedOk) {
       confidence += 0.30;
       signals.push("memory");
-      reasons.push(`je hebt eerder een betaling van deze tegenpartij aan ${inv.client_name ?? "deze partij"} gekoppeld`);
+      reasons.push(
+        rememberedBy === "mandate" || rememberedBy === "creditor-id"
+          ? `dezelfde incasso als eerdere betalingen aan ${inv.client_name ?? "deze partij"}`
+          : `je hebt eerder een betaling van deze tegenpartij aan ${inv.client_name ?? "deze partij"} gekoppeld`,
+      );
     }
     if (preparedOk) {
       // Weighted like the other identity-ish signals rather than as a tie-break, and measured:
@@ -913,6 +932,41 @@ export function scorePair(
   if (paidSoFar > 0.005) {
     confidence = Math.min(confidence, 0.6);
     reasons.push(`restant van deelbetaling (€${(amountTarget ?? 0).toFixed(2)} open)`);
+  }
+
+  // [STORNO-GEEN-BETALING] Money coming IN under the bank's own direct-debit markers is not a
+  // payment the app may pre-select — it is a collection that came BACK.
+  //
+  // Reproduced, and it is the shape that costs the most: ATAPACK collects € 242,00 by incasso, the
+  // collection bounces, the bank credits € 242,00 on 10 March with typeCode NDDT and a
+  // machtigingskenmerk. The owner also SELLS to ATAPACK and has an open € 242,00 sales invoice
+  // dated 3 March. amount + counterpart + date scored 0.950, topReachesAuto made it 'auto', and
+  // autoConfirmTier returned 'amount_only' — so runBankAutoConfirm booked that customer invoice as
+  // PAID, unattended, off money that a supplier had just taken back. The customer never paid, the
+  // reminders stop, and /bank shows the same line offering to reopen a DIFFERENT invoice, because
+  // the storno card and the matcher were reading the same row and disagreeing about it.
+  //
+  // ── WHY A CAP AND NOT A REFUSAL ──
+  // A credit under a direct-debit marker is a failed collection coming back, OR — on a business
+  // account — the owner collecting from their OWN customers, where the line genuinely IS the
+  // payment. direct-debit.ts says so in as many words and cannot tell the two apart from one line.
+  // Removing the candidate would break the second owner completely; 0.6 costs them one tap. It
+  // sits below autoConfidence (0.7), so nothing pre-selects and no tier can book it, and above
+  // choiceThreshold (0.5), so it stays LISTED with its reason — which is the whole difference
+  // between "weak" and "invisible" this file keeps having to relearn.
+  //
+  // Only the bank's OWN fields count (isBankStatedReversal): a customer who types "terugbetaling
+  // incasso" in a payment note must not hold back their own transfer.
+  if (isBankStatedReversal(readDirectDebit({
+    typeCode: tx.typeCode,
+    mandateId: tx.mandateId,
+    creditorId: tx.creditorId,
+    text: `${tx.description ?? ""} ${tx.reference ?? ""} ${tx.rawLine ?? ""}`,
+    amount: tx.amount,
+  }))) {
+    confidence = Math.min(confidence, 0.6);
+    signals.push("reversal");
+    reasons.push("je bank boekte dit terug als storno — controleer of dit een betaling is");
   }
 
   confidence = Math.min(1, Math.max(0, confidence));

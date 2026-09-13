@@ -147,6 +147,45 @@ test("[BUNDEL-DREMPEL] a draft invoice is not payable, not even inside a perfect
   assert.deepStrictEqual(rec.rpcs, [], "the batch RPC was called with an unpayable invoice in it");
 });
 
+test("[STORNO-GEEN-BETALING] a returned collection books nothing, not even a perfect tie", async () => {
+  // The batch pass never asks scorePair, so the cap that holds a reversal back on the 1:1 path does
+  // not reach here: this loop goes from "the printed numbers sum to the amount" straight to
+  // book_bank_batch, silently and all-or-nothing.
+  //
+  // The line: the bank returns € 1.000 it had collected, prints both original numbers in the
+  // storno description, and carries NDDT plus the machtigingskenmerk. On the SALES side the same
+  // company has two open invoices summing to exactly € 1.000. Nothing about the arithmetic is
+  // wrong; the money simply came back.
+  const verkoop = (id: string, nummer: string, bedrag: number): Row => ({
+    id, invoice_number: nummer, total_inc_btw: bedrag, invoice_date: "2026-09-01", due_date: "2026-09-30",
+    client_name: LEVERANCIER, direction: "outgoing", status: "sent", accountant_status: null,
+    vendor_iban: null, payment_reference: null, amount_paid: 0, payment_prepared_at: null, supplier_id: null,
+  });
+  const tables: Tables = {
+    profiles: [{ vat_scheme: "factuur", vat_scheme_since: null }],
+    btw_filings: [],
+    bank_transactions: [
+      lijn("tx-storno", 1000, "STORNO SEPA INCASSO facturen 2026-401 en 2026-402", {
+        type_code: "NDDT", mandate_id: "M-2024-0091", creditor_id: "NL32ZZZ411951220000",
+      }),
+    ],
+    invoices: [verkoop("inv-401", "2026-401", 400), verkoop("inv-402", "2026-402", 600)],
+  };
+  const { confirmed, rec } = await draai(tables, { rpcRows: (a) => (a.p_invoice_ids as string[]).map((id) => ({ invoice_id: id })) });
+  assert.deepStrictEqual(confirmed, [], "a returned collection booked invoices as paid");
+  assert.deepStrictEqual(rec.rpcs, [], "book_bank_batch was called on money the bank had taken back");
+  assert.deepStrictEqual(rec.updates, [], "nothing may be written for a reversal");
+
+  // Negative control: the SAME tie without the bank's markers is a real batch payment and books.
+  const paid = await draai({
+    ...tables,
+    bank_transactions: [lijn("tx-echt", -1000, "Betaling facturen 2026-401 en 2026-402")],
+    invoices: [inkoop("inv-401", "2026-401", 400), inkoop("inv-402", "2026-402", 600)],
+  }, { rpcRows: (a) => (a.p_invoice_ids as string[]).map((id) => ({ invoice_id: id })) });
+  assert.deepStrictEqual(paid.confirmed.map((c) => c.invoiceId).sort(), ["inv-401", "inv-402"],
+    "the guard is refusing ordinary batch payments too");
+});
+
 test("[BANK-PARTLY-CONSUMED] a line that already paid something is left alone", async () => {
   // A pending bank line carrying an invoice_id has already spent part of itself. The 1:1 pass books
   // the FULL amount against another invoice with no idea what it already settled — the same euros

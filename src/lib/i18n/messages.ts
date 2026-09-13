@@ -4517,6 +4517,12 @@ export const MESSAGES = {
   'bank.why.partialAmount': {
     nl: 'kleiner dan het openstaande bedrag', ar: 'أقل من المبلغ المتبقّي', en: 'smaller than the open amount', tr: 'açık tutardan küçük',
   },
+  // [STORNO-GEEN-BETALING] Niet waarom deze factuur wordt aangeboden, maar waarom hij niet
+  // voorgeselecteerd staat: de bank boekte dit geld terug. [AR-TERMEN] «خصم مباشر» en «استرجاع»
+  // zijn de woorden die bank.storno.uitleg al gebruikt; hier niet opnieuw beslist.
+  'bank.why.reversal': {
+    nl: 'je bank boekte dit terug', ar: 'استرجاع لخصم مباشر', en: 'your bank reversed this', tr: 'bankanız bunu geri aldı',
+  },
   // [WAAROM-DEZE] En de kop van de kiezer, als GEEN kandidaat op bedrag matcht. "Meerdere facturen
   // passen bij deze betaling" is dan onwaar: ze staan open bij dezelfde partij, meer niet.
   'bank.vergelijkGeenBedrag': {

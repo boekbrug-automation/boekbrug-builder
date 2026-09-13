@@ -23,7 +23,14 @@ import { buildMatchMemory, MATCH_MEMORY_LIMIT, type ConfirmedLink, type MatchMem
 type AnyClient = any;
 
 type LinkRow = { transaction_id: string | null; invoice_id: string };
-type TxRow = { id: string; counterpart_name: string | null; counterpart_iban: string | null };
+type TxRow = {
+  id: string;
+  counterpart_name: string | null;
+  counterpart_iban: string | null;
+  // [INCASSO-IDENTITEIT] The two direct-debit handles the confirmation also settled under.
+  mandate_id?: string | null;
+  creditor_id?: string | null;
+};
 type InvRow = { id: string; client_name: string | null };
 
 /**
@@ -51,7 +58,7 @@ export async function loadMatchMemory(client: AnyClient, userId: string): Promis
     fetchAllRowsForIds<TxRow, string>(txIds, (chunk, from, to) =>
       client
         .from("bank_transactions")
-        .select("id, counterpart_name, counterpart_iban")
+        .select("id, counterpart_name, counterpart_iban, mandate_id, creditor_id")
         .eq("user_id", userId)
         .in("id", chunk)
         .order("id", { ascending: true })
@@ -95,6 +102,12 @@ export async function loadMatchMemory(client: AnyClient, userId: string): Promis
     links.push({
       counterpartName: tx.counterpart_name,
       counterpartIban: tx.counterpart_iban,
+      // [INCASSO-IDENTITEIT] A confirmation on an incasso line teaches the mandate too. Optional
+      // on the row type and null-coalesced here, so a database without bank_tx_direct_debit.sql
+      // applied yields a memory with two empty indexes rather than a failed read — the same
+      // degradation this whole file already promises: less evidence, never invented evidence.
+      mandateId: tx.mandate_id ?? null,
+      creditorId: tx.creditor_id ?? null,
       partyName: inv.client_name,
     });
   }

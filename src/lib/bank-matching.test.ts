@@ -1340,5 +1340,92 @@ console.log("\n— [PAY-REFERENCE] the betalingskenmerk the invoice asked for is
   check("[TWEELING] negative control — a printed number picks January, auto", n.outcome === "auto" && n.best?.invoiceId === "i-jan");
 }
 
+// ── [STORNO-GEEN-BETALING] a returned collection is never a pre-selected payment ─────────────
+{
+  // The measured case. ATAPACK collects € 242,00 by incasso; the collection bounces and the bank
+  // credits it back on 10 March with NDDT + a machtigingskenmerk. The owner also SELLS to ATAPACK
+  // and has an open € 242,00 sales invoice of 3 March. Before this cap the pair scored 0.950,
+  // reached 'auto' and autoConfirmTier booked it 'amount_only' — a customer marked paid, with
+  // nobody watching, off money a supplier had just taken back.
+  const storno = tx({
+    transactionId: "t-storno", amount: 242, date: "2026-03-10",
+    description: "STORNO SEPA INCASSO ALGEMEEN DOORLOPEND",
+    counterpartName: "ATAPACK B.V.", counterpartIban: "NL91ABNA0417164300",
+    typeCode: "NDDT", mandateId: "M-2024-0091", creditorId: "NL32ZZZ411951220000",
+  });
+  const sale = inv({ id: "i-sale", invoice_number: "20260041", total_inc_btw: 242, invoice_date: "2026-03-03", due_date: "2026-04-02", direction: "outgoing", status: "sent", client_name: "ATAPACK B.V." } as never);
+  const m = matchTransactions([storno] as never, [sale] as never).matches[0];
+  check("[STORNO-GEEN-BETALING] a returned collection never reaches 'auto'", m.outcome !== "auto");
+  check("[STORNO-GEEN-BETALING] …and no tier can book it unattended", autoConfirmTier(m) === null);
+  // Capped, NOT removed: on a business account the same shape is the owner collecting from their
+  // own customers, where the line genuinely IS the payment. That owner taps once; they do not lose
+  // the candidate. "Weak" and "invisible" are not the same outcome.
+  check("[STORNO-GEEN-BETALING] …but it stays listed, with its reason", (m.candidates ?? []).length === 1);
+  check("[STORNO-GEEN-BETALING] the card says why", (m.candidates?.[0]?.reason ?? "").includes("storno"));
+  // The /bank card explains a candidate from its SIGNALS, not from this sentence — WHY_KEY maps the
+  // MatchSignal type to a translated line, and [WAAROM-DEZE] holds the two lists against each
+  // other. Without the signal the owner sees a candidate the app quietly refuses to pre-select and
+  // no word about why, which reads as a broken screen rather than a careful one.
+  check("[STORNO-GEEN-BETALING] …in a signal the screen can translate",
+    (m.candidates?.[0]?.signals ?? []).includes("reversal"));
+  check("[STORNO-GEEN-BETALING] capped to a human choice, above the listing floor",
+    (m.candidates?.[0]?.confidence ?? 0) === 0.6);
+
+  // Negative control 1: the SAME line without the bank's markers books exactly as it did before.
+  const plain = tx({ ...storno, transactionId: "t-plain", description: "Betaling factuur", typeCode: null, mandateId: null, creditorId: null });
+  const p = matchTransactions([plain] as never, [sale] as never).matches[0];
+  check("[STORNO-GEEN-BETALING] negative control — no markers, unchanged 'auto'", p.outcome === "auto");
+  check("[STORNO-GEEN-BETALING] negative control — and still bookable", autoConfirmTier(p) === "amount_only");
+  check("[STORNO-GEEN-BETALING] negative control — no reversal signal on an ordinary payment",
+    !(p.candidates?.[0]?.signals ?? []).includes("reversal"));
+
+  // Negative control 2: only a PAYER's wording. A customer who types "terugbetaling incasso" in a
+  // payment note must not hold back their own payment — the fields, not the free text, decide.
+  const typed = tx({ ...plain, transactionId: "t-typed", description: "terugbetaling incasso" });
+  const w = matchTransactions([typed] as never, [sale] as never).matches[0];
+  check("[STORNO-GEEN-BETALING] negative control — a payer's own words change nothing", w.outcome === "auto");
+
+  // Negative control 3: the ordinary direction. A collection GOING OUT under the same markers is a
+  // payment, and this cap must never touch it.
+  const collect = tx({ transactionId: "t-collect", amount: -242, date: "2026-03-10", description: "SEPA INCASSO ALGEMEEN DOORLOPEND", counterpartName: "ATAPACK B.V.", counterpartIban: "NL91ABNA0417164300", typeCode: "NDDT", mandateId: "M-2024-0091" });
+  const bill = inv({ id: "i-bill", invoice_number: "A-77", total_inc_btw: 242, invoice_date: "2026-03-03", due_date: "2026-04-02", direction: "incoming", status: "received", client_name: "ATAPACK B.V.", vendor_iban: "NL91ABNA0417164300" } as never);
+  const c = matchTransactions([collect] as never, [bill] as never).matches[0];
+  check("[STORNO-GEEN-BETALING] negative control — a collection going out is a payment, untouched", c.outcome === "auto");
+  check("[STORNO-GEEN-BETALING] …and books on the account it names", autoConfirmTier(c) === "certain");
+}
+
+// ── [INCASSO-IDENTITEIT] the machtigingskenmerk as the handle the memory was missing ─────────
+{
+  // What an ING statement gives for a monthly incasso: the SCHEME as the counterpart name, and the
+  // collector's clearing account as the IBAN. Neither handle the memory had can identify Vitens,
+  // month after month — while the mandate reference on the line is the same string every time.
+  const line = {
+    counterpartName: "SEPA INCASSO ALGEMEEN DOORLOPEND",
+    counterpartIban: "NL08INGB0000000555",
+    typeCode: "NDDT", mandateId: "VIT-2019-88213", creditorId: "NL32ZZZ411951220000",
+  };
+  const memory = buildMatchMemory([{ counterpartName: line.counterpartName, counterpartIban: line.counterpartIban, mandateId: line.mandateId, creditorId: line.creditorId, partyName: "Vitens N.V." }]);
+  // The bank took its € 0,50 off, so the amount is NEAR and not exact. [BIJNA-BEDRAG] needs the
+  // counterparty to be IDENTIFIED before it will offer such a pair at all — and on this line
+  // nothing could identify it. Without the mandate the owner sees "Geen factuur" over an invoice
+  // sitting right there; the only tool left is to search by hand.
+  const near = tx({ ...line, transactionId: "t-near", amount: -60.9, date: "2026-04-02", description: "SEPA INCASSO ALGEMEEN DOORLOPEND INCASSANT: NL32ZZZ411951220000" });
+  const water = inv({ id: "i-water", invoice_number: "9911", total_inc_btw: 61.4, invoice_date: "2026-03-28", due_date: "2026-04-11", direction: "incoming", status: "received", client_name: "Vitens N.V." } as never);
+  const blind = matchTransactions([near] as never, [water] as never).matches[0];
+  check("[INCASSO-IDENTITEIT] without the mandate the near-amount pair is invisible", (blind.candidates ?? []).length === 0);
+  const seen = matchTransactions([near] as never, [water] as never, { memory }).matches[0];
+  check("[INCASSO-IDENTITEIT] the mandate identifies the collector, so the pair is offered", (seen.candidates ?? []).length === 1);
+  check("[INCASSO-IDENTITEIT] …and the difference is named", (seen.candidates?.[0]?.reason ?? "").includes("0.50"));
+  check("[INCASSO-IDENTITEIT] …with the incasso as the stated evidence", (seen.candidates?.[0]?.reason ?? "").includes("dezelfde incasso"));
+  check("[INCASSO-IDENTITEIT] a near amount is never bookable, however identified", seen.outcome !== "auto");
+
+  // It identifies the PARTY, not the bill: an exact amount lands on the same 0.95 coincidence
+  // ceiling that amount + name + date already reached. No new booking door.
+  const exact = tx({ ...near, transactionId: "t-exact", amount: -61.4 });
+  const e = matchTransactions([exact] as never, [water] as never, { memory }).matches[0];
+  check("[INCASSO-IDENTITEIT] an exact amount stays on the coincidence ceiling", (e.candidates?.[0]?.confidence ?? 0) === 0.95);
+  check("[INCASSO-IDENTITEIT] …and books no tier the memory did not already reach", autoConfirmTier(e) === null);
+}
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

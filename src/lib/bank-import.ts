@@ -374,6 +374,12 @@ export interface BankTransactionDbRow {
   // done — keep it in Te bevestigen until allCovered", surviving a page reload.
   invoice_id?: string | null;
   status?: string | null;
+  // [DD-NAAR-MATCHER] The bank's own direct-debit markers, as bank_tx_direct_debit.sql stores them.
+  // They were written on import and read by /bank's storno card, but never by the MATCHER — this
+  // function is where the pipe was cut. See rowToTransaction below.
+  type_code?: string | null;
+  mandate_id?: string | null;
+  creditor_id?: string | null;
 }
 
 /**
@@ -391,5 +397,22 @@ export function rowToTransaction(r: BankTransactionDbRow): BankTransaction {
     reference: r.reference,
     transactionId: r.id, // carry DB id → ties a suggestion to its transaction
     rawLine: "",
+    // [DD-NAAR-MATCHER] The three markers bank_tx_direct_debit.sql added, carried through.
+    //
+    // They were being dropped HERE, one line short of the matcher, and the loss was invisible from
+    // both ends. The /bank route selects all three by name and pairs stornos with them; the parsers
+    // fill them from four different formats; BankTransaction has declared them since [DD-SIGNAL].
+    // Only this mapper — the single door every STORED row walks through on its way to scoring —
+    // left them behind, so `tx.mandateId` was `undefined` in every scorePair call the app has ever
+    // made, on the screen and in the unattended hourly pass alike.
+    //
+    // What that cost, measured: a supplier's failed collection (money the bank RETURNED, positive
+    // amount, NDDT + a machtigingskenmerk) scored 0.950 against an open SALES invoice of the same
+    // amount to the same company, reached 'auto', and the amount_only tier BOOKED it — a customer
+    // marked paid off money that came back from a supplier, with nobody watching. See the cap in
+    // bank-matching.ts, which can only fire once these arrive.
+    typeCode: r.type_code ?? null,
+    mandateId: r.mandate_id ?? null,
+    creditorId: r.creditor_id ?? null,
   };
 }

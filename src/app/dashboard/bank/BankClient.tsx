@@ -4235,6 +4235,7 @@ const WHY_KEY = {
   prepared: 'bank.why.prepared',
   near_amount: 'bank.why.nearAmount',
   partial_amount: 'bank.why.partialAmount',
+  reversal: 'bank.why.reversal',
 } as const
 
 // [AL-GEBOEKT] De kaart die in de plaats komt van de kiezer.

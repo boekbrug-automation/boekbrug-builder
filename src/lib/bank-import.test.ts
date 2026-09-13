@@ -280,6 +280,20 @@ console.log("\n— rowToTransaction —");
   check("DB id carried into transactionId", t.transactionId === "tx-9");
   check("snake→camel + EUR + signed amount", t.counterpartName === "Verhuur BV" && t.currency === "EUR" && t.amount === -800);
   check("null date → empty string (matcher-safe)", rowToTransaction({ id: "x", date: null, amount: 1, description: null, counterpart_name: null, reference: null }).date === "");
+  // [DD-NAAR-MATCHER] The three direct-debit markers are stored, selected by name, and were then
+  // dropped HERE — so scorePair saw `undefined` for every one of them, on every line, always.
+  const dd = rowToTransaction({
+    id: "tx-dd", date: "2026-03-10", amount: 242, description: "STORNO SEPA INCASSO",
+    counterpart_name: "ATAPACK B.V.", reference: null,
+    type_code: "NDDT", mandate_id: "M-2024-0091", creditor_id: "NL32ZZZ411951220000",
+  });
+  check("[DD-NAAR-MATCHER] the bank's own markers reach the matcher",
+    dd.typeCode === "NDDT" && dd.mandateId === "M-2024-0091" && dd.creditorId === "NL32ZZZ411951220000");
+  // A row from a database without bank_tx_direct_debit.sql applied says "unknown", never undefined:
+  // the matcher's rule is a null-check, and an absent field must read the same as an absent marker.
+  const bare = rowToTransaction({ id: "y", date: "2026-03-10", amount: 1, description: null, counterpart_name: null, reference: null });
+  check("[DD-NAAR-MATCHER] a row without the columns yields null, not undefined",
+    bare.typeCode === null && bare.mandateId === null && bare.creditorId === null);
 }
 
 // ── [REKENING-IN-SLEUTEL] a second account's identical line is real money, not a duplicate ────

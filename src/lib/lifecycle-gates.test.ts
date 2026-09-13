@@ -11496,7 +11496,11 @@ test("[GEHEUGEN] the app reads back what the owner already confirmed", () => {
   assert.match(mod, /MATCH_MEMORY_LIMIT = 400/, "bounded: a memory older than the relationship is not one");
 
   const matcher = code("src/lib/bank-matching.ts");
-  assert.match(matcher, /const rememberedOk = remembersParty\(opts\.memory, tx, inv\.client_name\);/);
+  // [INCASSO-IDENTITEIT] The call is remembersPartyBy now: same question, and it also NAMES the
+  // handle that carried it so the card can say whether the owner is looking at a remembered name,
+  // a remembered account or a remembered machtigingskenmerk.
+  assert.match(matcher, /const rememberedBy = remembersPartyBy\(opts\.memory, tx, inv\.client_name\);/);
+  assert.match(matcher, /const rememberedOk = rememberedBy !== null;/);
   assert.match(matcher, /confidence \+= 0\.30;\s*\n\s*signals\.push\("memory"\)/,
     "weighted like the supplier registry — it identifies the party, not the bill");
   // It must count as identity for the near-amount offer, which is what it is FOR: the counterparty

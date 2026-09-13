@@ -43,6 +43,11 @@ import { normalizeIban } from "./epc-qr";
 export interface ConfirmedLink {
   counterpartName: string | null;
   counterpartIban: string | null;
+  // [INCASSO-IDENTITEIT] The two handles a direct debit carries, from bank_tx_direct_debit.sql.
+  // They are remembered on exactly the same terms as the name and the account above — see the
+  // block over `byMandate` for why they are worth remembering separately at all.
+  mandateId?: string | null;
+  creditorId?: string | null;
   /** The invoice's client_name — the supplier on a purchase, the customer on a sale. */
   partyName: string | null;
 }
@@ -52,9 +57,24 @@ export interface MatchMemory {
   byName: Map<string, Set<string>>;
   /** counterpart IBAN → the same. */
   byIban: Map<string, Set<string>>;
+  /**
+   * [INCASSO-IDENTITEIT] machtigingskenmerk → the same. The mandate is the one handle on a
+   * collection that neither of the two above can replace: the bank writes the SCHEME into the
+   * counterpart name ("SEPA INCASSO ALGEMEEN DOORLOPEND", "INCASSANT: …") and the collector's
+   * clearing account into the IBAN, so a supplier billing monthly by incasso failed both handles
+   * every month while the mandate reference on the line stayed byte-identical.
+   */
+  byMandate: Map<string, Set<string>>;
+  /** [INCASSO-IDENTITEIT] incassant-ID → the same. One step weaker than the mandate and kept
+   *  separate for it: a mandate is one contract between two parties, while a collector may use one
+   *  incassant-ID across several trade names. The one-party rule below is what makes that safe —
+   *  an ID that has settled two parties simply stops speaking. */
+  byCreditor: Map<string, Set<string>>;
 }
 
-export const EMPTY_MATCH_MEMORY: MatchMemory = { byName: new Map(), byIban: new Map() };
+export const EMPTY_MATCH_MEMORY: MatchMemory = {
+  byName: new Map(), byIban: new Map(), byMandate: new Map(), byCreditor: new Map(),
+};
 
 /** The key a party name is remembered under — the same one the bank screens use for counterparts,
  *  so "Enka Horeca B.V." and "ENKA HORECA BV" are one party and not two memories. */
@@ -66,23 +86,36 @@ export function partyKey(name: string | null | undefined): string | null {
 export function buildMatchMemory(links: readonly ConfirmedLink[]): MatchMemory {
   const byName = new Map<string, Set<string>>();
   const byIban = new Map<string, Set<string>>();
+  const byMandate = new Map<string, Set<string>>();
+  const byCreditor = new Map<string, Set<string>>();
+  const remember = (index: Map<string, Set<string>>, key: string, party: string) => {
+    const set = index.get(key) ?? new Set<string>();
+    set.add(party);
+    index.set(key, set);
+  };
   for (const link of links) {
     const party = partyKey(link.partyName);
     if (!party) continue; // an invoice with no party name teaches nothing
     const name = counterpartKey(link.counterpartName);
-    if (name) {
-      const set = byName.get(name) ?? new Set<string>();
-      set.add(party);
-      byName.set(name, set);
-    }
+    if (name) remember(byName, name, party);
     const iban = link.counterpartIban ? normalizeIban(link.counterpartIban) : "";
-    if (iban) {
-      const set = byIban.get(iban) ?? new Set<string>();
-      set.add(party);
-      byIban.set(iban, set);
-    }
+    if (iban) remember(byIban, iban, party);
+    // [INCASSO-IDENTITEIT] Folded on the same terms and with the same key discipline: trimmed and
+    // upper-cased, because a bank pads its own columns and a mandate that differs only in case is
+    // the same mandate. Empty stays empty — an absent marker teaches nothing, exactly as an absent
+    // name does.
+    const mandate = mandateKey(link.mandateId);
+    if (mandate) remember(byMandate, mandate, party);
+    const creditor = mandateKey(link.creditorId);
+    if (creditor) remember(byCreditor, creditor, party);
   }
-  return { byName, byIban };
+  return { byName, byIban, byMandate, byCreditor };
+}
+
+/** The key a machtigingskenmerk or an incassant-ID is remembered under. */
+export function mandateKey(v: string | null | undefined): string | null {
+  const s = (v ?? "").trim().toUpperCase();
+  return s.length > 0 ? s : null;
 }
 
 /** Does this index remember `key` as belonging to exactly `party`, and to nothing else? */
@@ -101,15 +134,52 @@ function remembersOnly(index: Map<string, Set<string>>, key: string | null, part
  */
 export function remembersParty(
   memory: MatchMemory | null | undefined,
-  tx: { counterpartName?: string | null; counterpartIban?: string | null },
+  tx: MemoryHandles,
   partyName: string | null | undefined,
 ): boolean {
-  if (!memory) return false;
+  return remembersPartyBy(memory, tx, partyName) !== null;
+}
+
+/** The handles a bank line offers the memory. Every one of them is written by the BANK. */
+export interface MemoryHandles {
+  counterpartName?: string | null;
+  counterpartIban?: string | null;
+  mandateId?: string | null;
+  creditorId?: string | null;
+}
+
+/** Which handle the memory recognised, or null. Named so the matcher can say WHY on the card. */
+export type MemoryHandle = "mandate" | "creditor-id" | "iban" | "name";
+
+/**
+ * [INCASSO-IDENTITEIT] The same question as remembersParty, answered with the handle that carried
+ * it — strongest first, and the order is the argument:
+ *
+ *   mandate      one contract between exactly two parties. A collection cannot exist without it,
+ *                and it is the same string every month while everything else on the line moves.
+ *   creditor-id  issued to one legal entity, but reusable across its trade names.
+ *   iban         the counterpart's own account — unless the counterpart is a collector, whose
+ *                clearing account is shared by everyone it collects for.
+ *   name         whatever the bank chose to write.
+ *
+ * Each is asked under the one-party rule, so a handle that has settled two parties is a shared
+ * channel and stops speaking — which is exactly what keeps a collector's clearing IBAN and a
+ * re-used incassant-ID from handing this month's payment to the wrong supplier.
+ */
+export function remembersPartyBy(
+  memory: MatchMemory | null | undefined,
+  tx: MemoryHandles,
+  partyName: string | null | undefined,
+): MemoryHandle | null {
+  if (!memory) return null;
   const party = partyKey(partyName);
-  if (!party) return false;
+  if (!party) return null;
+  if (remembersOnly(memory.byMandate, mandateKey(tx.mandateId), party)) return "mandate";
+  if (remembersOnly(memory.byCreditor, mandateKey(tx.creditorId), party)) return "creditor-id";
   const iban = tx.counterpartIban ? normalizeIban(tx.counterpartIban) : "";
-  if (remembersOnly(memory.byIban, iban || null, party)) return true;
-  return remembersOnly(memory.byName, counterpartKey(tx.counterpartName ?? null), party);
+  if (remembersOnly(memory.byIban, iban || null, party)) return "iban";
+  if (remembersOnly(memory.byName, counterpartKey(tx.counterpartName ?? null), party)) return "name";
+  return null;
 }
 
 /**

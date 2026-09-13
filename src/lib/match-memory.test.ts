@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildMatchMemory, remembersParty, partyKey, EMPTY_MATCH_MEMORY } from "./match-memory";
+import { buildMatchMemory, remembersParty, remembersPartyBy, partyKey, EMPTY_MATCH_MEMORY } from "./match-memory";
 
 const IBAN = "NL91ABNA0417164300";
 const OTHER_IBAN = "NL25RABO0133368882";
@@ -88,4 +88,64 @@ test("[GEHEUGEN] an unknown party is not remembered by a known counterpart", () 
   ]);
   assert.equal(remembersParty(memory, { counterpartName: "KPN", counterpartIban: IBAN }, null), false);
   assert.equal(remembersParty(memory, { counterpartName: "KPN", counterpartIban: IBAN }, "   "), false);
+});
+
+// ─── [INCASSO-IDENTITEIT] The two handles a collection carries ───────────────────────────────────
+
+const MANDATE = "VIT-2019-88213";
+const INCASSANT = "NL32ZZZ411951220000";
+/** What an ING statement actually gives for a monthly incasso: a scheme, not a name, and the
+ *  collector's clearing account rather than the supplier's own. */
+const SCHEME_LINE = {
+  counterpartName: "SEPA INCASSO ALGEMEEN DOORLOPEND",
+  counterpartIban: "NL08INGB0000000555",
+  mandateId: MANDATE,
+  creditorId: INCASSANT,
+};
+
+test("[INCASSO-IDENTITEIT] the machtigingskenmerk identifies a collector the name and the account cannot", () => {
+  const memory = buildMatchMemory([{ ...SCHEME_LINE, partyName: "Vitens N.V." }]);
+  // The handle that carried it is named, because the card says why.
+  assert.equal(remembersPartyBy(memory, SCHEME_LINE, "Vitens N.V."), "mandate");
+  // Padding and case are the bank's, not the mandate's.
+  assert.equal(remembersPartyBy(memory, { mandateId: `  ${MANDATE.toLowerCase()} ` }, "Vitens N.V."), "mandate");
+  // The mandate alone is enough — this is the whole point: no name, no account.
+  assert.equal(remembersParty(memory, { mandateId: MANDATE }, "Vitens N.V."), true);
+  // …and it says nothing about anyone else.
+  assert.equal(remembersParty(memory, { mandateId: MANDATE }, "Evides N.V."), false);
+  assert.equal(remembersParty(memory, { mandateId: "SOME-OTHER-MANDATE" }, "Vitens N.V."), false);
+});
+
+test("[INCASSO-IDENTITEIT] the incassant-ID answers when the mandate reference is absent", () => {
+  // ABN writes the incassant-ID into the description and gives no machtigingskenmerk at all.
+  const memory = buildMatchMemory([{ ...SCHEME_LINE, partyName: "Vitens N.V." }]);
+  assert.equal(remembersPartyBy(memory, { creditorId: INCASSANT }, "Vitens N.V."), "creditor-id");
+  // Strongest first: with BOTH present the mandate is what is reported, because it is one contract
+  // between two parties while an incassant-ID may serve several trade names of one collector.
+  assert.equal(remembersPartyBy(memory, SCHEME_LINE, "Vitens N.V."), "mandate");
+});
+
+test("[INCASSO-IDENTITEIT] an incassant-ID that has settled two parties is a channel, not an identity", () => {
+  // The exact weakness the incassant-ID has and the mandate does not: one collector, two trade
+  // names. The one-party rule is what makes remembering it safe — it stops speaking.
+  const memory = buildMatchMemory([
+    { counterpartName: null, counterpartIban: null, creditorId: INCASSANT, partyName: "Vitens N.V." },
+    { counterpartName: null, counterpartIban: null, creditorId: INCASSANT, partyName: "Vitens Zakelijk" },
+  ]);
+  assert.equal(remembersParty(memory, { creditorId: INCASSANT }, "Vitens N.V."), false);
+  assert.equal(remembersParty(memory, { creditorId: INCASSANT }, "Vitens Zakelijk"), false);
+});
+
+test("[INCASSO-IDENTITEIT] a line with no direct-debit markers is answered exactly as before", () => {
+  // The two new indexes must be additive: an ordinary transfer reaches the name and IBAN handles
+  // unchanged, and an empty marker teaches nothing rather than folding an empty key.
+  const memory = buildMatchMemory([
+    { counterpartName: "KPN", counterpartIban: IBAN, mandateId: "", creditorId: null, partyName: "KPN B.V." },
+    { counterpartName: "OTHER", counterpartIban: OTHER_IBAN, mandateId: "  ", creditorId: "", partyName: "Andere B.V." },
+  ]);
+  assert.equal(remembersPartyBy(memory, { counterpartIban: IBAN }, "KPN B.V."), "iban");
+  assert.equal(remembersPartyBy(memory, { counterpartName: "KPN" }, "KPN B.V."), "name");
+  // Two links with a blank mandate did NOT fold into one shared key that now names two parties.
+  assert.equal(memory.byMandate.size, 0);
+  assert.equal(memory.byCreditor.size, 0);
 });

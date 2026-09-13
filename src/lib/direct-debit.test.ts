@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import {
   readDirectDebit,
   isCertainDirectDebit,
+  isBankStatedReversal,
 } from './direct-debit'
 
 // ─── The four doors ───────────────────────────────────────────────────────────
@@ -292,4 +293,33 @@ test('[DD-SIGNAL] ordinary transfers propose nothing, and the incassant-ID rides
   assert.equal(mixed.length, 1, 'the supplier paid by hand is not proposed')
   assert.equal(mixed[0].name, 'WonenBreburg')
   assert.equal(mixed[0].creditorId, 'NL32ZZZ411951220000', 'the collector id corroborates the name')
+})
+
+// ─── [STORNO-GEEN-BETALING] What the bank's own fields say came back ─────────────────────────────
+
+test("[STORNO-GEEN-BETALING] only the bank's own fields may hold back a payment", () => {
+  // The bank returning a failed collection: money IN, and the markers are its own.
+  const byMandate = readDirectDebit({
+    typeCode: 'NDDT', mandateId: 'M-2024-0091', text: 'STORNO SEPA INCASSO', amount: 242.0,
+  })
+  assert.equal(byMandate.reversal, true)
+  assert.equal(isBankStatedReversal(byMandate), true)
+
+  // A type code alone is still the bank speaking.
+  assert.equal(isBankStatedReversal(readDirectDebit({ typeCode: 'RDDT', amount: 61.4 })), true)
+
+  // …but a PAYER's own words are not, and this is the whole reason the function exists separately
+  // from `reversal`: a customer who writes "terugbetaling sepa incasso" in a payment note would
+  // otherwise have their own transfer held back on the strength of their own typing.
+  const byWording = readDirectDebit({ text: 'terugbetaling sepa incasso', amount: 242.0 })
+  assert.equal(byWording.signal, 'wording')
+  assert.equal(byWording.reversal, true)
+  assert.equal(isBankStatedReversal(byWording), false)
+
+  // A collection going the ordinary way is not a reversal at all.
+  assert.equal(isBankStatedReversal(readDirectDebit({
+    typeCode: 'NDDT', mandateId: 'M-2024-0091', amount: -61.4,
+  })), false)
+  // And a line with nothing on it says nothing.
+  assert.equal(isBankStatedReversal(readDirectDebit({ text: 'Huur maart', amount: 900 })), false)
 })
