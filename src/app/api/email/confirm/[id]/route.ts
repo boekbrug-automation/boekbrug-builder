@@ -18,6 +18,9 @@ import { reconcileCashWithRetry } from "@/lib/cash-settle";
 import { runBankAutoConfirm } from "@/lib/bank-auto-confirm";
 // [BRIDGE-B] legal trail for verify/pay state changes
 import { logAuditAction, getClientIP } from "@/lib/audit";
+// [EEN-SCHRIJFPAD] The payment goes through the locked door, with a derived idempotency key.
+import { deriveKey } from "@/lib/contracts/idempotency";
+import { reportHandledFailure } from "@/lib/report-handled";
 // [MONEY-GUARD] The one predicate for "this invoice already holds money" — shared with the
 // dedicated archive route so the two doors to the same act cannot disagree.
 import { hasSettledMoney } from "@/lib/invoice-removal";
@@ -270,6 +273,28 @@ export async function POST(
     );
   }
 
+  // [EEN-SCHRIJFPAD] What the payment IS, held aside — not written into the patch below.
+  //
+  // Confirming and paying are two facts, and this route used to write them as one: a single
+  // UPDATE that set status 'paid', a method, a marked_paid_at and an amount, with no
+  // bank_tx_invoices row anywhere. amount_paid is a CACHE of SUM(amount_applied), so such an
+  // invoice is a row that contradicts the only money invariant this app has — measured in
+  // production before this change: 18 paid invoices with no allocation row, EUR 10.192 of them
+  // carrying an amount that nothing accounts for. The kasstelsel return reads settlement from the
+  // LINK, so on that scheme the payment is simply invisible to the figures the Belastingdienst
+  // sees.
+  //
+  // So the patch below confirms (processing -> received, race-guarded exactly as before), and the
+  // PAYMENT goes through apply_manual_payment — the same locked door /api/invoice/pay-toggle
+  // uses, which writes the invoice state and the allocation row in one transaction.
+  //
+  // The half state this can leave is 'received': confirmed, not paid. That is an honest state the
+  // owner can finish with one tap, and it is strictly better than the half state it replaces,
+  // which no screen could tell apart from a real payment.
+  let payAmount = 0;
+  let payDate: string | null = null;
+  let payMethod: "bank" | "kas" | null = null;
+
   if (action === "pay") {
     // DB constraint invoices_paid_requires_method: paid REQUIRES a method.
     if (body.payment_method !== "bank" && body.payment_method !== "kas") {
@@ -278,9 +303,9 @@ export async function POST(
         { status: 400 }
       );
     }
-    updatePatch.status = "paid";
-    updatePatch.payment_method = body.payment_method;
-    updatePatch.marked_paid_at = new Date().toISOString();
+    // Confirmed here; PAID by the RPC below, which owns status, payment_method and marked_paid_at.
+    updatePatch.status = "received";
+    payMethod = body.payment_method;
     // [BEDRAG-MEE] En het BEDRAG, want anders zegt deze rij twee dingen tegelijk.
     //
     // Dit was de enige deur die 'paid' schreef zonder amount_paid mee te nemen. /api/invoice/
@@ -298,8 +323,7 @@ export async function POST(
     // is "hoeveel geld er is bewogen" en niet "in welke richting" — dat zegt total_inc_btw al.
     // De effectieve waarde (getypt waar de beoordelaar iets typte, anders het opgeslagen totaal),
     // want dit is dezelfde schrijving die dat totaal bijwerkt.
-    const paidTotal = Math.abs(Number(updatePatch.total_inc_btw ?? incBtw) || 0);
-    if (paidTotal > 0) updatePatch.amount_paid = paidTotal;
+    payAmount = Math.abs(Number(updatePatch.total_inc_btw ?? incBtw) || 0);
     // [BRIDGE-QUARTER] Real payment date (Axis 2 / cash). Prefer an explicit YYYY-MM-DD; else the
     // invoice's OWN date (a receipt uploaded weeks later is a far better accounting-day proxy than
     // "today", which would misattribute a cross-quarter payment to the wrong quarter); "today" is
@@ -325,7 +349,7 @@ export async function POST(
     }
     const sane = (d: unknown): string | null =>
       typeof d === "string" && d !== "" && !paymentDateOutOfWindow(d, today) ? d : null;
-    updatePatch.payment_date = typedDate ?? sane(body.invoice_date) ?? sane(invoice.invoice_date) ?? today;
+    payDate = typedDate ?? sane(body.invoice_date) ?? sane(invoice.invoice_date) ?? today;
   } else {
     // verify → enters the accountant's world as a Crediteur (unpaid, shared)
     updatePatch.status = "received";
@@ -360,6 +384,49 @@ export async function POST(
     );
   }
 
+  // [EEN-SCHRIJFPAD] The payment, through the one locked door.
+  //
+  // apply_manual_payment writes invoices.amount_paid, the status flip and the bank_tx_invoices
+  // row inside ONE transaction under a row lock — which is what makes
+  // amount_paid = SUM(amount_applied) a fact rather than a hope. p_payable_statuses is
+  // ['received'] and nothing wider: the patch above just put this invoice there, and 'processing'
+  // is deliberately not payable (its amounts came from the reader and this door is precisely the
+  // moment a human took them over).
+  //
+  // [CONTRACT] The idempotency key is DERIVED from the invoice, not minted: a double submit, a
+  // retried request and a second tab all arrive at the same key, and the partial unique index on
+  // client_key refuses the second booking under the row lock. Keying on the invoice alone is
+  // exact here because the guard above lets this door fire at most once per invoice — only a
+  // 'processing' row may be confirmed, and this confirmation is what ends that.
+  let paymentBooked = action !== "pay";
+  if (action === "pay" && payMethod && payDate) {
+    const { error: payErr } = await supabase.rpc("apply_manual_payment", {
+      p_user_id: user.id,
+      p_invoice_id: id,
+      p_amount: payAmount > 0 ? payAmount : null,
+      p_pay_date: payDate,
+      p_method: payMethod,
+      p_payable_statuses: ["received"],
+      p_client_key: deriveKey("email-confirm-pay", id),
+    });
+    if (payErr) {
+      // The confirmation stands and the payment does not. Said out loud, both to the owner and to
+      // the alarm: a route that answered "betaald ✓" over an unbooked payment is exactly the
+      // silence this change removes. The invoice is now an ordinary open crediteur, and the
+      // "Betaald" toggle on that screen finishes it in one tap.
+      reportHandledFailure({
+        tag: "EEN-SCHRIJFPAD", severity: "data-integrity",
+        message: "factuur bevestigd maar de betaling is niet geboekt",
+        context: { userId: user.id, invoiceId: id, error: payErr.message },
+      });
+      return NextResponse.json(
+        { error: "De factuur is bevestigd, maar de betaling is niet geboekt. Zet hem op betaald bij Crediteuren.", code: "payment_not_booked" },
+        { status: 409 },
+      );
+    }
+    paymentBooked = true;
+  }
+
   // [BRIDGE-B] Audit the state change (legal trail: who confirmed what, when).
   // Non-fatal — never throws, never blocks the response.
   await logAuditAction({
@@ -385,7 +452,9 @@ export async function POST(
         : {}),
     },
     newValue: {
-      status: updatePatch.status,
+      // [EEN-SCHRIJFPAD] The status the invoice actually reached: the patch says 'received' for a
+      // pay too, because the RPC above is what makes it 'paid'.
+      status: action === "pay" && paymentBooked ? "paid" : updatePatch.status,
       action,
       // The human's side, plus WHICH fields moved — so reading the memory back is a lookup rather
       // than a diff of two jsonb blobs by every consumer that wants it.
@@ -393,9 +462,7 @@ export async function POST(
         ? { reading_correction: { vendor: memoryVendor, fields: correctedNow } }
         : {}),
       ...(action === "pay" ? { payment_method: body.payment_method } : {}),
-      ...(action === "pay" && updatePatch.payment_date
-        ? { payment_date: updatePatch.payment_date }
-        : {}),
+      ...(action === "pay" && payDate ? { payment_date: payDate } : {}),
       ...(warnings.length ? { warnings } : {}),
       ...(updatePatch.client_name ? { client_name: updatePatch.client_name } : {}),
       ...(updatePatch.invoice_number ? { invoice_number: updatePatch.invoice_number } : {}),

@@ -25,8 +25,8 @@
 // the paid-out amount in cents. A settlement that does not add up is refused with a reason, and
 // the refusal is stored — a Mollie response the app did not understand must never become a cost.
 
-import { createHash } from "node:crypto";
 import { round2 } from "./invoice-totals";
+import { deriveKey } from "./contracts/idempotency";
 import { telWoord } from "./nl-plural";
 
 /** One line of a settlement period: a revenue or a cost, as Mollie reports it. */
@@ -315,6 +315,9 @@ export function holdReason(split: PaymentSplit, summary: Pick<SettlementSummary,
  * booking. A uuid shape because that is what apply_manual_payment takes.
  */
 export function feeClientKey(settlementRowId: string, invoiceId: string): string {
-  const h = createHash("sha1").update(`mollie-fee:${settlementRowId}:${invoiceId}`).digest("hex");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+  // [CONTRACT] Delegates now. The derivation used to live here, and it was one of four unrelated
+  // schemes feeding the same uuid column — see contracts/idempotency.ts for why that is a double
+  // booking waiting for a Tuesday. The answer is BYTE-IDENTICAL to what this function returned
+  // before; a test pins two of its historical outputs as literals.
+  return deriveKey("mollie-fee", settlementRowId, invoiceId);
 }

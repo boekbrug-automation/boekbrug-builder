@@ -34489,3 +34489,152 @@ test("[PRIJS-MOMENT] the new columns go through the same lock as the rest of the
     assert.ok(sql.includes(`NEW.${m[1]}`), `the rewritten guard dropped ${m[1]}`);
   }
 });
+
+// ── [EEN-SCHRIJFPAD] One enforced write path for "this invoice is paid" ──────────────────────
+//
+// The money invariant of this app is invoices.amount_paid = SUM(bank_tx_invoices.amount_applied).
+// It is enforced where it is enforced: inside the SECURITY DEFINER functions, under a row lock.
+// It is NOT enforced by wishing, and a route that writes the paid state with a plain .update()
+// is outside it by construction.
+//
+// Measured in production on 13 September 2026, before this gate existed: 441 paid invoices, of
+// which 18 had no allocation row at all (EUR 10.192 of them carrying an amount that nothing
+// accounted for) and 8 carried allocations while amount_paid stayed 0. Two doors produced them.
+//
+// Why it matters even when the invoice "looks right": amount_paid is a CACHE, re-derived from the
+// surviving links on every reversal — so an invoice with money and no link silently re-opens at
+// its full total the moment anything else on it is undone. And the kasstelsel return reads
+// settlement from the LINK, not from the column, so on that scheme the payment is invisible to
+// the figures the Belastingdienst sees.
+
+/**
+ * Every file that may write invoices.status='paid' or invoices.amount_paid with a plain write.
+ *
+ * WHAT THIS LIST DOES NOT DEFEND, said out loud: it is FILE-granular. A second, wrong write added
+ * inside a file that is already on the list passes — the gate can only see that the file is
+ * excused, not why. The reasons below are therefore load-bearing prose and not decoration: they
+ * are what a reviewer reads when a diff touches one of these six.
+ */
+const BETAALD_SCHRIJVERS: Readonly<Record<string, string>> = {
+  // ── The reversal paths. They must write it directly: they are UNDOING a booking, and the
+  // amount they write is derived from the surviving links or from a snapshot taken before the
+  // reversal. There is no RPC for "put this invoice back", and inventing one would give the same
+  // rule two homes.
+  "src/app/api/bank/unlink/route.ts":
+    "reversal — detaches a bank line and restores the invoices it paid, with a rollback snapshot",
+  "src/app/api/bank/delete-statement/route.ts":
+    "reversal — a deleted statement restores each invoice from its snapshot or clears it to zero",
+  // ── The fallbacks that only run on a database where the atomic function is not installed.
+  // Unreachable on a migrated database (the atomic block returns on every outcome), kept so a
+  // half-migrated deployment degrades instead of failing.
+  "src/app/api/bank/confirm/route.ts":
+    "fallback for a database without confirm_bank_payment — unreachable once the migration ran",
+  "src/lib/bank-auto-confirm.ts":
+    "fallback for a database without the atomic booking function, same reason as /api/bank/confirm",
+  // ── The two doors that CREATE an invoice already paid from a bank line. Both write the
+  // allocation row in the same request; see the second gate below for the difference between them.
+  "src/app/api/bank/line-invoice/route.ts":
+    "creates a paid invoice from a bank line with no document; the link write BLOCKS and rolls back",
+  "src/app/api/bank/attach-invoice/route.ts":
+    "creates a paid invoice from a bank line plus a document; the link write REPORTS and continues",
+};
+
+test("[EEN-SCHRIJFPAD] only the named doors write the paid state of an invoice", () => {
+  const loopBoom = (dir: string): string[] => {
+    const uit: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const pad = `${dir}/${e}`;
+      if (statSync(pad).isDirectory()) uit.push(...loopBoom(pad));
+      else if (/\.tsx?$/.test(pad) && !pad.includes(".test.")) uit.push(pad);
+    }
+    return uit;
+  };
+  const seen = new Set<string>();
+  for (const pad of loopBoom("src")) {
+    const c = code(pad);
+    for (const m of c.matchAll(/\.(?:update|insert|upsert)\(\s*\{/g)) {
+      // The table is the NEAREST PRECEDING .from("…") — a file may touch five tables, and a gate
+      // that only asked "does this file mention invoices" answered for 33 files, nearly all of
+      // them readers.
+      const before = [...c.slice(0, m.index ?? 0).matchAll(/\.from\(\s*["']([a-z_]+)["']\s*\)/g)];
+      if (before[before.length - 1]?.[1] !== "invoices") continue;
+      const open = c.indexOf("{", m.index ?? 0);
+      let depth = 0, body = c.slice(open, open + 4000);
+      for (let i = 0; i < body.length; i++) {
+        if (body[i] === "{") depth++;
+        else if (body[i] === "}" && --depth === 0) { body = body.slice(0, i + 1); break; }
+      }
+      if (/\bamount_paid\s*:/.test(body) || /\bstatus\s*:\s*["']paid["']/.test(body)) seen.add(pad);
+    }
+  }
+  const extra = [...seen].filter((f) => !(f in BETAALD_SCHRIJVERS)).sort();
+  assert.deepStrictEqual(extra, [],
+    "a new door writes the paid state of an invoice without going through a money RPC. " +
+      "That is how an invoice ends up 'paid' with no bank_tx_invoices row under it — 18 of them " +
+      "existed in production. Book through apply_manual_payment / apply_bank_payment, or add the " +
+      "file to BETAALD_SCHRIJVERS with the reason it cannot.");
+
+  // And the list may not rot: an entry for a file that no longer writes it is a reason nobody
+  // will re-read, standing next to reasons that still hold.
+  const stale = Object.keys(BETAALD_SCHRIJVERS).filter((f) => !seen.has(f)).sort();
+  assert.deepStrictEqual(stale, [],
+    "these files are excused from a rule they no longer break — remove them from BETAALD_SCHRIJVERS");
+});
+
+test("[EEN-SCHRIJFPAD] the verify queue books its payment through the locked door", () => {
+  // THE door that produced the 18. It used to write status 'paid', a method, a marked_paid_at and
+  // an amount in one UPDATE, with no allocation row anywhere — and its own header named five of
+  // the resulting rows. Confirming and paying are two facts: the patch confirms
+  // (processing → received, race-guarded), and apply_manual_payment pays.
+  const route = code("src/app/api/email/confirm/[id]/route.ts");
+  assert.doesNotMatch(route, /updatePatch\.status\s*=\s*"paid"/,
+    "the confirm route writes 'paid' straight onto the invoice again");
+  assert.doesNotMatch(route, /updatePatch\.amount_paid\s*=/,
+    "the confirm route writes amount_paid straight onto the invoice again");
+  assert.match(route, /rpc\("apply_manual_payment"/,
+    "the confirm route no longer books its payment through the locked door");
+  // Only a 'received' invoice may be paid here: 'processing' is deliberately not payable, because
+  // its amounts came from the reader and this door is the moment a human took them over.
+  assert.match(route, /p_payable_statuses:\s*\["received"\]/,
+    "the confirm route widened what it will pay — an unread invoice must not become paid");
+  // [CONTRACT] Derived, not minted: a double submit must arrive at the SAME key.
+  assert.match(route, /p_client_key:\s*deriveKey\("email-confirm-pay",\s*id\)/,
+    "the confirm route no longer derives its idempotency key from the shared contract");
+  // A failure is said out loud. The invoice is confirmed and unpaid, which is honest and one tap
+  // from finished — but a route that answered "betaald ✓" over it would be the old silence again.
+  assert.match(route, /payment_not_booked/,
+    "a failed booking is not reported to the caller");
+});
+
+test("[EEN-SCHRIJFPAD] a paid invoice created from a bank line takes its link with it", () => {
+  // The second door. It wrote the link best-effort AFTER the invoice existed, so a failed link
+  // left exactly the shape the first door produced. It now blocks and rolls back — the same
+  // rollback this route already performs when the bank line turns out to be claimed.
+  const route = code("src/app/api/bank/line-invoice/route.ts");
+  const van = route.indexOf("const recorded = await recordPaymentLinks");
+  assert.ok(van > 0, "line-invoice no longer records the payment link at all");
+  const blok = route.slice(van, van + 1200);
+  assert.match(blok, /if \(!recorded\)/, "the link write result is not read");
+  assert.match(blok, /status:\s*"pending"/, "a failed link write does not release the bank line");
+  assert.match(blok, /from\("invoices"\)\s*\.delete\(\)/,
+    "a failed link write leaves the invoice standing — paid, with nothing under it");
+  assert.match(blok, /payment_link_failed/, "the caller is not told the booking did not land");
+});
+
+test("[CONTRACT] there is ONE derivation of an idempotency key, and it did not move", () => {
+  // Four unrelated schemes fed the same uuid column before this. Two writers that derive the key
+  // differently for the same event do not collide, and not colliding is what a double booking IS.
+  const pure = code("src/lib/contracts/idempotency.ts");
+  assert.match(pure, /export function deriveKey/, "the shared derivation is gone");
+  assert.doesNotMatch(pure, /randomUUID/,
+    "the contract offers a mint() — it would be called inside a retry loop within the week");
+  // The historical shape is load-bearing: re-keying an event already booked would let the unique
+  // index pass the second booking. The pinned literals live in the module's own test.
+  const t = readFileSync("src/lib/contracts/idempotency.test.ts", "utf8");
+  assert.match(t, /35416a54-4674-5b8e-aad3-8cba5ce9f496/,
+    "the historical feeClientKey output is no longer pinned as a literal");
+  // …and feeClientKey is the shared derivation now, not a second copy that happens to agree.
+  const settle = code("src/lib/mollie-settlement.ts");
+  assert.match(settle, /return deriveKey\("mollie-fee", settlementRowId, invoiceId\)/,
+    "feeClientKey derives its own key again");
+});

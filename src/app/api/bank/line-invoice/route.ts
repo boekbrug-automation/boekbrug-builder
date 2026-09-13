@@ -177,9 +177,31 @@ export async function POST(req: NextRequest) {
     await pipeline.from("invoices").delete().eq("id", invoiceId).eq(isIncoming ? "receiver_id" : "sender_id", user.id);
     return NextResponse.json({ error: "transaction_already_processed" }, { status: 409 });
   }
+  // [EEN-SCHRIJFPAD] The link write BLOCKS, and a failure rolls the whole thing back.
+  //
+  // This used to be best-effort with a log line, and that is how an invoice reaches the state
+  // this app cannot describe: status 'paid' and amount_paid set, with no bank_tx_invoices row
+  // under it. Measured in production before this change — 18 paid invoices with no allocation
+  // row at all — so it is not a theoretical branch.
+  //
+  // Why it matters even though the invoice "looks right": amount_paid is a CACHE of
+  // SUM(amount_applied), and every reversal path re-derives it from the surviving links. An
+  // invoice with money and no link therefore drops to amount_paid 0 the moment anything else on
+  // it is undone, and the kasstelsel return reads settlement from the LINK, not from the column —
+  // so the payment is invisible to the figures the Belastingdienst sees.
+  //
+  // The rollback is the one this route already performs twenty lines up when the bank line turns
+  // out to be claimed: the invoice is removed and the line is released. Nothing has been told to
+  // the owner yet, so a retry is free and costs them one tap.
   const recorded = await recordPaymentLinks(pipeline, user.id, transactionId, [invoiceId], { [invoiceId]: d.totalIncBtw });
   if (!recorded) {
-    reportHandledFailure({ tag: "REGEL-FACTUUR", severity: "data-integrity", message: "payment link not recorded for an invoice created from a bank line", context: { userId: user.id, invoiceId, transactionId } });
+    reportHandledFailure({ tag: "REGEL-FACTUUR", severity: "data-integrity", message: "payment link not recorded for an invoice created from a bank line — rolled back", context: { userId: user.id, invoiceId, transactionId } });
+    await pipeline
+      .from("bank_transactions")
+      .update({ invoice_id: null, status: "pending" })
+      .eq("id", transactionId).eq("user_id", user.id).eq("invoice_id", invoiceId);
+    await pipeline.from("invoices").delete().eq("id", invoiceId).eq(isIncoming ? "receiver_id" : "sender_id", user.id);
+    return NextResponse.json({ error: "payment_link_failed", code: "payment_link_failed" }, { status: 500 });
   }
   await logAuditAction({
     userId: user.id, action: "invoice.created", entityType: "invoice", entityId: invoiceId,
