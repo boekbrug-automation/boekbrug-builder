@@ -11,7 +11,7 @@ import { effectiveTaxKind, type TaxKind } from './tax-letter'
 // [OBSERVABILITY] De waarde die de lezer telt — één plek, zie skipped-import.ts.
 import { DOC_TYPE_COULD_NOT_READ, DOC_TYPE_REMINDER } from '@/lib/skipped-import'
 // [MAILTEKST] De factuur die nooit een bijlage had: het filter en de tekstconversie.
-import { htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName } from '@/lib/email-body-invoice'
+import { htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName, countRefusal, type BodyScanTally } from '@/lib/email-body-invoice'
 import { textToPdf } from '@/lib/text-to-pdf'
 // [DOORGESTUURD] Read the attachments out of an e-mail that arrived as an attachment.
 import { extractMimeAttachments, mimeHeader, uniqueAttachmentName, type EmbeddedAttachment } from '@/lib/mime-attachments'
@@ -2651,10 +2651,20 @@ export async function syncUserEmails(
     const body = await fetchBodyOnlyInvoices(tokens.provider, accessToken, syncAfterMs, tokens.email ?? null)
     bodyScanned = body.scanned
     bodyCapped = body.capped
-    if (body.items.length > 0) {
-      console.log('[MAILTEKST] body-only invoice candidates', {
+    // [MAILTEKST-TELLING] Logged whenever the pass LOOKED, not only when it found something.
+    //
+    // The old condition was `body.items.length > 0`, which made this pass silent in exactly the
+    // state worth investigating: sixty messages scanned, none admitted, and nothing written
+    // anywhere — indistinguishable from a mailbox that held no body invoice at all. The refusal
+    // tally says which of the two it was, and it is the only instrument that can, because
+    // bodyLooksLikeInvoice's reason was previously discarded one line after being computed.
+    if (body.scanned > 0) {
+      console.log('[MAILTEKST] body-only invoice scan', {
         scanned: body.scanned, candidates: body.items.length, capped: body.capped,
+        refused: body.refused,
       })
+    }
+    if (body.items.length > 0) {
       attachments = [...attachments, ...body.items]
     }
   }
@@ -5375,7 +5385,7 @@ export async function fetchBodyOnlyInvoices(
   accessToken: string,
   syncAfterMs: number,
   ownEmail: string | null,
-): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean }> {
+): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean; refused: BodyScanTally }> {
   try {
     return provider === 'gmail'
       ? await fetchGmailBodyInvoices(accessToken, syncAfterMs)
@@ -5384,7 +5394,7 @@ export async function fetchBodyOnlyInvoices(
     console.error('[MAILTEKST] body scan failed (non-fatal — the attachment import is unaffected)', {
       provider, error: e instanceof Error ? e.message : String(e),
     })
-    return { items: [], scanned: 0, capped: false }
+    return { items: [], scanned: 0, capped: false, refused: { scan_failed: 1 } }
   }
 }
 
@@ -5409,7 +5419,7 @@ function gmailBodyText(payload: unknown): string {
 async function fetchGmailBodyInvoices(
   accessToken: string,
   syncAfterMs: number,
-): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean }> {
+): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean; refused: BodyScanTally }> {
   const afterDate = new Date(syncAfterMs).toISOString().slice(0, 10).replace(/-/g, '/')
   // Gmail's own index does the first pass, at no cost to us: only mail WITHOUT an attachment that
   // mentions an invoice word anywhere in it. Everything expensive happens after this.
@@ -5425,18 +5435,19 @@ async function fetchGmailBodyInvoices(
   )
   if (!listRes.ok) {
     console.error('[MAILTEKST] Gmail body listing failed', { status: listRes.status })
-    return { items: [], scanned: 0, capped: false }
+    return { items: [], scanned: 0, capped: false, refused: {} }
   }
   const listed = (await listRes.json()) as { messages?: Array<{ id: string }>; nextPageToken?: string }
   const ids = (listed.messages ?? []).slice(0, MAX_BODY_SCAN)
 
   const items: GmailAttachment[] = []
+  const refused: BodyScanTally = {}
   for (const { id } of ids) {
     const res = await gmailFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
       accessToken,
     )
-    if (!res.ok) continue
+    if (!res.ok) { countRefusal(refused, 'fetch_failed'); continue }
     const msg = (await res.json()) as {
       payload?: { headers?: Array<{ name: string; value: string }> }
       internalDate?: string
@@ -5449,16 +5460,17 @@ async function fetchGmailBodyInvoices(
       messageId: id, subject, from: header('from'), text,
       date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString(),
     })
-    if (built) items.push(built)
+    if ('refused' in built) countRefusal(refused, built.refused)
+    else items.push(built)
   }
-  return { items, scanned: ids.length, capped: !!listed.nextPageToken }
+  return { items, scanned: ids.length, capped: !!listed.nextPageToken, refused }
 }
 
 async function fetchOutlookBodyInvoices(
   accessToken: string,
   syncAfterMs: number,
   ownEmail: string | null,
-): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean }> {
+): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean; refused: BodyScanTally }> {
   // Graph cannot full-text search and filter by date in one call, so the first pass is on the
   // SUBJECT. That is a real limitation and it is written down rather than hidden: a body-only
   // invoice titled "Your monthly statement" is not reached by this pass. It is still a great deal
@@ -5472,7 +5484,7 @@ async function fetchOutlookBodyInvoices(
   const res = await graphFetch(url, accessToken)
   if (!res.ok) {
     console.error('[MAILTEKST] Outlook body listing failed', { status: res.status })
-    return { items: [], scanned: 0, capped: false }
+    return { items: [], scanned: 0, capped: false, refused: {} }
   }
   const data = (await res.json()) as {
     value?: Array<{
@@ -5484,13 +5496,16 @@ async function fetchOutlookBodyInvoices(
   }
   const messages = data.value ?? []
   const items: GmailAttachment[] = []
+  const refused: BodyScanTally = {}
   for (const m of messages) {
     const addr = m.from?.emailAddress?.address ?? ''
     // [EIGEN-POST] Eerst, en vóór er ook maar één regel van deze tekst wordt gelezen: post van
     // onszelf is geen inkoopfactuur, en het is niet nodig om hem te openen om dat vast te stellen.
-    if (isOwnAppMail(addr)) continue
+    if (isOwnAppMail(addr)) { countRefusal(refused, 'own_app_mail'); continue }
     // Mail the owner sent themselves is not a purchase invoice.
-    if (ownEmail && addr && addr.toLowerCase() === ownEmail.toLowerCase()) continue
+    if (ownEmail && addr && addr.toLowerCase() === ownEmail.toLowerCase()) {
+      countRefusal(refused, 'own_mailbox'); continue
+    }
     const name = m.from?.emailAddress?.name ?? ''
     const built = await buildBodyAttachment({
       messageId: m.id,
@@ -5499,9 +5514,10 @@ async function fetchOutlookBodyInvoices(
       text: htmlToReadableText(m.body?.content ?? ''),
       date: m.receivedDateTime || new Date().toISOString(),
     })
-    if (built) items.push(built)
+    if ('refused' in built) countRefusal(refused, built.refused)
+    else items.push(built)
   }
-  return { items, scanned: messages.length, capped: !!data['@odata.nextLink'] }
+  return { items, scanned: messages.length, capped: !!data['@odata.nextLink'], refused }
 }
 
 /**
@@ -5513,11 +5529,17 @@ async function fetchOutlookBodyInvoices(
  */
 async function buildBodyAttachment(m: {
   messageId: string; subject: string; from: string; text: string; date: string
-}): Promise<GmailAttachment | null> {
+}): Promise<GmailAttachment | { refused: string }> {
   const verdict = bodyLooksLikeInvoice(m.text, m.subject)
-  if (!verdict.candidate) return null
+  // [MAILTEKST-TELLING] The refusal is REPORTED rather than swallowed. It used to become `null`
+  // here, one line after being computed, which made the whole pass unmeasurable: a scan that
+  // admitted nothing looked exactly like a mailbox with nothing to admit.
+  if (!verdict.candidate) return { refused: verdict.reason }
   const pdf = await textToPdf(m.text, { subject: m.subject, from: m.from, date: m.date.slice(0, 10) })
-  if (!pdf) return null
+  // A failed render is not a filter verdict and must never be counted as one — it is the pass
+  // being broken on a message it WANTED. Collapsing the two is how a rendering bug hides inside a
+  // tally that reads like ordinary strictness.
+  if (!pdf) return { refused: 'pdf_render_failed' }
   return {
     messageId: m.messageId,
     filename: bodyDocumentName(m.subject),
