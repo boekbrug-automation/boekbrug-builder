@@ -4,7 +4,7 @@
 // modified by 028 Accou Portal v2
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import { canAccessScreen } from "@/lib/acting-for";
+import { canAccessScreen, resolveActingFor, isActingForOther, type MemberLink } from "@/lib/acting-for";
 
 // [PUBLIC-SURFACE] The public path list moved to src/lib/public-paths.ts so the smoke test can
 // assert against the SAME array this guard enforces. It was unreachable from anywhere else, which
@@ -268,18 +268,25 @@ export async function middleware(request: NextRequest) {
     // medewerker lege schermen, geen cijfers van zijn baas.
     //
     // Vandaar ook één query en niet meer: dit draait op elke navigatie.
+    // [EEN-POORT] Dezelfde vraag, hetzelfde antwoord. Hier stond een eigen versie van "namens wie
+    // handelt deze mens": één kolom, en daarna een HARD GECODEERDE `role: "verkoop"`. Dat sloeg
+    // drie van de vijf regels van resolveActingFor over — de zelfkoppeling, een revoked_at in de
+    // toekomst, en vooral de rol zelf. Een rij met een andere rol kreeg zo het schermenlijstje van
+    // verkoop, en ACCOUNTANT_SCREENS was daardoor onbereikbare code.
+    //
+    // Nu leest hij de hele rij en laat hij de pure regel beslissen. De middleware blijft doen wat
+    // middleware hoort te doen — authenticatie en een optimistische omleiding — en beslist zelf
+    // niets meer over wie iemand is.
     const { data: koppeling } = await supabase
       .from("company_members")
-      .select("owner_id")
+      .select("owner_id, member_id, role, revoked_at")
       .eq("member_id", user.id)
       .is("revoked_at", null)
       .limit(1)
       .maybeSingle();
 
-    if (koppeling && !canAccessScreen(
-      { ownerId: koppeling.owner_id as string, actorId: user.id, role: "verkoop" },
-      request.nextUrl.pathname,
-    )) {
+    const handelt = resolveActingFor(user.id, koppeling as MemberLink | null, Date.now());
+    if (isActingForOther(handelt) && !canAccessScreen(handelt, request.nextUrl.pathname)) {
       return withRefreshedCookies(response, NextResponse.redirect(new URL("/dashboard/verkoop", request.url)));
     }
   }

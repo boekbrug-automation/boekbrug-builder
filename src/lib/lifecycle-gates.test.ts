@@ -34701,3 +34701,99 @@ test("[CONTRACT] there is ONE derivation of an idempotency key, and it did not m
   assert.match(settle, /return deriveKey\("mollie-fee", settlementRowId, invoiceId\)/,
     "feeClientKey derives its own key again");
 });
+
+// ── [EEN-POORT] One authorization model, and a measured way out of the other eight ───────────
+//
+// Measured on 13 September 2026: EIGHT parallel mechanisms answer "may this actor do this". None
+// of them is wrong; the problem is that there are eight, so the question has no place to be read.
+//
+// The engine does not delete any of them — RLS and the caller guards inside the money functions
+// are ENFORCEMENT LAYERS and defence in depth is deliberate. What it replaces is the several
+// POLICIES behind them with one, and this gate is the ratchet that makes the replacing real:
+// a mechanism that is not the answer may never reach further than it reaches today.
+
+test("[EEN-POORT] no authorization mechanism reaches further than its registered ceiling", async () => {
+  const { ACCESS_REGISTER, FROZEN_CLASSES } = await import("./access/register");
+
+  const loop = (dir: string): string[] => {
+    const uit: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const pad = `${dir}/${e}`;
+      if (statSync(pad).isDirectory()) uit.push(...loop(pad));
+      else uit.push(pad);
+    }
+    return uit;
+  };
+  const bestanden = {
+    src: loop("src").filter((f) => /\.tsx?$/.test(f) && !f.includes(".test.")),
+    api: loop("src/app/api").filter((f) => /\.tsx?$/.test(f) && !f.includes(".test.")),
+    migrations: loop("supabase/migrations").filter((f) => f.endsWith(".sql")),
+  };
+
+  const gemeten: string[] = [];
+  for (const m of ACCESS_REGISTER) {
+    // The register describes the rest of the app, never itself: a needle counted inside
+    // access/register.ts would make every mechanism look one file wider than it is.
+    const count = bestanden[m.where]
+      .filter((f) => !f.startsWith("src/lib/access/"))
+      .filter((f) => readFileSync(f, "utf8").includes(m.needle)).length;
+    gemeten.push(`${m.key}=${count}/${m.ceiling}`);
+    assert.ok(count <= m.ceiling,
+      `[${m.klass}] ${m.key} now reaches ${count} files, ceiling ${m.ceiling}. ${m.note}\n` +
+        (m.klass === "canonical"
+          ? "Raise the ceiling — this one is meant to grow."
+          : "This mechanism may NOT grow. Use resolveActingContext() + authorize() instead."));
+    // A ceiling far above reality is not a ratchet, it is a comment. Frozen classes are pinned
+    // EXACTLY, so closing a path is a visible edit here rather than slack nobody notices.
+    if (FROZEN_CLASSES.includes(m.klass)) {
+      assert.equal(count, m.ceiling,
+        `${m.key} now reaches ${count} files and its ceiling still says ${m.ceiling} — lower it, ` +
+          "that is what closing a legacy path looks like in this register");
+    }
+  }
+  assert.ok(gemeten.length >= 8, `expected the register to cover the mechanisms, saw ${gemeten.join(" ")}`);
+});
+
+test("[EEN-POORT] the middleware asks the canonical rule instead of answering itself", () => {
+  // It used to select one column and then hard-code `role: "verkoop"`, skipping three of
+  // resolveActingFor's five rules — the self-link, a revoked_at in the future, and the role. A row
+  // with any other role got the sales member's screen list, which is also why ACCOUNTANT_SCREENS
+  // was unreachable code.
+  const mw = code("src/middleware.ts");
+  assert.match(mw, /resolveActingFor\(user\.id, koppeling as MemberLink \| null, Date\.now\(\)\)/,
+    "the middleware resolves acting-for its own way again");
+  assert.doesNotMatch(mw, /role:\s*"verkoop"/,
+    "the middleware hard-codes a role again — then the rule it calls cannot disagree with it");
+  assert.match(mw, /select\("owner_id, member_id, role, revoked_at"\)/,
+    "the middleware reads too little to let the rule decide");
+});
+
+test("[EEN-POORT] the decision is structured, fails closed, and leaks nothing", () => {
+  const d = code("src/lib/access/decision.ts");
+  // Every branch that cannot PROVE the answer must deny. A single `return { allowed: true }` that
+  // is not guarded is the whole failure this file exists to prevent.
+  const allows = [...d.matchAll(/allowed:\s*true/g)].length;
+  assert.ok(allows <= 4, `${allows} places grant access — each one is a branch to re-read`);
+  assert.match(d, /if \(!context \|\| !context\.actorId \|\| !context\.ownerId\) return deny\("access\.no_session"/,
+    "a missing context no longer denies");
+  assert.match(d, /if \(!isPermission\(permission\)\) return deny\("access\.unknown_permission"/,
+    "an unknown permission no longer denies");
+  assert.match(d, /if \(!isKnownRole\(context\.role\)\) return deny\("access\.unknown_role"/,
+    "an unknown role no longer denies");
+  // The refusal may name the capability that was missing and nothing about the row.
+  assert.doesNotMatch(d, /reasonCode[^\n]*resource\.|deny\([^)]*resource/,
+    "a refusal carries something from the resource — a refused actor learns only what they lack");
+});
+
+test("[EEN-POORT] the context is the promotion of the existing resolver, not a second one", () => {
+  // A new resolver beside a working one is how eight mechanisms became eight. This one must be a
+  // thin caller of the doors that already exist.
+  const ctx = code("src/lib/access/context.ts");
+  assert.match(ctx, /from "@\/lib\/acting-for-server"/,
+    "the canonical context builds its own answer instead of asking the existing resolver");
+  assert.doesNotMatch(ctx, /from\(\s*["']company_members["']\s*\)/,
+    "the canonical context queries membership itself — that is the ninth mechanism");
+  // An accountant is never 'an accountant' in general: the mandate travels for ONE client.
+  assert.match(ctx, /mandatedOwnerIds: acting\.role === "boekhouder" \? \[acting\.ownerId\] : \[\]/,
+    "an accountant's mandate reaches further than the client that was asked for and proved");
+});
