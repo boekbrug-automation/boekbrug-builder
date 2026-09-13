@@ -21,11 +21,13 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import KantoorgidsPaneel from "../../src/modules/accountant/pages/KantoorgidsPaneel";
+import GidsLijst from "../../src/app/boekhouders/GidsLijst";
 import {
   EMPTY_LIST,
   entryProblems,
   normaliseEntry,
   sortForOwner,
+  type DirectoryEntry,
 } from "../../src/lib/accountant-directory";
 
 test("[KANTOORGIDS] the office's own panel renders before anything has loaded", () => {
@@ -47,7 +49,8 @@ test("[KANTOORGIDS] the office's own panel renders before anything has loaded", 
 
 test("[KANTOORGIDS] every field the panel offers is one the rules know about", () => {
   const html = renderToStaticMarkup(React.createElement(KantoorgidsPaneel));
-  for (const veld of ["kantoornaam", "plaats", "specialisaties", "mail", "site", "ruimte"]) {
+  for (const veld of ["kantoornaam", "plaats", "specialisaties", "mail", "site", "ruimte",
+                      "taal-nl", "taal-en", "taal-ar", "taal-tr"]) {
     assert.match(html, new RegExp(`id="${veld}"`), `the panel lost the field ${veld}`);
   }
   // Publishing is one button and un-publishing is another: no single toggle that an office can
@@ -79,7 +82,7 @@ test("[KANTOORGIDS] the order the page renders is the module's order, availabili
   // Nothing in a rendered entry can carry a rank: the type has no field for one.
   assert.deepStrictEqual(
     Object.keys(gesorteerd[0]!).sort(),
-    ["acceptingClients", "accountantId", "city", "contactEmail", "officeName", "specialisms", "website"],
+    ["acceptingClients", "accountantId", "city", "contactEmail", "languages", "officeName", "specialisms", "website"],
     "a directory entry grew a field — check it is not a rank, a score or a paid position",
   );
 });
@@ -91,4 +94,46 @@ test("[KANTOORGIDS] a listing that cannot be reached is never publishable", () =
     accountantId: "a", officeName: "Kantoor", city: "Utrecht", contactEmail: "",
   });
   assert.ok(entryProblems(zonderMail).length > 0, "a listing with no e-mail passed as publishable");
+});
+
+test("[KANTOORGIDS-TAAL] the public list opens on EVERYTHING, and shows what each office claims", () => {
+  // The branch that matters most and is invisible to tsc: the first paint, before anyone has
+  // touched a filter. Every office must be there — see the header of GidsLijst for why the owner's
+  // own account language is deliberately not pre-filled here.
+  const maak = (over: Partial<DirectoryEntry>): DirectoryEntry =>
+    normaliseEntry({
+      accountantId: "x", officeName: "Kantoor", city: "Tilburg",
+      acceptingClients: true, contactEmail: "a@b.nl", languages: ["nl"], ...over,
+    });
+  const entries = sortForOwner([
+    maak({ accountantId: "1", officeName: "Al-Amana", languages: ["nl", "ar"] }),
+    maak({ accountantId: "2", officeName: "Bakker", languages: ["nl"] }),
+    maak({ accountantId: "3", officeName: "Cijfers", city: "Breda", languages: ["nl", "tr"], acceptingClients: false }),
+  ]);
+  const html = renderToStaticMarkup(React.createElement(GidsLijst, { entries }));
+
+  assert.match(html, /Vind een boekhouder die bij jou past/);
+  for (const naam of ["Al-Amana", "Bakker", "Cijfers"]) {
+    assert.match(html, new RegExp(naam), `${naam} is missing from the unfiltered list`);
+  }
+  // "Alle talen" is the state the page opens in, so nothing is hidden from an owner who never
+  // touched the filter — the whole point of the filter being a choice rather than a default.
+  assert.match(html, /Alle talen/);
+  assert.doesNotMatch(html, /van de 3 kantoren/,
+    "the page opened already filtered — an owner would be shown a narrowed list he never asked for");
+
+  // Every language is offered as a chip, written in its own script.
+  for (const woord of ["Nederlands", "English", "العربية", "Türkçe"]) {
+    assert.match(html, new RegExp(woord), `the filter cannot offer ${woord}`);
+  }
+  // And a claim is rendered as a claim.
+  assert.match(html, /Dit kantoor zegt je te kunnen helpen in/);
+  assert.doesNotMatch(html, /gecontroleerd door BoekBrug|geverifieerd/i,
+    "the gids implied it checked a language nobody checked");
+});
+
+test("[KANTOORGIDS-TAAL] an office with no listing at all still renders the invitation", () => {
+  const html = renderToStaticMarkup(React.createElement(GidsLijst, { entries: [] }));
+  assert.ok(html.length > 200, "the empty gids rendered almost nothing");
+  assert.match(html, /BoekBrug-portaal/, "the empty list stopped inviting offices to join it");
 });

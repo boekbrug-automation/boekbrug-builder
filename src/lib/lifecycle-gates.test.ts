@@ -33206,7 +33206,7 @@ test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought i
     normaliseEntryFor({ accountantId: "x", officeName: "n", city: "c", contactEmail: "a@b.nl" }),
   ).sort();
   assert.deepStrictEqual(velden,
-    ["acceptingClients", "accountantId", "city", "contactEmail", "officeName", "specialisms", "website"],
+    ["acceptingClients", "accountantId", "city", "contactEmail", "languages", "officeName", "specialisms", "website"],
     "a directory entry gained a field — check it is not a rank, a score or a paid position");
 
   // 2 — off by default, in the code and in the migration that outlives it.
@@ -33828,4 +33828,66 @@ test("[BANK-BATCH-GELIJK] the two copies of book_bank_batch are the same functio
   assert.strictEqual(a, b,
     "the two book_bank_batch bodies have drifted — which one runs now depends on which migration " +
       "was applied last, and that is a coin toss with money on it");
+});
+
+test("[KANTOORGIDS-TAAL] the language filters, never ranks, and is never chosen for the owner", () => {
+  // ── WHY LANGUAGE IS IN THIS LIST AT ALL ────────────────────────────────────────────────────
+  // An owner looking for a boekhouder asks one thing before the town, the specialism or the price:
+  // will this person understand me? BoekBrug publishes in four languages and the first accountants
+  // on it read Arabic, so the gids was answering every question except the first one.
+  const puur = code("src/lib/accountant-directory.ts");
+  const lijst = code("src/app/boekhouders/GidsLijst.tsx");
+  const paneel = code("src/modules/accountant/pages/KantoorgidsPaneel.tsx");
+
+  // 1 — a CLOSED set, and it is the product's own. Free text cannot be filtered: "Arabisch",
+  //     "arabic", "العربية" and "AR" are four values for one language, and an owner ticking
+  //     Arabisch would be told there are no offices while three of them sit right there.
+  assert.match(puur, /export const DIRECTORY_LANGUAGES: readonly Locale\[\] = LOCALES/,
+    "the gids grew a language list of its own — it must be the languages BoekBrug itself speaks");
+  assert.match(puur, /export function normaliseLanguages/, "nothing narrows what a caller may store");
+  // Comments stripped BEFORE asserting: this file explains in prose why it does not touch the
+  // constraint another migration owns, and a doesNotMatch over the raw text would trip on its own
+  // explanation — the same trap as asserting on a comment that code() has already removed.
+  const migratie = readFileSync("supabase/migrations/accountant_directory_talen.sql", "utf8")
+    .replace(/--[^\n]*/g, " ");
+  assert.match(migratie, /languages <@ ARRAY\['nl', 'en', 'ar', 'tr'\]::text\[\]/,
+    "the database accepts a language the app cannot filter on");
+  assert.match(migratie, /accountant_directory_published_has_language/,
+    "a listing with no language can be published — it is invisible to every filter and gets scrolled past");
+  assert.doesNotMatch(migratie, /accountant_directory_published_is_complete/,
+    "this file redefines a constraint another migration owns, so it reads as applied wherever that one ran");
+
+  // 2 — THE RULE. It filters; it must never rank. sortForOwner is what orders the list, on room
+  //     and name, and it may not learn about languages: a filter that can also rank is a lever,
+  //     and a list with a lever is an advertisement.
+  const sorteer = puur.slice(puur.indexOf("export function sortForOwner"));
+  assert.ok(sorteer.length > 0, "sortForOwner not found");
+  const sorteerBody = sorteer.slice(0, sorteer.indexOf("\n}"));
+  assert.ok(sorteerBody.length > 0 && sorteerBody.length < sorteer.length,
+    "could not cut sortForOwner's body — the window would have run to the end of the file");
+  assert.doesNotMatch(sorteerBody, /language/i, "the ordering learned about languages");
+  assert.match(puur, /export function matchesFilter/, "the filter is gone");
+  const filter = puur.slice(puur.indexOf("export function matchesFilter"));
+  const filterBody = filter.slice(0, filter.indexOf("\n}"));
+  assert.ok(filterBody.length > 0 && filterBody.length < filter.length, "could not cut matchesFilter's body");
+  assert.doesNotMatch(filterBody, /sort|score|weight|rank/i,
+    "the filter started scoring — it may only answer yes or no");
+
+  // 3 — AND IT IS NEVER CHOSEN FOR HIM. The page opens on everything. Filling the owner's own
+  //     account language in as a filter looks helpful and is the opposite: someone who reads
+  //     Arabic may want precisely the Dutch office around the corner, and a list silently
+  //     pre-narrowed to his account language would hide most of it WITHOUT him seeing why.
+  assert.match(lijst, /useState<Locale \| null>\(null\)/,
+    "the language filter no longer starts empty — the owner is being narrowed by a choice he did not make");
+  assert.doesNotMatch(lijst, /useLocale|preferred_language|preferredLanguage/,
+    "the public gids reads the viewer's own language and filters by it; that hides offices he never excluded");
+  assert.match(lijst, /Alle talen/, "there is no way back to the whole list");
+
+  // 4 — a claim, never a checked fact. Same honesty as the KvK and VIES doors.
+  assert.match(lijst, /Dit kantoor zegt/, "the gids presents a language as something we verified");
+  assert.match(paneel, /DIRECTORY_LANGUAGES\.map/, "the office types its languages instead of ticking them");
+
+  // 5 — and still nothing to buy, on the file the rows now render from.
+  const RANG2 = /\b(rank|ranking|score|tier|featured|sponsored|promoted|boost|priority|paid_position)\b/i;
+  assert.doesNotMatch(lijst, RANG2, "the rendered list grew something to rank offices by");
 });

@@ -112,6 +112,7 @@ export type Database = {
           created_at: string
           office_name: string
           published: boolean
+          languages: string[]
           specialisms: string[]
           updated_at: string
           website: string | null
@@ -124,6 +125,7 @@ export type Database = {
           created_at?: string
           office_name?: string
           published?: boolean
+          languages?: string[]
           specialisms?: string[]
           updated_at?: string
           website?: string | null
@@ -136,6 +138,7 @@ export type Database = {
           created_at?: string
           office_name?: string
           published?: boolean
+          languages?: string[]
           specialisms?: string[]
           updated_at?: string
           website?: string | null

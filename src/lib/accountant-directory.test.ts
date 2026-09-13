@@ -5,10 +5,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DIRECTORY_LANGUAGES,
   EMPTY_LIST,
+  LANGUAGE_LABEL,
   LIMITS,
+  emptyAfterFilter,
   entryProblems,
+  matchesFilter,
   normaliseEntry,
+  normaliseLanguages,
   sortForOwner,
   type DirectoryEntry,
 } from "./accountant-directory";
@@ -18,6 +23,7 @@ const heel = (over: Partial<DirectoryEntry> = {}): DirectoryEntry => ({
   officeName: "Kantoor De Boer",
   city: "Utrecht",
   specialisms: ["zzp"],
+  languages: ["nl"],
   acceptingClients: true,
   contactEmail: "info@deboer.nl",
   website: null,
@@ -119,4 +125,79 @@ test("[KANTOORGIDS] an empty gids says it is empty, and promises nobody", () => 
   assert.deepStrictEqual(sortForOwner([]), []);
   assert.doesNotMatch(`${EMPTY_LIST.heading} ${EMPTY_LIST.body}`, /binnenkort|straks|meer kantoren volgen/i,
     "the empty list makes a claim about offices that never agreed to be counted");
+});
+
+test("[KANTOORGIDS-TAAL] the language set is the product's own, and unknown languages are dropped", () => {
+  // Not a list of its own: whatever BoekBrug speaks, the gids can offer — and nothing else, because
+  // a language the product cannot serve a client in is a promise the app cannot keep.
+  assert.deepStrictEqual([...DIRECTORY_LANGUAGES], ["nl", "en", "ar", "tr"]);
+  for (const code of DIRECTORY_LANGUAGES) {
+    assert.ok((LANGUAGE_LABEL[code] ?? "").length > 0, `${code} has no label to render`);
+  }
+  // Each language written IN that language — the chip is for the person looking for it.
+  assert.strictEqual(LANGUAGE_LABEL.ar, "العربية");
+  assert.strictEqual(LANGUAGE_LABEL.tr, "Türkçe");
+
+  // Free text is the trap this closed set exists to avoid: four spellings of one language would
+  // make a filter answer "no offices" while the offices are right there.
+  assert.deepStrictEqual(normaliseLanguages(["Arabisch", "arabic", "العربية", "AR"]), []);
+  assert.deepStrictEqual(normaliseLanguages(["ar", "nl"]), ["nl", "ar"], "stored in one fixed order, not the caller's");
+  assert.deepStrictEqual(normaliseLanguages(["nl", "nl", "nl"]), ["nl"], "a language ticked twice is one language");
+  assert.deepStrictEqual(normaliseLanguages(null), []);
+  assert.deepStrictEqual(normaliseLanguages("ar"), [], "a bare string is not a list");
+});
+
+test("[KANTOORGIDS-TAAL] an entry with no language may not be published", () => {
+  const zonder = normaliseEntry({
+    accountantId: "a1", officeName: "Kantoor De Boer", city: "Utrecht", contactEmail: "info@deboer.nl",
+  });
+  assert.deepStrictEqual(entryProblems(zonder), ["Kies minstens één taal waarin je een ondernemer kunt helpen"]);
+  // One tick is the whole cost, and it is the difference between being findable and being scrolled past.
+  assert.deepStrictEqual(entryProblems({ ...zonder, languages: ["nl"] }), []);
+});
+
+test("[KANTOORGIDS-TAAL] the filter answers 'who understands me', and never reorders", () => {
+  const arabisch = heel({ accountantId: "a", officeName: "Al-Amana", city: "Tilburg", languages: ["nl", "ar"] });
+  const alleenNl = heel({ accountantId: "b", officeName: "Boekhouder Bakker", city: "Tilburg", languages: ["nl"] });
+  const vol = heel({ accountantId: "c", officeName: "Cijfers & Co", city: "Breda", languages: ["nl", "ar"], acceptingClients: false });
+  const alle = [arabisch, alleenNl, vol];
+
+  // The owner's real first question, ahead of the town.
+  assert.deepStrictEqual(alle.filter((e) => matchesFilter(e, { language: "ar" })).map((e) => e.accountantId), ["a", "c"]);
+  // Tilburg + العربية — the case from the brief.
+  assert.deepStrictEqual(
+    alle.filter((e) => matchesFilter(e, { language: "ar", city: "tilburg" })).map((e) => e.accountantId), ["a"]);
+  assert.deepStrictEqual(
+    alle.filter((e) => matchesFilter(e, { language: "ar", onlyAccepting: true })).map((e) => e.accountantId), ["a"]);
+  // An empty filter is the whole list — the page before anyone touches it.
+  assert.strictEqual(alle.filter((e) => matchesFilter(e, {})).length, 3);
+
+  // The town is matched the way people type it, not the way the office wrote it.
+  const bosch = heel({ city: "Den Bosch" });
+  for (const typed of ["den bosch", "DENBOSCH", "Den  Bosch", "bosch"]) {
+    assert.ok(matchesFilter(bosch, { city: typed }), `"${typed}" did not find Den Bosch`);
+  }
+  assert.ok(!matchesFilter(bosch, { city: "utrecht" }));
+
+  // THE RULE. Filtering must not be able to rank: the order of what survives is the order
+  // sortForOwner already gave it — room first, then name — with the language changing nothing.
+  const gefilterd = sortForOwner(alle.filter((e) => matchesFilter(e, { language: "ar" })));
+  assert.deepStrictEqual(gefilterd.map((e) => e.accountantId), ["a", "c"],
+    "the accepting office is still first because it has room, not because of its languages");
+  assert.deepStrictEqual(
+    sortForOwner(alle).map((e) => e.accountantId),
+    sortForOwner([...alle].reverse()).map((e) => e.accountantId),
+    "the order depends on the offices, not on the order they arrived in");
+});
+
+test("[KANTOORGIDS-TAAL] an empty result says what came up empty", () => {
+  // A blank page cannot be told apart from a broken one. Naming the filter is both the honest
+  // answer and the one that makes the owner try again instead of leaving.
+  const zin = emptyAfterFilter({ language: "ar", city: "Tilburg" });
+  assert.match(zin, /العربية/);
+  assert.match(zin, /Tilburg/);
+  assert.notStrictEqual(zin, EMPTY_LIST.body);
+  // No filter at all is a different fact — nobody is listed yet — and keeps the invitation to offices.
+  assert.strictEqual(emptyAfterFilter({}), EMPTY_LIST.body);
+  assert.match(EMPTY_LIST.body, /BoekBrug-portaal/);
 });

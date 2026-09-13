@@ -39,6 +39,7 @@ type Row = {
   office_name: string
   city: string
   specialisms: string[] | null
+  languages: string[] | null
   accepting_clients: boolean
   contact_email: string
   website: string | null
@@ -51,6 +52,7 @@ function toEntry(row: Row): DirectoryEntry {
     officeName: row.office_name,
     city: row.city,
     specialisms: row.specialisms ?? [],
+    languages: row.languages ?? [],
     acceptingClients: row.accepting_clients,
     contactEmail: row.contact_email,
     website: row.website,
@@ -78,7 +80,7 @@ export async function GET() {
 
   const { data, error } = await auth.supabase
     .from('accountant_directory')
-    .select('accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, published')
+    .select('accountant_id, office_name, city, specialisms, languages, accepting_clients, contact_email, website, published')
     .eq('accountant_id', auth.id)
     .maybeSingle()
 
@@ -111,6 +113,10 @@ export async function PUT(request: NextRequest) {
     specialisms: Array.isArray((body as { specialisms?: unknown }).specialisms)
       ? ((body as { specialisms: unknown[] }).specialisms.filter((s) => typeof s === 'string') as string[])
       : [],
+    // Whatever arrives is run through normaliseLanguages inside normaliseEntry: anything outside
+    // the closed set is dropped here as well as in the database, so a crafted body cannot put an
+    // unfilterable language on a public page.
+    languages: (body as { languages?: unknown }).languages,
     acceptingClients: (body as { acceptingClients?: unknown }).acceptingClients === true,
     contactEmail: (body as { contactEmail?: string }).contactEmail,
     website: (body as { website?: string }).website,
@@ -129,6 +135,7 @@ export async function PUT(request: NextRequest) {
       office_name: entry.officeName,
       city: entry.city,
       specialisms: [...entry.specialisms],
+      languages: [...entry.languages],
       accepting_clients: entry.acceptingClients,
       contact_email: entry.contactEmail,
       website: entry.website,

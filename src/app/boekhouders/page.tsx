@@ -22,6 +22,7 @@ import PublicHeader from '@/components/public-header'
 import PublicFooter from '@/components/public-footer'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { EMPTY_LIST, normaliseEntry, sortForOwner, type DirectoryEntry } from '@/lib/accountant-directory'
+import GidsLijst from './GidsLijst'
 
 export const dynamic = 'force-dynamic'
 
@@ -45,7 +46,7 @@ async function loadEntries(): Promise<{ entries: DirectoryEntry[]; unreadable: b
   const supabase = await createServerSupabaseClient()
   const { data, error } = await supabase
     .from('accountant_directory')
-    .select('accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website')
+    .select('accountant_id, office_name, city, specialisms, languages, accepting_clients, contact_email, website')
     .eq('published', true)
     .limit(500)
 
@@ -57,6 +58,7 @@ async function loadEntries(): Promise<{ entries: DirectoryEntry[]; unreadable: b
       officeName: row.office_name,
       city: row.city,
       specialisms: row.specialisms ?? [],
+      languages: row.languages ?? [],
       acceptingClients: row.accepting_clients,
       contactEmail: row.contact_email,
       website: row.website,
@@ -76,7 +78,7 @@ export default async function BoekhoudersPage() {
           Boekhouders die met BoekBrug werken
         </h1>
         <p style={{ ...body, marginTop: 0 }}>
-          Zoek je een boekhouder? Deze kantoren werken met BoekBrug. Ze staan hier omdat ze het zelf
+          Zoek je een boekhouder? Filter op taal en plaats. Kantoren staan hier omdat ze het zelf
           hebben aangezet, en de volgorde is: kantoren met ruimte eerst, daarna op naam. Er is geen
           betaalde plek in deze lijst — die kun je bij ons niet kopen.
         </p>
@@ -99,51 +101,9 @@ export default async function BoekhoudersPage() {
             <p style={{ ...body }}>{EMPTY_LIST.body}</p>
           </section>
         ) : (
-          <div style={{ display: 'grid', gap: 12, marginTop: 24 }}>
-            {entries.map((entry) => (
-              <section key={entry.accountantId} style={card}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'baseline' }}>
-                  <h2 style={{ fontSize: 18, fontWeight: 600, color: '#202124', margin: 0 }}>
-                    {entry.officeName}
-                  </h2>
-                  <span style={{ fontSize: 14, color: '#5f6368' }}>{entry.city}</span>
-                  {entry.acceptingClients ? (
-                    <span style={{
-                      fontSize: 12, fontWeight: 600, color: '#137333', background: '#e6f4ea',
-                      borderRadius: 999, padding: '2px 10px',
-                    }}>
-                      Neemt nieuwe klanten aan
-                    </span>
-                  ) : (
-                    <span style={{
-                      fontSize: 12, fontWeight: 600, color: '#5f6368', background: '#f1f3f4',
-                      borderRadius: 999, padding: '2px 10px',
-                    }}>
-                      Nu geen ruimte
-                    </span>
-                  )}
-                </div>
-
-                {entry.specialisms.length > 0 && (
-                  <p style={{ ...body, marginTop: 8 }}>{entry.specialisms.join(' · ')}</p>
-                )}
-
-                <p style={{ ...body, marginTop: 8 }}>
-                  <a href={`mailto:${entry.contactEmail}`} style={{ color: '#1a73e8' }}>
-                    {entry.contactEmail}
-                  </a>
-                  {entry.website !== null && (
-                    <>
-                      {' · '}
-                      <a href={entry.website} rel="nofollow noopener noreferrer" target="_blank" style={{ color: '#1a73e8' }}>
-                        Website
-                      </a>
-                    </>
-                  )}
-                </p>
-              </section>
-            ))}
-          </div>
+          // De filters en de regels staan in een client-component: de lijst is al opgehaald en
+          // gesorteerd, dus versmallen hoort geen serverronde te kosten.
+          <GidsLijst entries={entries} />
         )}
 
         <section style={{ ...card, marginTop: 24 }}>

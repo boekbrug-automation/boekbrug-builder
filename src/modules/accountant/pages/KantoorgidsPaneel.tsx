@@ -15,7 +15,10 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { LIMITS, entryProblems, normaliseEntry } from '@/lib/accountant-directory'
+import {
+  DIRECTORY_LANGUAGES, LANGUAGE_LABEL, LIMITS, entryProblems, normaliseEntry,
+} from '@/lib/accountant-directory'
+import type { Locale } from '@/lib/i18n/locale'
 // [SERVER-ZIN] Een code is geen zin: wat de route stuurt gaat hier langs failureText, dat een
 // Nederlandse zin doorlaat en een machinewoord vervangt door wat dit scherm zelf zegt.
 import { failureText } from '@/lib/server-message'
@@ -42,6 +45,7 @@ export default function KantoorgidsPaneel() {
   const [officeName, setOfficeName] = useState('')
   const [city, setCity] = useState('')
   const [specialisms, setSpecialisms] = useState('')
+  const [languages, setLanguages] = useState<Locale[]>([])
   const [acceptingClients, setAcceptingClients] = useState(false)
   const [contactEmail, setContactEmail] = useState('')
   const [website, setWebsite] = useState('')
@@ -68,6 +72,7 @@ export default function KantoorgidsPaneel() {
           setOfficeName(json.entry.officeName ?? '')
           setCity(json.entry.city ?? '')
           setSpecialisms((json.entry.specialisms ?? []).join(', '))
+          setLanguages(Array.isArray(json.entry.languages) ? json.entry.languages : [])
           setAcceptingClients(json.entry.acceptingClients === true)
           setContactEmail(json.entry.contactEmail ?? '')
           setWebsite(json.entry.website ?? '')
@@ -89,11 +94,12 @@ export default function KantoorgidsPaneel() {
         officeName,
         city,
         specialisms: specialisms.split(','),
+        languages,
         acceptingClients,
         contactEmail,
         website,
       }),
-    [officeName, city, specialisms, acceptingClients, contactEmail, website],
+    [officeName, city, specialisms, languages, acceptingClients, contactEmail, website],
   )
 
   const bewaar = async (wilPubliceren: boolean) => {
@@ -113,6 +119,7 @@ export default function KantoorgidsPaneel() {
         body: JSON.stringify({
           officeName, city,
           specialisms: specialisms.split(','),
+          languages,
           acceptingClients, contactEmail, website,
           published: wilPubliceren,
         }),
@@ -187,6 +194,34 @@ export default function KantoorgidsPaneel() {
                  onChange={(e) => setSpecialisms(e.target.value)} disabled={laden}
                  placeholder="zzp, transport, horeca" />
           <p style={hint}>Dit is geen keurmerk en wordt door ons niet gecontroleerd — het staat er zoals jij het typt.</p>
+        </div>
+
+        <div style={veld}>
+          {/* [KANTOORGIDS-TAAL] Vakjes en geen tekstveld, en dat is geen smaakkwestie: op vrije
+              tekst kan niet gefilterd worden — "Arabisch", "arabic" en "العربية" zouden drie talen
+              zijn. De lijst is precies wat BoekBrug zelf spreekt, dus we bieden nooit een taal aan
+              waarin het product een klant niet kan bedienen. */}
+          <span style={label}>In welke talen kun je een ondernemer helpen?</span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 2 }}>
+            {DIRECTORY_LANGUAGES.map((cd) => (
+              <label key={cd} htmlFor={`taal-${cd}`}
+                     style={{ display: 'flex', gap: 7, alignItems: 'center', fontSize: 15, color: '#3c4043' }}>
+                <input
+                  id={`taal-${cd}`} type="checkbox" disabled={laden}
+                  checked={languages.includes(cd)}
+                  onChange={(e) => setLanguages(
+                    e.target.checked ? [...languages, cd] : languages.filter((x) => x !== cd),
+                  )}
+                  style={{ width: 18, height: 18 }}
+                />
+                <span dir="auto">{LANGUAGE_LABEL[cd]}</span>
+              </label>
+            ))}
+          </div>
+          <p style={hint}>
+            Ondernemers filteren hierop — het is voor veel mensen de eerste vraag. Wij controleren
+            het niet: er staat dat jij dit zegt.
+          </p>
         </div>
 
         <div style={veld}>
