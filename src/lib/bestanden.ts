@@ -76,11 +76,6 @@ export interface BestandRow {
   shared?: boolean;
 }
 
-export interface FolderContents {
-  folders: FolderRow[];
-  documents: BestandRow[];
-}
-
 export interface SearchResult extends BestandRow {
   folder_name: string | null;
 }
@@ -125,53 +120,6 @@ export function buildTree(rows: FolderRow[], parentId: string | null): FolderNod
       return a.name.localeCompare(b.name, "nl");
     })
     .map(r => ({ ...r, children: buildTree(rows, r.id) }));
-}
-
-export async function getFolderTree(userId: string, ctx: BestandenContext = "user"): Promise<FolderNode[]> {
-  const supabase = await resolveClient(ctx);
-  const { data, error } = await supabase
-    .from("folders")
-    .select(FOLDER_SELECT)
-    .eq("user_id", userId)
-    .order("name", { ascending: true });
-  if (error) throw new Error(error.message);
-  return buildTree((data ?? []) as FolderRow[], null);
-}
-
-// ─── Folder Contents ────────────────────────────────────────────────────────────
-
-export async function getFolderContents(
-  userId: string,
-  folderId: string | null,
-  ctx: BestandenContext = "user"
-): Promise<FolderContents> {
-  const supabase = await resolveClient(ctx);
-
-  let folderQ = supabase
-    .from("folders")
-    .select(FOLDER_SELECT)
-    .eq("user_id", userId)
-    .order("name", { ascending: true });
-  if (folderId === null) folderQ = folderQ.is("parent_id", null);
-  else folderQ = folderQ.eq("parent_id", folderId);
-  const { data: folderData, error: folderError } = await folderQ;
-  if (folderError) throw new Error(folderError.message);
-
-  let docQ = supabase
-    .from("documents")
-    .select("id, file_name, file_url, file_size, file_type, doc_type, period, year, notes, invoice_id, created_at, folder_id, ai_processed, ai_doc_type, ai_suggested_folder, source, starred, trashed, shared")
-    .eq("user_id", userId)
-    .eq("trashed", false)
-    .order("created_at", { ascending: false });
-  if (folderId === null) docQ = docQ.is("folder_id", null);
-  else docQ = docQ.eq("folder_id", folderId);
-  const { data: docData, error: docError } = await docQ;
-  if (docError) throw new Error(docError.message);
-
-  return {
-    folders: (folderData ?? []) as FolderRow[],
-    documents: (docData ?? []) as BestandRow[],
-  };
 }
 
 // ─── ensureYearStructure ─────────────────────────────────────────────────────────
@@ -515,22 +463,7 @@ export async function deleteFolder(
   if (delErr) throw new Error(delErr.message);
 }
 
-// ─── Move Document ────────────────────────────────────────────────────────────────
-
-export async function moveDocument(
-  documentId: string,
-  folderId: string | null,
-  userId: string,
-  ctx: BestandenContext = "user"
-): Promise<void> {
-  const supabase = await resolveClient(ctx);
-  const { error } = await supabase
-    .from("documents").update({ folder_id: folderId })
-    .eq("id", documentId).eq("user_id", userId);
-  if (error) throw new Error(error.message);
-}
-
-// ─── Move Folder ─────────────────────────────────────────────────────────────────
+// ─── Move Folder ──────────────────────────────────────────────────────────────────
 
 export async function moveFolder(
   folderId: string,
@@ -571,21 +504,6 @@ export async function moveFolder(
   const { error } = await supabase
     .from("folders").update({ parent_id: newParentId })
     .eq("id", folderId).eq("user_id", userId);
-  if (error) throw new Error(error.message);
-}
-
-// ─── Rename Document ──────────────────────────────────────────────────────────────
-
-export async function renameDocument(
-  documentId: string,
-  userId: string,
-  newName: string,
-  ctx: BestandenContext = "user"
-): Promise<void> {
-  const supabase = await resolveClient(ctx);
-  const { error } = await supabase
-    .from("documents").update({ file_name: newName.trim() })
-    .eq("id", documentId).eq("user_id", userId);
   if (error) throw new Error(error.message);
 }
 
