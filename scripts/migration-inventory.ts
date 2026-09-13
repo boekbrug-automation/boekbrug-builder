@@ -173,6 +173,23 @@ const ALLEEN_SERVICE_ROLE = [
 const lijst = (namen: string[]) => namen.map((n) => `'${n}'`).join(", ");
 
 const STAND_CONTROLE: Record<string, Stand> = {
+  "paid_without_allocation_repair.sql": {
+    soort: "controle",
+    vraag: "geen betaalde factuur staat nog zonder toewijzingsrij, en geen amount_paid wijkt af van zijn koppelingen",
+    // De migratie maakt niets aan — hij herstelt 26 rijen die twee dichtgemaakte lekken hadden
+    // achtergelaten. De stand IS dus het geldbeginsel zelf: amount_paid = SUM(amount_applied),
+    // op elke factuur. Dat is precies wat je wilt kunnen navragen, en het antwoord blijft waar
+    // zolang [EEN-SCHRIJFPAD] staat — gaat het ooit weer op onwaar, dan is er een nieuwe deur.
+    sql: `not exists (
+           select 1 from public.invoices i
+            where i.status = 'paid'
+              and not exists (select 1 from public.bank_tx_invoices l where l.invoice_id = i.id))
+         and not exists (
+           select 1 from public.invoices i
+            where abs(coalesce(i.amount_paid, 0) - (
+                    select coalesce(sum(coalesce(l.amount_applied, 0)), 0)
+                    from public.bank_tx_invoices l where l.invoice_id = i.id)) > 0.01)`,
+  },
   "drop_supplier_rows_that_are_misreadings.sql": {
     soort: "controle",
     vraag: "geen leveranciersrij houdt nog een nummer vast dat geen rekeningnummer is terwijl niets ernaar wijst",

@@ -32,7 +32,7 @@
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
 --   DEEL 1  de 156 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
---   DEEL 2  de 17 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
+--   DEEL 2  de 18 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
 -- Draai ze allebei. Deel 1 alleen is een schoon rapport met twee veiligheidsmigraties er
@@ -655,7 +655,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 173
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 174
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
@@ -781,6 +781,18 @@ with controle(bestand, vraag, toegepast) as (
        and lower(btrim(a.printed_name)) = lower(btrim(i.client_name))
      where i.client_name is not null
        and lower(btrim(i.client_name)) is distinct from lower(btrim(s.name)))
+  )
+  union all
+  select 'paid_without_allocation_repair.sql'::text, 'geen betaalde factuur staat nog zonder toewijzingsrij, en geen amount_paid wijkt af van zijn koppelingen'::text, (
+    not exists (
+      select 1 from public.invoices i
+       where i.status = 'paid'
+         and not exists (select 1 from public.bank_tx_invoices l where l.invoice_id = i.id))
+    and not exists (
+      select 1 from public.invoices i
+       where abs(coalesce(i.amount_paid, 0) - (
+               select coalesce(sum(coalesce(l.amount_applied, 0)), 0)
+               from public.bank_tx_invoices l where l.invoice_id = i.id)) > 0.01)
   )
   union all
   select 'revoke_execute_on_trigger_functions.sql'::text, 'geen enkele triggerbewaker hangt nog als /rest/v1/rpc aan de buitenkant'::text, (
