@@ -12,7 +12,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName } from './email-body-invoice'
+import {
+  htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName,
+  countRefusal, type BodyScanTally,
+} from './email-body-invoice'
 
 /** A real shape: the amounts live in a table, which is what makes the text conversion load-bearing. */
 const hostingInvoice = `<html><body>
@@ -229,3 +232,56 @@ test("[AANGIFTE-GEEN-FACTUUR] one signal alone never refuses", () => {
   );
   assert.equal(alleenZin.candidate, true, "the phrase alone refused a bill");
 });
+
+// ── [MAILTEKST-TELLING] The refusal, counted ────────────────────────────────────────────────────
+//
+// bodyLooksLikeInvoice names its refusal on every message, and until now every one of those names
+// was computed and thrown away one line later at `if (!verdict.candidate) return null`. That left
+// the only question about this pass unanswerable: it is deliberately strict, and a scan of sixty
+// messages that admits none is indistinguishable, from outside, from a mailbox with no body invoice
+// in it. The tally is what tells those two apart.
+test('[MAILTEKST-TELLING] every refusal carries a reason specific enough to act on', () => {
+  // Each of these is a different decision, and a tally that collapsed them would say "sixty
+  // refused" — which is the same non-answer as the silence it replaces.
+  const cases: Array<[string, string, string]> = [
+    // subject, body, expected reason prefix
+    ['Hoi', 'kort', 'body_too_short'],
+    ['Offerte 123', 'Offerte voor uw project. btw 21%. € 100,00 incl.', 'not_an_invoice:offerte'],
+    ['Nieuwsbrief', 'Onze nieuwsbrief. btw-nieuws. € 100,00 bespaard deze maand!', 'not_an_invoice:nieuwsbrief'],
+    ['Bedankt', 'Hartelijk dank voor je bezoek aan onze winkel deze week, tot ziens!', 'no_invoice_word'],
+    ['Factuur', 'Hierbij de factuur voor je bestelling van deze maand, met vriendelijke groet.', 'no_tax_line'],
+    ['Factuur', 'Hierbij je factuur. btw 21% is inbegrepen in het bedrag hierboven vermeld.', 'no_euro_amount'],
+  ]
+  for (const [subject, body, expected] of cases) {
+    const v = bodyLooksLikeInvoice(body, subject)
+    assert.equal(v.candidate, false, `${subject} / ${body.slice(0, 30)} should be refused`)
+    assert.equal(v.reason, expected, `wrong reason for: ${subject}`)
+  }
+})
+
+test('[MAILTEKST-TELLING] the tally counts each reason, and keeps the matched word', () => {
+  const tally: BodyScanTally = {}
+  countRefusal(tally, 'no_tax_line')
+  countRefusal(tally, 'no_tax_line')
+  countRefusal(tally, 'not_an_invoice:offerte')
+  assert.deepEqual(tally, { no_tax_line: 2, 'not_an_invoice:offerte': 1 })
+
+  // Keeping the matched word whole is the point: "eighteen refused" says nothing, "eighteen were
+  // order confirmations" says the filter is doing exactly its job and the vocabulary is not the
+  // problem. A tally that truncated to 'not_an_invoice' would lose precisely that.
+  const t2: BodyScanTally = {}
+  countRefusal(t2, 'not_an_invoice:orderbevestiging')
+  countRefusal(t2, 'not_an_invoice:nieuwsbrief')
+  assert.equal(Object.keys(t2).length, 2, 'two different shapes must not collapse into one bucket')
+})
+
+test('[MAILTEKST-TELLING] a real body invoice still passes — the tally must not become the point', () => {
+  // The other half. An instrument that made everything fail would have a beautiful tally and no
+  // invoices, so the admitting case is asserted right beside it.
+  const v = bodyLooksLikeInvoice(
+    'Hierbij uw factuur 2026-0042.\nSubtotaal € 100,00\nbtw 21% € 21,00\nTotaal € 121,00',
+    'Factuur 2026-0042',
+  )
+  assert.equal(v.candidate, true, v.reason)
+  assert.equal(v.reason, 'body_invoice_candidate')
+})
