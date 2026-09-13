@@ -13,8 +13,12 @@ const acc = (over: Partial<ControlAccount> = {}): ControlAccount => ({
   id: "a", name: "Kiwi", role: "zzper", createdAt: dag(-10),
   subscriptionStatus: null, currentPeriodEnd: null, grants: [], ...over,
 });
-const grant = (expires: string | null) => ({
+let grantNr = 0;
+const grant = (expires: string | null, over: { reason?: string; revoked_at?: string | null } = {}) => ({
+  id: `g${++grantNr}`,
   plan: "plus", starts_at: dag(-1), expires_at: expires, revoked_at: null,
+  reason: "Welkomstperiode: eerste 90 dagen",
+  ...over,
 });
 
 test("[CONTROL] every account lands in exactly one bucket", () => {
@@ -76,4 +80,42 @@ test("[CONTROL] an empty product is an empty console, not a crash", () => {
   const o = buildControlOverview([], NU);
   assert.deepStrictEqual(o.rows, []);
   assert.strictEqual(o.counts.total, 0);
+});
+
+// ── [TOEKENNING-DEUR] Which grants the console may offer to withdraw ─────────────────────────
+
+test("[TOEKENNING-DEUR] only a RUNNING grant is offered for withdrawal", () => {
+  const o = buildControlOverview([
+    acc({ id: "loopt", grants: [grant(dag(30), { reason: "Pilot kantoor Van Dijk" })] }),
+    acc({ id: "open", grants: [grant(null, { reason: "Partnerafspraak" })] }),
+    acc({ id: "verlopen", grants: [grant(dag(-5))] }),
+    acc({ id: "ingetrokken", grants: [grant(dag(30), { revoked_at: dag(-1) })] }),
+    acc({ id: "geen", grants: [] }),
+  ], NU);
+  const byId = new Map(o.rows.map((r) => [r.id, r]));
+
+  // A running grant, dated: one entry, carrying the id a withdrawal names and the reason a person
+  // recognises it by.
+  const loopt = byId.get("loopt")!.openGrants;
+  assert.strictEqual(loopt.length, 1);
+  assert.strictEqual(loopt[0].reason, "Pilot kantoor Van Dijk");
+  assert.ok(loopt[0].id.length > 0);
+
+  // Open-ended is running too — no end date is not the same as no grant.
+  assert.strictEqual(byId.get("open")!.openGrants.length, 1);
+  assert.strictEqual(byId.get("open")!.openGrants[0].expiresAt, null);
+
+  // Expired, revoked and absent are all "nothing to stop". Offering to withdraw something that is
+  // not doing anything is how an operator convinces themselves they fixed a problem.
+  assert.strictEqual(byId.get("verlopen")!.openGrants.length, 0);
+  assert.strictEqual(byId.get("ingetrokken")!.openGrants.length, 0);
+  assert.strictEqual(byId.get("geen")!.openGrants.length, 0);
+});
+
+test("[TOEKENNING-DEUR] a grant that has not started yet is not offered either", () => {
+  const later = { ...grant(dag(60)), starts_at: dag(7) };
+  const o = buildControlOverview([acc({ id: "straks", grants: [later] })], NU);
+  assert.strictEqual(o.rows[0].openGrants.length, 0);
+  // …and it is not counted as a reason for the plan, for the same reason.
+  assert.strictEqual(o.rows[0].plan, "free");
 });

@@ -33756,6 +33756,119 @@ test("[GEEN-ACHTERDEUR] no administrative surface may write to the books", () =>
 });
 
 
+// ─── [TOEKENNING-DEUR] The console may hand out ceilings, and only ceilings ───────────────────
+//
+// plan_grants was read on every request and on three screens from the day it was written, and
+// nothing in the app could write one. So every pilot, every extension and every partner
+// arrangement was a hand-typed INSERT against production — no validation, no audit row, no second
+// reading of the date, typed by whoever was on the phone with the customer at that moment.
+//
+// The door that replaces that has to keep four properties, and each one is a line somebody will
+// otherwise remove on a busy Tuesday.
+test("[TOEKENNING-DEUR] the grant door is gated, audited, and touches one table", () => {
+  const route = code("src/app/api/control/toekenning/route.ts");
+
+  // 1. The same allowlist as the console it belongs to, and it 404s: an endpoint that answers 403
+  //    has confirmed it exists. CONTROL_USER_IDS lives outside the database — nothing in the app
+  //    can grant it and no migration can widen it.
+  assert.match(route, /mayOpenControl\(user\?\.id, process\.env\.CONTROL_USER_IDS\)/,
+    "the grant door no longer asks the console's own allowlist");
+  assert.match(route, /status: 404/, "an unauthorised caller must not learn that this route exists");
+  assert.doesNotMatch(route, /status: 403/, "403 tells a stranger the endpoint is real");
+
+  // 2. Both verbs leave a row. The whole point is that "who gave this account Plus, when, and
+  //    why" stops being unanswerable.
+  for (const action of ["control.grant_created", "control.grant_revoked"]) {
+    assert.match(route, new RegExp(`action: '${action}'`), `${action} is no longer logged`);
+  }
+
+  // 3. It writes plan_grants and nothing else. [GEEN-ACHTERDEUR] already forbids the books; this
+  //    is the positive half — an admin route that starts updating `profiles.subscription_status`
+  //    would be writing commercial truth that only the Stripe webhook may write
+  //    (prevent_billing_self_grant enforces it, and a route that trips a database trigger is a
+  //    route that was trying).
+  const writes = [...route.matchAll(/\.from\('([a-z_]+)'\)\s*\.(insert|update|upsert|delete)\s*\(/g)].map((m) => m[1]);
+  assert.deepStrictEqual([...new Set(writes)].sort(), ["plan_grants"],
+    `the grant door writes to ${[...new Set(writes)].join(", ")} — it may write ceilings, nothing else`);
+
+  // 4. A withdrawal happens once. Re-stamping revoked_at would replace who stopped it and when,
+  //    which is the one fact a withdrawal exists to record, and the .is() re-assertion is what
+  //    makes two simultaneous clicks safe.
+  assert.match(route, /\.is\('revoked_at', null\)/, "two clicks can now overwrite each other");
+  // …and there is no 'extend': extending is granting again, so both halves of the story survive.
+  assert.doesNotMatch(route, /expires_at:\s*[^,\n]+\s*\}\)\s*\n?\s*\.eq\('id'/, "expires_at is being UPDATEd somewhere");
+});
+
+test("[TOEKENNING-DEUR] a blank end date can never mean 'forever'", () => {
+  // THE mistake this module exists for. In SQL `expires_at NULL` is the deliberate founding-partner
+  // case; through a form it is a field somebody did not fill in. The same value cannot be both the
+  // rarest deliberate choice and the commonest accident.
+  const rules = code("src/lib/plan-grant-actions.ts");
+  assert.match(rules, /if \(raw === ""\) return \{ ok: false, refusal: "end-not-declared" \};/,
+    "a blank expiry is being accepted again — that grant never ends");
+  assert.match(rules, /input\.openEnded === true/, "open-ended is no longer an explicit declaration");
+  // The horizon: 2035 for 2025 satisfies every CHECK on the table, so only a bound catches it.
+  assert.match(rules, /GRANT_MAX_YEARS/);
+  assert.match(rules, /refusal: "end-too-far"/);
+
+  // And the screen offers the deliberate path as a TICK, not as an empty field.
+  const paneel = code("src/app/dashboard/control/ToekenningPaneel.tsx");
+  assert.match(paneel, /type="checkbox"/, "open-ended is not a deliberate act on screen");
+  assert.match(paneel, /geen einddatum/);
+
+  // The panel must not DECIDE anything — a screen that validates is a second truth about the same
+  // rule, and the two drift. Naming the refusal codes is the opposite of that and is required by
+  // [SERVER-ZIN]: the route answers with a code, the screen owns the words. So the line is drawn
+  // at importing or re-implementing the rule, not at knowing what the answers are called.
+  assert.doesNotMatch(paneel, /plan-grant-actions/, "the screen imports the rules and can now re-decide them");
+  assert.doesNotMatch(paneel, /planGrantVerdict|GRANT_MAX_YEARS|GRANT_REASON_M/,
+    "the screen started re-deciding the rules instead of rendering their answer");
+  assert.match(paneel, /'end-not-declared':/, "the blank-date refusal has no sentence on the screen that must show it");
+});
+
+// ─── [ACTING-FOR] The invitation secret, and the one-employer rule ────────────────────────────
+test("[ACTING-FOR] the invitation token is stored as a hash, and only as a hash", () => {
+  // It used to be `token uuid DEFAULT gen_random_uuid() UNIQUE`: the key from the mail, in plain
+  // text, in a column, next to the e-mail address that is the other half of the access.
+  const maken = code("src/app/api/company/members/route.ts");
+  const accept = code("src/app/api/company/members/accept/route.ts");
+
+  assert.match(maken, /token_hash: hashInviteToken\(secret\)/, "the invitation is no longer hashed on the way in");
+  assert.match(maken, /randomBytes\(32\)/, "the secret must come from a CSPRNG, not from a uuid or Math.random");
+  assert.match(accept, /\.eq\('token_hash', hashInviteToken\(token\)\)/, "the accept route stopped hashing before it looks up");
+
+  // Neither side may keep or read a raw token column again.
+  for (const [naam, src] of [["create", maken], ["accept", accept]] as const) {
+    assert.doesNotMatch(src, /\.eq\('token',|token:\s*invite\.token|select\('id, token'\)/,
+      `the ${naam} route touches a raw token column again`);
+  }
+
+  // One function, two callers, forever: the day they disagree every invitation dies silently as
+  // "niet (meer) geldig", which reads exactly like an expired link.
+  for (const src of [maken, accept]) {
+    assert.match(src, /from '@\/lib\/invite-token'/, "a route grew its own hashing");
+  }
+
+  const sql = readFileSync("supabase/migrations/acting_for_hardening.sql", "utf8");
+  assert.match(sql, /DROP COLUMN IF EXISTS token\b/, "the raw column is still there for the next writer to fill");
+  assert.match(sql, /company_member_invites_token_hash_uidx/);
+});
+
+test("[ACTING-FOR] one person acts for at most one company, enforced by the schema", () => {
+  // The accept route already refuses a second employer, and writes down why: acting_for_owner()
+  // does LIMIT 1 without ORDER BY, so a second live link makes "on whose behalf?" a guess. But
+  // that check is a SELECT followed by an INSERT — two invitations accepted at the same moment
+  // both pass it. A rule that decides between two administrations may not live in a race.
+  const sql = readFileSync("supabase/migrations/acting_for_hardening.sql", "utf8");
+  assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS company_members_one_employer_uidx\s*\n\s*ON public\.company_members \(member_id\)\s*\n\s*WHERE revoked_at IS NULL;/,
+    "the one-employer rule is back to being route-only");
+
+  // And the collision must read as the rule, not as a server error the invitee cannot act on.
+  const accept = code("src/app/api/company/members/accept/route.ts");
+  assert.match(accept, /code === '23505'/, "a lost race now answers 500 instead of the sentence the slow path gives");
+  assert.match(accept, /Je werkt al voor een ander bedrijf/);
+});
+
 // ─── [KVK-OPTIONEEL] The one paid register may be absent, and nothing may notice ──────────────
 //
 // VIES and PDOK are free and keyless, so they answer for everyone from the first day. KvK is the

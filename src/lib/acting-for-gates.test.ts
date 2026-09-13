@@ -145,6 +145,24 @@ test("nobody writes created_by without a fallback — that broke invoice creatio
   };
   for (const d of SCANNED) walk(d);
 
+  // ── The one shape this rule does NOT describe ──────────────────────────────────────────────
+  //
+  // The danger above is a column BOLTED ONTO a table that already exists everywhere: invoices and
+  // clients are present on every installation, so a missing `created_by` turns a working request
+  // into PGRST204 and nothing else changes. writeWithTrail() exists for exactly that.
+  //
+  // plan_grants.created_by is not that shape. It arrived WITH its own table (plan_grants.sql), so
+  // on a database without that migration the table is absent too — the insert fails on the table,
+  // not on the column, and a fallback that drops the key would change a clear failure into a grant
+  // with no author. Routing it through writeWithTrail() would be cargo cult: it would silence
+  // nothing that can happen and would lose the one field that answers "who gave this account Plus".
+  //
+  // Named per FILE and not per table, because that is what this scan can see. A new entry here is
+  // therefore a deliberate sentence somebody has to write, which is the point.
+  const EIGEN_KOLOM = new Set<string>([
+    join("src/app/api/control/toekenning", "route.ts"),
+  ]);
+
   const offending: string[] = [];
   for (const path of toCheck) {
     const src = readFileSync(path, "utf8");
@@ -157,7 +175,7 @@ test("nobody writes created_by without a fallback — that broke invoice creatio
     const writes = /\.(insert|update|upsert)\([\s\S]{0,4000}?created_by/.test(src);
     if (!writes) continue;
     // Only allowed inside the fallback, or when the key arrives via `...trail`.
-    if (!/writeWithTrail/.test(src)) offending.push(path);
+    if (!/writeWithTrail/.test(src) && !EIGEN_KOLOM.has(path)) offending.push(path);
   }
   assert.deepEqual(
     offending,

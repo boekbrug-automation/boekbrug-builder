@@ -147,6 +147,11 @@ const KIND_BY_DOMAIN: Readonly<Record<string, LogboekKind | undefined>> = {
   member: "access",
   user: "access",
   email: "access",
+  // [TOEKENNING-DEUR] Een BEHEERDER gaf dit account ruimere grenzen, of stopte ze. Onder 'access'
+  // en niet onder 'money': er is geen euro bewogen en niets is gefactureerd — wat er veranderde is
+  // wat dit account MAG. Dat is precies de vraag die deze bak beantwoordt, en het is ook de bak
+  // waarin de eigenaar het gaat zoeken: "wie heeft dit aangezet en waarom stond het tot maart aan".
+  control: "access",
 };
 
 /**
@@ -240,6 +245,10 @@ const SENTENCE_KEYS: readonly MessageKey[] = [
   "log.snelstart.connected", "log.snelstart.disconnected", "log.snelstart.pushed",
   "log.snelstart.hold_acknowledged", "log.bank.connect_started", "log.bank.connected",
   "log.bank.disconnected",
+  // Level 6 — Commercieel. Een BEHEERDER handelde op andermans account: hij gaf ruimere grenzen,
+  // of hij stopte ze. Ze staan in dit logboek en niet alleen in een intern spoor, omdat het de
+  // eigenaar aangaat — "waarom had ik tot maart meer ruimte" is zijn vraag, niet die van ons.
+  "log.control.grant_created", "log.control.grant_revoked",
 ];
 
 const SENTENCE_KEY_SET: ReadonlySet<string> = new Set<string>(SENTENCE_KEYS);

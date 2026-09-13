@@ -32,8 +32,8 @@ test("[CONTROL] an empty product renders as an empty console, not a crash", () =
 
 test("[CONTROL] real rows render, including the two states that have no date", () => {
   const overzicht = buildControlOverview([
-    acc({ id: "1", name: "Kiwi", grants: [{ plan: "plus", starts_at: dag(-1), expires_at: null, revoked_at: null }] }),
-    acc({ id: "2", name: "Moon Bv", grants: [{ plan: "plus", starts_at: dag(-1), expires_at: dag(40), revoked_at: null }] }),
+    acc({ id: "1", name: "Kiwi", grants: [{ id: "g1", plan: "plus", starts_at: dag(-1), expires_at: null, revoked_at: null, reason: "Partnerafspraak" }] }),
+    acc({ id: "2", name: "Moon Bv", grants: [{ id: "g2", plan: "plus", starts_at: dag(-1), expires_at: dag(40), revoked_at: null, reason: "Pilot" }] }),
     acc({ id: "3", name: "GO bv", role: "accountant" }),
     acc({ id: "4", name: "", subscriptionStatus: "active" }),
   ], NU);
@@ -64,4 +64,29 @@ test("[CONTROL] no revenue figure reaches the screen", () => {
   // directions on the day it is printed.
   assert.doesNotMatch(html, /€/, "the console printed an amount");
   assert.match(html, /Omzet staat hier bewust niet/);
+});
+
+// ── [TOEKENNING-DEUR] The console now has two buttons, and neither may reach the books ───────
+
+test("[TOEKENNING-DEUR] every row offers the grant action, and the panel is closed at rest", () => {
+  const overzicht = buildControlOverview([
+    acc({ id: "1", name: "Kiwi" }),
+    acc({ id: "2", name: "Moon Bv" }),
+  ], NU);
+  const html = renderToStaticMarkup(React.createElement(ControlScherm, { overzicht, grantsLeesbaar: true }));
+
+  // One door per account…
+  assert.strictEqual((html.match(/Toekenning</g) ?? []).length, 2);
+  // …and [RUSTIG]: nothing of the form itself is on screen until somebody picks an account.
+  assert.doesNotMatch(html, /Plus toekennen/, "the form was rendered before an account was chosen");
+  assert.doesNotMatch(html, /geen einddatum/);
+});
+
+test("[TOEKENNING-DEUR] the empty product still renders, with the widened row", () => {
+  // The colSpan moved from 6 to 7 when the action column arrived; a stale one silently narrows
+  // the empty state and is exactly the kind of thing only a render catches.
+  const html = renderToStaticMarkup(
+    React.createElement(ControlScherm, { overzicht: buildControlOverview([], NU), grantsLeesbaar: true }),
+  );
+  assert.match(html, /colspan="7"/i, "the empty row no longer spans the whole table");
 });

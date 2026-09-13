@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
 import { logAuditAction, getClientIP } from '@/lib/audit'
+import { hashInviteToken } from '@/lib/invite-token'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,7 +34,10 @@ export async function POST(request: NextRequest) {
     const { data: invite } = await pipeline
       .from('company_member_invites')
       .select('id, owner_id, email, role, status, expires_at')
-      .eq('token', token)
+      // [ACTING-FOR] De tabel draagt de HASH, de link draagt het geheim. Voorheen stond het token
+      // onversleuteld in de kolom: wie de tabel kon lezen had werkende uitnodigingslinks naar elk
+      // bedrijf met een openstaande uitnodiging. Zie invite-token.ts voor waarom dit één functie is.
+      .eq('token_hash', hashInviteToken(token))
       .maybeSingle()
 
     if (!invite || invite.status !== 'pending') {
@@ -105,6 +109,17 @@ export async function POST(request: NextRequest) {
         { onConflict: 'owner_id,member_id' },
       )
     if (linkErr) {
+      // [ACTING-FOR] 23505 op company_members_one_employer_uidx is niet "mislukt": het is de regel
+      // die hierboven ook al is gecontroleerd, nu afgedwongen door het schema omdat die controle
+      // een SELECT vóór een INSERT is en dus een race. Twee uitnodigingen die tegelijk worden
+      // aangenomen komen hier uit, en dan hoort er dezelfde zin te staan als bij de trage variant —
+      // niet een serverfout waar de genodigde niets mee kan.
+      if ((linkErr as { code?: string }).code === '23505') {
+        return NextResponse.json(
+          { error: 'Je werkt al voor een ander bedrijf op BoekBrug. Laat die koppeling eerst intrekken.' },
+          { status: 409 },
+        )
+      }
       console.error('[ACTING-FOR] koppelen mislukt', { linkErr })
       return NextResponse.json({ error: 'Koppelen mislukt — probeer opnieuw' }, { status: 500 })
     }

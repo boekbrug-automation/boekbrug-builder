@@ -330,6 +330,14 @@ export type AuditAction =
   | 'bank.connect_started'            // ← [ENABLEBANKING] eigenaar begon een bankkoppeling (requisitie aangemaakt)
   | 'bank.connected'                  // ← [ENABLEBANKING] toestemming gegeven bij de bank; rekeningen gekoppeld
   | 'bank.disconnected'               // ← [ENABLEBANKING] koppeling ingetrokken; de feed stopt
+  // [TOEKENNING-DEUR] De commerciële console deelt een toekenning uit of trekt hem in. Beide zijn
+  // handelingen van een BEHEERDER op andermans account, en dat is precies waarom ze hier staan:
+  // tot nu toe was elke toekenning een met de hand getypte INSERT op productie, waarvan achteraf
+  // niet te zien was wie hem deed, wanneer, of waarom. Ze raken uitsluitend GRENZEN — nooit een
+  // euro, een btw-cijfer of een boekingsregel; [GEEN-ACHTERDEUR] laat de build vallen als dat
+  // ooit verandert.
+  | 'control.grant_created'           // ← [TOEKENNING-DEUR] pilot, verlenging of partnerafspraak toegekend
+  | 'control.grant_revoked'           // ← [TOEKENNING-DEUR] vroegtijdig gestopt; de rij blijft staan
 
 export interface AuditParams {
   /** Profile ID للمستخدم الذي فعل الـ action */

@@ -18,6 +18,13 @@
 import { decidePlan, type Plan } from "./subscription";
 import { grantStanding, type PlanGrantRow } from "./plan-grants";
 
+/**
+ * [TOEKENNING-DEUR] A grant row as the console reads it — the reducer's fields plus the id, which
+ * is what a withdrawal needs to name. Kept here rather than widened into PlanGrantRow: the reducer
+ * answers "until when", and an id is no part of that question.
+ */
+export type ControlGrantRow = PlanGrantRow & { id: string };
+
 export interface ControlAccount {
   id: string;
   name: string;
@@ -25,7 +32,15 @@ export interface ControlAccount {
   createdAt: string | null;
   subscriptionStatus: string | null;
   currentPeriodEnd: string | null;
-  grants: readonly PlanGrantRow[];
+  grants: readonly ControlGrantRow[];
+}
+
+/** [TOEKENNING-DEUR] One grant that is running right now, and can therefore be withdrawn. */
+export interface OpenGrant {
+  id: string;
+  reason: string;
+  /** ISO, or null when the grant has no end. */
+  expiresAt: string | null;
 }
 
 export interface ControlRow {
@@ -39,6 +54,12 @@ export interface ControlRow {
   grantUntil: string | null;
   grantOpenEnded: boolean;
   createdAt: string | null;
+  /**
+   * [TOEKENNING-DEUR] The grants that are running for this account — not revoked, started, and not
+   * expired. Exactly the set a withdrawal may name, derived in the same pass as the standing so the
+   * screen cannot offer to stop something that already stopped.
+   */
+  openGrants: OpenGrant[];
 }
 
 export interface ControlOverview {
@@ -58,6 +79,22 @@ export interface ControlOverview {
  * One pass over the accounts, in the order a person wants them: newest first, because the only
  * question anyone opens this screen with is "who arrived, and what do they have".
  */
+/**
+ * Is this grant running right now?
+ *
+ * The same three ways of not being active that grantStanding() checks — revoked, not started,
+ * expired — and an unreadable date counts as NOT running here too. Offering to withdraw something
+ * that is not doing anything is how an operator convinces themselves they fixed a problem.
+ */
+function isRunning(g: ControlGrantRow, nowMs: number): boolean {
+  if (g.revoked_at) return false;
+  const start = g.starts_at ? Date.parse(g.starts_at) : NaN;
+  if (Number.isFinite(start) && start > nowMs) return false;
+  if (!g.expires_at) return true; // open-ended, and it has started
+  const end = Date.parse(g.expires_at);
+  return Number.isFinite(end) && end > nowMs;
+}
+
 export function buildControlOverview(accounts: readonly ControlAccount[], nowMs: number): ControlOverview {
   const rows: ControlRow[] = accounts.map((a) => {
     const standing = grantStanding(a.grants, nowMs);
@@ -78,6 +115,11 @@ export function buildControlOverview(accounts: readonly ControlAccount[], nowMs:
       grantUntil: standing.grantedPlusUntil,
       grantOpenEnded: standing.grantOpenEnded,
       createdAt: a.createdAt,
+      openGrants: a.grants.filter((g) => isRunning(g, nowMs)).map((g) => ({
+        id: g.id,
+        reason: (g.reason ?? "").trim() || "(zonder reden)",
+        expiresAt: g.expires_at,
+      })),
     };
   });
 

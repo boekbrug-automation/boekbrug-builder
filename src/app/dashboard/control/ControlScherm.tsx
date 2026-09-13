@@ -1,9 +1,16 @@
 'use client'
 
 // src/app/dashboard/control/ControlScherm.tsx
-// [CONTROL] Leest alleen. Elk getal hier is geteld, geen enkel getal is geschat.
+// [CONTROL] Elk getal hier is geteld, geen enkel getal is geschat.
+//
+// [TOEKENNING-DEUR] Het scherm leest niet meer ALLEEN: er zitten sinds vandaag twee handelingen op,
+// toekennen en intrekken. Beide raken uitsluitend plan_grants — GRENZEN, nooit een euro, een
+// btw-cijfer of een boekingsregel. [GEEN-ACHTERDEUR] laat de build vallen als dat ooit verandert.
 
-import type { ControlOverview } from '@/lib/control-overview'
+import { useState } from 'react'
+
+import type { ControlOverview, ControlRow } from '@/lib/control-overview'
+import ToekenningPaneel from './ToekenningPaneel'
 
 const kaart: React.CSSProperties = {
   background: '#fff', border: '1px solid #e8eaed', borderRadius: 12, padding: 18,
@@ -23,6 +30,8 @@ export default function ControlScherm({
   overzicht, grantsLeesbaar,
 }: { overzicht: ControlOverview; grantsLeesbaar: boolean }) {
   const { rows, counts } = overzicht
+  const [gekozen, setGekozen] = useState<string | null>(null)
+  const rij: ControlRow | null = rows.find((r) => r.id === gekozen) ?? null
 
   const datum = (iso: string | null) => (iso ? iso.slice(0, 10) : '—')
   const waarom: Record<string, string> = {
@@ -37,7 +46,7 @@ export default function ControlScherm({
     <main style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 16px 64px' }}>
       <h1 style={{ fontSize: 24, fontWeight: 700, color: '#202124', margin: '0 0 4px' }}>Control Center</h1>
       <p style={{ fontSize: 14, color: '#5f6368', margin: '0 0 20px', lineHeight: 1.6 }}>
-        Wie er is en wat ze hebben. Dit scherm leest alleen — het verandert niets, en het raakt
+        Wie er is en wat ze hebben. Toekennen en intrekken verandert wat een account MAG; het raakt
         geen boekhouding aan.
       </p>
 
@@ -63,8 +72,8 @@ export default function ControlScherm({
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 640 }}>
           <thead>
             <tr style={{ textAlign: 'start' }}>
-              {['Account', 'Rol', 'Plan', 'Waarom', 'Toekenning tot', 'Sinds'].map((k) => (
-                <th key={k} style={{ ...cel, borderTop: 'none', fontSize: 12, color: '#5f6368', fontWeight: 600, textAlign: 'start' }}>
+              {['Account', 'Rol', 'Plan', 'Waarom', 'Toekenning tot', 'Sinds', ''].map((k, i) => (
+                <th key={k || `k${i}`} style={{ ...cel, borderTop: 'none', fontSize: 12, color: '#5f6368', fontWeight: 600, textAlign: 'start' }}>
                   {k}
                 </th>
               ))}
@@ -81,14 +90,38 @@ export default function ControlScherm({
                   {r.grantOpenEnded ? 'open' : datum(r.grantUntil)}
                 </td>
                 <td style={{ ...cel, color: '#5f6368' }}>{datum(r.createdAt)}</td>
+                <td style={{ ...cel, textAlign: 'end' }}>
+                  <button
+                    type="button"
+                    onClick={() => setGekozen(r.id === gekozen ? null : r.id)}
+                    style={{
+                      padding: '5px 10px', borderRadius: 8, border: '1px solid #dadce0',
+                      background: '#fff', fontSize: 12.5, cursor: 'pointer', color: '#202124',
+                    }}
+                  >
+                    Toekenning
+                  </button>
+                </td>
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td style={{ ...cel, color: '#5f6368' }} colSpan={6}>Nog geen accounts.</td></tr>
+              <tr><td style={{ ...cel, color: '#5f6368' }} colSpan={7}>Nog geen accounts.</td></tr>
             )}
           </tbody>
         </table>
       </div>
+
+      {/* [RUSTIG] Alleen als iemand een account koos. In rust staat hier niets. */}
+      {rij && (
+        <ToekenningPaneel
+          rij={rij}
+          // Een volledige herlaadbeurt, geen router.refresh(): dit scherm wordt statisch gerenderd
+          // in tests/render, en useRouter() valt daar om ('app router to be mounted'). Een console
+          // die na een handeling de hele waarheid opnieuw bij de server haalt is hier bovendien het
+          // eerlijkste gedrag — hij toont dan wat er STAAT, niet wat wij dachten te schrijven.
+          onKlaar={() => { setGekozen(null); if (typeof window !== 'undefined') window.location.reload() }}
+        />
+      )}
 
       <p style={{ fontSize: 12.5, color: '#5f6368', marginTop: 14, lineHeight: 1.6 }}>
         Omzet staat hier bewust niet. Betalende accounts × prijs is op de dag dat het geprint

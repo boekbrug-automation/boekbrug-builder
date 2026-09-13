@@ -18,7 +18,10 @@ import { sendMemberInvite } from '@/lib/email'
 import { appOrigin } from '@/lib/app-origin'
 import { getActingFor, loadCompanyMembers } from '@/lib/acting-for-server'
 import { isActingForOther } from '@/lib/acting-for'
+import { randomBytes } from 'node:crypto'
+
 import { logAuditAction, getClientIP } from '@/lib/audit'
+import { hashInviteToken } from '@/lib/invite-token'
 
 export const dynamic = 'force-dynamic'
 
@@ -130,10 +133,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Kon de link niet opbouwen — probeer het later opnieuw' }, { status: 503 })
   }
 
+  // [ACTING-FOR] Het geheim wordt HIER gemaakt en gaat alleen de mail in; de tabel krijgt de hash.
+  // Voorheen genereerde de database het token (`DEFAULT gen_random_uuid()`) en bewaarde het
+  // onversleuteld — wie de tabel kon lezen had daarmee werkende uitnodigingslinks naar elk bedrijf
+  // met een openstaande uitnodiging, en het e-mailadres stond er in dezelfde rij naast.
+  //
+  // 32 bytes uit randomBytes, niet uit Math.random en niet uit een uuid: dit is de helft van de
+  // toegang tot andermans factuurreeks.
+  const secret = randomBytes(32).toString('base64url')
   const { data: invite, error } = await pipeline
     .from('company_member_invites')
-    .insert({ owner_id: ownerId, email, role: 'verkoop' })
-    .select('id, token')
+    .insert({ owner_id: ownerId, email, role: 'verkoop', token_hash: hashInviteToken(secret) })
+    .select('id')
     .single()
 
   if (error || !invite) {
@@ -145,7 +156,7 @@ export async function POST(request: NextRequest) {
     await sendMemberInvite({
       toEmail: email,
       companyName: eigenProfiel?.company_name || eigenProfiel?.full_name || 'Je werkgever',
-      acceptUrl: `${origin}/team/accepteren?token=${invite.token}`,
+      acceptUrl: `${origin}/team/accepteren?token=${secret}`,
     })
   } catch (e) {
     // [TRUST-DELIVERY] De mail is de enige weg naar binnen. Vertrekt hij niet, dan moet de

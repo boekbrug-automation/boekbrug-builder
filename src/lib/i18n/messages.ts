@@ -13499,6 +13499,11 @@ export const MESSAGES = {
   'log.bank.connect_started': { nl: 'Bankkoppeling gestart', en: 'Bank connection started', ar: 'بدأ ربط البنك' },
   'log.bank.connected': { nl: 'Bank gekoppeld', en: 'Bank connected', ar: 'رُبط البنك' },
   'log.bank.disconnected': { nl: 'Bank ontkoppeld', en: 'Bank disconnected', ar: 'فُصل البنك' },
+  // [TOEKENNING-DEUR] Een beheerder gaf dit account ruimere grenzen, of stopte ze. De reden staat
+  // in de regel zelf; deze zin zegt alleen WAT er is gebeurd. [AR-TERMEN] «توسيع» voor ruimere
+  // grenzen en niet «ترقية»: er is geen ander plan gekocht, er is meer ruimte gegeven.
+  'log.control.grant_created': { nl: 'Ruimere grenzen toegekend', en: 'Wider limits granted', ar: 'مُنحت حدود أوسع', tr: 'Daha geniş sınırlar verildi' },
+  'log.control.grant_revoked': { nl: 'Ruimere grenzen ingetrokken', en: 'Wider limits withdrawn', ar: 'سُحبت الحدود الأوسع', tr: 'Daha geniş sınırlar geri alındı' },
 
   // [LOGBOEK] The screen's own words. `log.onbekend` is the one that matters most: an action with
   // no sentence is still SHOWN, phrased neutrally and carrying its raw name — an audit trail that

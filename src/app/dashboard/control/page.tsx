@@ -24,7 +24,7 @@ import { getSessionUser } from '@/lib/session-user'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
 import { mayOpenControl } from '@/lib/control-access'
 import { buildControlOverview, type ControlAccount } from '@/lib/control-overview'
-import type { PlanGrantRow } from '@/lib/plan-grants'
+import type { ControlGrantRow } from '@/lib/control-overview'
 import { fetchAllRows } from '@/lib/supabase-paginate'
 import ControlScherm from './ControlScherm'
 
@@ -76,13 +76,15 @@ export default async function ControlPage() {
     ).catch(() => [])
   }
 
-  const grantsPerUser = new Map<string, PlanGrantRow[]>()
+  const grantsPerUser = new Map<string, ControlGrantRow[]>()
   let grantsLeesbaar = true
   try {
-    const alle = await fetchAllRows<{ user_id: string } & PlanGrantRow>((lo, hi) =>
+    // [TOEKENNING-DEUR] `id` rides along: it is what a withdrawal names. Without it the console
+    // can show that a pilot is running and offer no way to stop it.
+    const alle = await fetchAllRows<{ user_id: string } & ControlGrantRow>((lo, hi) =>
       pipeline
         .from('plan_grants')
-        .select('user_id, plan, starts_at, expires_at, revoked_at, reason')
+        .select('id, user_id, plan, starts_at, expires_at, revoked_at, reason')
         .order('user_id', { ascending: true })
         .range(lo, hi),
     )

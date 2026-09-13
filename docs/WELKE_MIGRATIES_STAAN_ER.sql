@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 152 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 153 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 17 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -80,6 +80,9 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('accountant_write_holes.sql', 'index', 'idx_invoices_sender_id', null, 'public'),
   ('accountant_write_holes.sql', 'index', 'idx_invoices_shared', null, 'public'),
   ('accountant_write_holes.sql', 'policy', 'acc_status_owner_read', 'accountant_subject_status', 'public'),
+  ('acting_for_hardening.sql', 'column', 'token_hash', 'company_member_invites', 'public'),
+  ('acting_for_hardening.sql', 'index', 'company_member_invites_token_hash_uidx', null, 'public'),
+  ('acting_for_hardening.sql', 'index', 'company_members_one_employer_uidx', null, 'public'),
   ('ai_budget_settle.sql', 'function', 'ai_budget_settle', null, 'public'),
   ('ai_spend_guard.sql', 'column', 'bucket_key', 'rate_limits', 'public'),
   ('ai_spend_guard.sql', 'constraint', 'rate_limits_one_identity', null, 'public'),
@@ -638,7 +641,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 169
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 170
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
