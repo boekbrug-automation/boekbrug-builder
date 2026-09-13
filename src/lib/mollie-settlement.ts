@@ -68,10 +68,22 @@ export interface MollieSettlementPayment {
   paymentLinkId?: string | null;
 }
 
-/** A refund or chargeback inside a settlement — only its existence matters here. */
+/**
+ * A refund or chargeback inside a settlement.
+ *
+ * [TERUGBETALING] This used to say "only its existence matters here", and that was true while the
+ * sync did nothing with one but hold the settlement. It now records the event and names the
+ * invoice it un-pays, and `paymentId` is what makes that possible: it is the payment the money
+ * went back on, and mollie_payment_links.payment_id maps that to one of our invoices. Reading it
+ * is free — Mollie has always sent it — while not reading it left the owner with a held settlement
+ * and no way to find out which sale it was about.
+ */
 export interface MollieSettlementAdjustment {
   id: string;
   amount?: { currency?: string; value?: string } | null;
+  /** The payment (tr_…) this refund or chargeback went back on. */
+  paymentId?: string | null;
+  createdAt?: string | null;
 }
 
 export interface SettlementSummary {

@@ -338,6 +338,8 @@ export type AuditAction =
   // ooit verandert.
   | 'control.grant_created'           // ← [TOEKENNING-DEUR] pilot, verlenging of partnerafspraak toegekend
   | 'control.grant_revoked'           // ← [TOEKENNING-DEUR] vroegtijdig gestopt; de rij blijft staan
+  | 'mollie.refund_reversed'         // ← [TERUGBETALING] geld ging terug, de betaling is van de factuur gehaald
+  | 'mollie.refund_answered'         // ← [TERUGBETALING] beantwoord zonder boeking: creditnota volgt, of niet van mij
 
 export interface AuditParams {
   /** Profile ID للمستخدم الذي فعل الـ action */

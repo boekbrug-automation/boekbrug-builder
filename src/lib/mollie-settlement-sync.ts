@@ -36,11 +36,18 @@ import {
   feeInvoiceFrom, isPayoutOf, payoutLineVerdict, splitPayments, summarizeSettlement, holdReason, feeClientKey,
   MOLLIE_SUPPLIER_NAME, type SettlementSummary,
 } from "@/lib/mollie-settlement";
+// [TERUGBETALING] Reading a refund, and deciding nothing about it — see that module's header for
+// why a chargeback and a refund lead to two different bookings and only the owner knows which.
+import {
+  refundFactFrom, resolveRefunds, refundAlreadyReversed, refundHoldSentence,
+  type RefundFact, type KnownPaymentLink, type ResolvedRefund,
+} from "@/lib/mollie-refund";
 import { resolveSupplierForImport } from "@/lib/supplier-registry";
 import { autoBoekenAllowed } from "@/lib/auto-boeken";
 import { createNotification } from "@/lib/notifications";
 import { reportHandledFailure } from "@/lib/report-handled";
 import { readDoubleBookingGuard } from "@/lib/bank-double-booking";
+import { fetchAllRowsForIds } from "@/lib/supabase-paginate";
 
 // mollie_settlements and mollie_payment_links are not in the generated types (mollie.sql is
 // applied by hand) — the same relaxed client the webhook uses, for the same reason.
@@ -108,8 +115,10 @@ export async function syncMollieSettlementsForOwner(pipeline: Pipeline, userId: 
         await upsertRow(pipeline, userId, s.id, { ...figures(summary), status: "held", last_error: payments.error });
         continue;
       }
-      const ourIds = await ourPaymentIds(pipeline, userId, conn.apiKey);
-      const split = splitPayments(payments, ourIds);
+      // [TERUGBETALING] The links themselves, not only their payment ids: a refund is tied to an
+      // invoice through exactly this mapping, and reading it twice would be two answers.
+      const links = await ourPaymentLinks(pipeline, userId, conn.apiKey);
+      const split = splitPayments(payments, new Set(links.map((l) => l.paymentId).filter(Boolean) as string[]));
 
       // ── Refunds and chargebacks: money in the settlement that is not a payment ──
       // A refund of one of OUR invoices leaves that invoice standing as paid while the money went
@@ -126,7 +135,36 @@ export async function syncMollieSettlementsForOwner(pipeline: Pipeline, userId: 
         await upsertRow(pipeline, userId, s.id, { ...figures(summary), status: "held", last_error: `terugbetalingen/chargebacks lezen mislukt: ${err}` });
         continue;
       }
-      const adjustments = refunds.length + chargebacks.length;
+
+      // [TERUGBETALING] Until now this was `refunds.length + chargebacks.length` and nothing more:
+      // the settlement was held and the event itself was never written down. So the invoice that
+      // payment settled stayed 'paid' while the money had gone back, the hold sentence was
+      // overwritten on the next run, and there was no way to find out WHICH sale it was about.
+      // Each one is now a row in mollie_refunds, tied through its paymentId to the invoice it
+      // un-pays, and it holds the settlement until the owner has answered it.
+      const readings = [
+        ...refunds.map((r) => refundFactFrom(r, "refund")),
+        ...chargebacks.map((c) => refundFactFrom(c, "chargeback")),
+      ];
+      const facts = readings.filter((f): f is RefundFact => f !== null);
+      const unreadable = readings.length - facts.length;
+      if (unreadable > 0) {
+        // Money moved back and we could not read it as money — a currency we do not book, an
+        // amount that will not parse. That is strictly worse than a refund we recorded, so it
+        // holds the settlement and says so, instead of being counted as nothing.
+        out.held++;
+        await upsertRow(pipeline, userId, s.id, {
+          ...figures(summary), status: "held",
+          last_error: `${unreadable} terugbetaling${unreadable === 1 ? "" : "en"} in deze afrekening kon ik niet lezen — beoordeel deze afrekening zelf`,
+        });
+        continue;
+      }
+      const recorded = await recordRefunds(pipeline, userId, s.id, resolveRefunds(facts, links));
+      // What still holds the settlement is what is still OPEN. A refund the owner has answered —
+      // reversed, credited, or "not mine" — has stopped being a question, and a settlement that
+      // held on answered questions would hold forever.
+      const adjustments = recorded.open.length;
+      const refundHold = refundHoldSentence(recorded.open);
 
       // ── The fee: a purchase from Mollie, paid by deduction ──
       const rowId = existing?.id ?? (await upsertRow(pipeline, userId, s.id, { ...figures(summary), status: "held" }));
@@ -153,9 +191,11 @@ export async function syncMollieSettlementsForOwner(pipeline: Pipeline, userId: 
 
       const feeDone = fee === null || feePaidAt !== null;
       const complete = feeDone && payoutTxId !== null && lineBlocked === null && lineVerdict === "transfer";
-      const reason = lineVerdict === "hold"
+      // The refund sentence wins when there is one: it names the thing the owner has to decide,
+      // where holdReason() can only say that something is off about this settlement.
+      const reason = refundHold ?? (lineVerdict === "hold"
         ? holdReason(split, summary, adjustments)
-        : lineBlocked ?? (payoutTxId === null ? "bankregel van de uitbetaling nog niet gevonden" : feeReason);
+        : lineBlocked ?? (payoutTxId === null ? "bankregel van de uitbetaling nog niet gevonden" : feeReason));
       await upsertRow(pipeline, userId, s.id, {
         ...figures(summary),
         linked_gross: split.linkedGross,
@@ -169,13 +209,24 @@ export async function syncMollieSettlementsForOwner(pipeline: Pipeline, userId: 
       });
       if (complete) out.booked++; else out.held++;
 
-      // Say it once: revenue the app never saw is the owner's to book, and silence would leave a
-      // bank credit that never explains itself.
-      if (lineVerdict === "hold" && !existing) {
+      // [TERUGBETALING] Money going back is its own bell, and it rings on the REFUND being new —
+      // not on the settlement being new. A refund often lands on a settlement we already knew and
+      // had already held; under the old condition that bell would never have rung at all.
+      if (recorded.inserted > 0) {
         await createNotification({
           userId,
           type: "payment",
-          title: adjustments > 0 ? "Mollie-uitbetaling met terugbetaling" : "Mollie-uitbetaling met omzet buiten BoekBrug",
+          title: "Geld terug via Mollie",
+          body: `${refundHold ?? "een terugbetaling werd verwerkt"} — afrekening ${summary.reference ?? s.id}`,
+          link: "/dashboard/settings",
+        });
+      } else if (lineVerdict === "hold" && !existing) {
+        // Say it once: revenue the app never saw is the owner's to book, and silence would leave a
+        // bank credit that never explains itself.
+        await createNotification({
+          userId,
+          type: "payment",
+          title: "Mollie-uitbetaling met omzet buiten BoekBrug",
           body: `Afrekening ${summary.reference ?? s.id}: ${holdReason(split, summary, adjustments)}`,
           link: "/dashboard/bank",
         });
@@ -213,21 +264,27 @@ async function upsertRow(pipeline: Pipeline, userId: string, settlementId: strin
 }
 
 /**
- * Which of these payment ids belong to a BoekBrug payment link. Learned once per link from the
+ * Our payment links, each with the Mollie payment it produced. Learned once per link from the
  * Payment Links API and stored on the link row, so the next settlement costs no calls.
+ *
+ * [TERUGBETALING] This used to return only the SET of payment ids, which was all splitPayments()
+ * needed. A refund needs the whole mapping: from Mollie's payment, to our link row (whose id is
+ * also the client_key of the bank_tx_invoices row that booked it), to the invoice. Returning the
+ * links instead of a projection of them means both readers answer from the same query.
  */
-async function ourPaymentIds(pipeline: Pipeline, userId: string, apiKey: string): Promise<Set<string>> {
+async function ourPaymentLinks(pipeline: Pipeline, userId: string, apiKey: string): Promise<KnownPaymentLink[]> {
   const { data: links, error } = await pipeline
     .from("mollie_payment_links")
-    .select("id, link_id, payment_id, status")
+    .select("id, link_id, payment_id, invoice_id, status")
     .eq("user_id", userId)
     .in("status", ["paid", "superseded", "open"]);
   if (error) throw new Error(`mollie_payment_links lezen mislukt: ${error.message}`);
-  const ours = new Set<string>();
-  const unknown: { id: string; link_id: string }[] = [];
-  for (const l of (links ?? []) as { id: string; link_id: string; payment_id: string | null; status: string }[]) {
-    if (l.payment_id) ours.add(l.payment_id);
-    else if (l.status === "paid") unknown.push({ id: l.id, link_id: l.link_id });
+  type Row = { id: string; link_id: string; payment_id: string | null; invoice_id: string | null; status: string };
+  const rows = (links ?? []) as Row[];
+  const learned = new Map<string, string>();
+  const unknown: Row[] = [];
+  for (const l of rows) {
+    if (!l.payment_id && l.status === "paid") unknown.push(l);
   }
   // Bounded per run; each link is looked up once ever, because the answer is stored below.
   for (const l of unknown.slice(0, 50)) {
@@ -235,13 +292,133 @@ async function ourPaymentIds(pipeline: Pipeline, userId: string, apiKey: string)
     if ("error" in payments) throw new Error(`betalingen van link ${l.link_id} lezen mislukt: ${payments.error}`);
     const paid = payments.find((p) => p.status === "paid") ?? payments[0];
     if (!paid) continue;
-    ours.add(paid.id);
+    learned.set(l.id, paid.id);
     // Remembered whenever it was found — a link's payment is its payment whichever settlement it
     // lands in. Remembering it only when it sat in THIS settlement re-fetched every older link on
     // every run, forever.
     await pipeline.from("mollie_payment_links").update({ payment_id: paid.id }).eq("id", l.id).eq("user_id", userId);
   }
-  return ours;
+  return rows.map((l) => ({
+    id: l.id,
+    paymentId: l.payment_id ?? learned.get(l.id) ?? null,
+    invoiceId: l.invoice_id ?? null,
+  }));
+}
+
+/** A mollie_refunds row as this file reads it back. */
+type RefundRow = {
+  id: string;
+  refund_id: string;
+  kind: "refund" | "chargeback";
+  invoice_id: string | null;
+  amount: number | string | null;
+  paid_snapshot: number | string | null;
+  resolution: string;
+};
+
+/**
+ * [TERUGBETALING] Write down every refund and chargeback in this settlement, and report which of
+ * them are still a question.
+ *
+ * Three things happen here, and the order matters:
+ *   1. what we already know is read, so a re-run of the cron records nothing twice — the unique
+ *      (user_id, refund_id) index is the backstop under a concurrent run, not the plan;
+ *   2. a NEW fact is written with paid_snapshot = the invoice's amount_paid at this moment. That
+ *      snapshot is the nulpunt that later makes "the reversal already happened" provable instead
+ *      of guessed;
+ *   3. an OPEN fact whose invoice has meanwhile dropped by at least the refunded amount is closed
+ *      as 'reversed'. The owner may undo a payment through the ordinary "Betaald" toggle without
+ *      ever seeing the refund panel, and a question that stays open after it has been answered
+ *      elsewhere is exactly how a panel becomes something people click past.
+ *
+ * A fact we cannot tie to an invoice is recorded all the same and stays OPEN. Not resolvable is
+ * not the same as not ours: payment ids are learned lazily (50 links per run above), so "we do not
+ * know this payment" is sometimes only "we have not looked yet". Closing it on our own would be
+ * the app answering a money question it was not able to read.
+ */
+async function recordRefunds(
+  pipeline: Pipeline, userId: string, settlementId: string, resolved: ResolvedRefund[],
+): Promise<{ open: RefundFact[]; inserted: number }> {
+  if (resolved.length === 0) return { open: [], inserted: 0 };
+
+  const read = async (): Promise<RefundRow[]> => {
+    const { data, error } = await pipeline
+      .from("mollie_refunds")
+      .select("id, refund_id, kind, invoice_id, amount, paid_snapshot, resolution")
+      .eq("user_id", userId)
+      .eq("settlement_id", settlementId);
+    if (error) throw new Error(`mollie_refunds lezen mislukt: ${error.message}`);
+    return (data ?? []) as RefundRow[];
+  };
+
+  const before = await read();
+  const known = new Set(before.map((r) => r.refund_id));
+
+  // Every invoice these facts touch, read ONCE — the snapshot of a new row and the self-heal of an
+  // open one are the same number, and reading it twice is how they would disagree.
+  const invoiceIds = [...new Set(
+    [...resolved.map((r) => r.invoiceId), ...before.map((r) => r.invoice_id)].filter(Boolean) as string[],
+  )];
+  const paidById = new Map<string, number | null>();
+  if (invoiceIds.length > 0) {
+    // [IN-CHUNK] The shape, not today's ceiling: an unchunked .in() dies at a few hundred ids with
+    // a 414 that supabase-js reports as an ordinary error, and a read that failed would be taken
+    // here for "no invoices" — which would write every snapshot as null.
+    const invs = await fetchAllRowsForIds<{ id: string; amount_paid: number | string | null }, string>(
+      invoiceIds,
+      (chunk, from, to) => pipeline
+        .from("invoices")
+        .select("id, amount_paid")
+        .in("id", chunk)
+        .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+        .order("id")
+        .range(from, to),
+    );
+    for (const i of invs) paidById.set(i.id, i.amount_paid === null ? null : Number(i.amount_paid));
+  }
+
+  let inserted = 0;
+  for (const r of resolved) {
+    if (known.has(r.fact.refundId)) continue;
+    const { error: insErr } = await pipeline.from("mollie_refunds").insert({
+      user_id: userId,
+      settlement_id: settlementId,
+      refund_id: r.fact.refundId,
+      kind: r.fact.kind,
+      payment_id: r.fact.paymentId,
+      link_id: r.linkId,
+      invoice_id: r.invoiceId,
+      amount: r.fact.amount,
+      created_on: r.fact.createdOn,
+      paid_snapshot: r.invoiceId ? paidById.get(r.invoiceId) ?? null : null,
+    });
+    // A second run of the cron loses the unique (user_id, refund_id) race. That is the index doing
+    // its job — the fact is recorded, just not by us — and never a reason to fail the settlement.
+    if (insErr && !/duplicate key|already exists|23505/i.test(insErr.message ?? "")) {
+      throw new Error(`terugbetaling vastleggen mislukt: ${insErr.message}`);
+    }
+    if (!insErr) inserted++;
+  }
+
+  const open: RefundFact[] = [];
+  const now = new Date().toISOString();
+  for (const row of inserted > 0 ? await read() : before) {
+    if (row.resolution !== "open") continue;
+    const amount = Number(row.amount);
+    if (row.invoice_id && refundAlreadyReversed({
+      paidSnapshot: row.paid_snapshot === null ? null : Number(row.paid_snapshot),
+      paidNow: paidById.get(row.invoice_id) ?? null,
+      amount,
+    })) {
+      // Scoped on resolution='open' so this cannot overwrite an answer the owner gave a second ago.
+      await pipeline.from("mollie_refunds")
+        .update({ resolution: "reversed", resolved_at: now, updated_at: now })
+        .eq("id", row.id).eq("user_id", userId).eq("resolution", "open");
+      continue;
+    }
+    open.push({ refundId: row.refund_id, kind: row.kind, paymentId: null, amount, createdOn: null });
+  }
+  return { open, inserted };
 }
 
 /**

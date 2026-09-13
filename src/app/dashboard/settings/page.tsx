@@ -16,6 +16,8 @@ import { VakCard } from '@/components/settings/VakCard'
 // [SNELSTART] Live koppeling met SnelStart (B2B-API) — koppelen, rekeningen kiezen, doorsturen
 import { SnelStartCard } from '@/components/settings/SnelStartCard'
 import { MollieCard } from '@/components/settings/MollieCard'
+// [TERUGBETALING] Onder de Mollie-kaart, en alleen als er iets te beslissen valt.
+import { TerugbetalingLijst } from '@/components/settings/TerugbetalingLijst'
 // [FACTUUR-B] numbering extraction (client-side live preview)
 import { previewInvoiceStart, reasonToDutch } from '@/lib/invoice-template'
 // [BRIDGE-POLISH 3a-3] formal validation for KVK / BTW / IBAN
@@ -914,6 +916,7 @@ export default function SettingsPage() {
 
         {/* [MOLLIE] iDEAL-betaallinks via het eigen Mollie-account van de eigenaar. */}
         <MollieCard />
+        <TerugbetalingLijst />
 
         {/* [BEVEILIGING] Verificatie in twee stappen stond hier, en staat nu op een eigen scherm.
             Eén plek om hem aan te zetten, en die plek staat naast het antwoord op de vraag die er

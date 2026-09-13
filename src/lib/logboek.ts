@@ -123,6 +123,10 @@ const KIND_BY_DOMAIN: Readonly<Record<string, LogboekKind | undefined>> = {
   // langs de administratie legt. Onder 'systeem' zou hij verdwijnen tussen de aanmeldingen.
   kasboek: "money",
   supplier: "money",
+  // [TERUGBETALING] Een terugbetaling of chargeback is geld dat het account verliet nadat het was
+  // binnengekomen. Onder Geld en nergens anders — het filter beantwoordt "waar is aan mijn geld
+  // gezeten", en dit is precies dat.
+  mollie: "money",
   // [WACHTKOPPELING] Een betaling die de eigenaar al deed en die de bank nog niet liet zien. Onder
   // Geld en nergens anders: het gaat over euro's die het account hebben verlaten, ook al is de
   // bankregel er nog niet — en het filter beantwoordt "waar is aan mijn geld gezeten".
@@ -249,6 +253,9 @@ const SENTENCE_KEYS: readonly MessageKey[] = [
   // of hij stopte ze. Ze staan in dit logboek en niet alleen in een intern spoor, omdat het de
   // eigenaar aangaat — "waarom had ik tot maart meer ruimte" is zijn vraag, niet die van ons.
   "log.control.grant_created", "log.control.grant_revoked",
+  // [TERUGBETALING] Geld dat via Mollie terugging. De eerste HAALDE een betaling van een factuur —
+  // dat is een boeking en hoort onder Geld te vinden zijn; de tweede legt alleen het antwoord vast.
+  "log.mollie.refund_reversed", "log.mollie.refund_answered",
 ];
 
 const SENTENCE_KEY_SET: ReadonlySet<string> = new Set<string>(SENTENCE_KEYS);

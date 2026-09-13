@@ -34290,3 +34290,132 @@ test("[EEN-KLUIS] the bucket is reached through one door", () => {
   assert.doesNotMatch(kluis, /createPipelineClient|createServerSupabaseClient|createClient\(/,
     "document-storage.ts builds its own client — then the caller can no longer see who is acting");
 });
+
+// ── [TERUGBETALING] Geld dat via Mollie terugging ────────────────────────────────────────────
+//
+// The one place in the payment surface where real money could leave the books silently: a refund
+// or a chargeback was READ, counted, and used only to hold a settlement. The invoice it un-paid
+// stayed 'paid'. These gates hold the four properties the fix rests on.
+
+test("[TERUGBETALING] a refund is RECORDED, not counted", () => {
+  const sync = code("src/lib/mollie-settlement-sync.ts");
+  // The old shape, by name: a bare count of both lists and nothing written down. It is forbidden
+  // rather than merely replaced, because it is the natural thing to write again.
+  assert.doesNotMatch(sync, /refunds\.length\s*\+\s*chargebacks\.length/,
+    "the sync counts refunds again instead of recording them — the invoice they un-pay stays paid");
+  assert.match(sync, /recordRefunds\(/, "nothing writes the refund down any more");
+  assert.match(sync, /mollie_refunds/, "the sync no longer touches the table that holds the fact");
+  // The snapshot is what makes "already reversed" provable later. Anchored on the INSERT and not
+  // on the word: `paid_snapshot` also appears in the SELECT two functions up, so /paid_snapshot:/
+  // alone passed with the write deleted — the gate was reading the read.
+  assert.match(sync, /paid_snapshot: r\.invoiceId \? paidById\.get\(r\.invoiceId\)/,
+    "a refund is recorded without the amount_paid snapshot, so the self-heal has no nulpunt");
+  // What HOLDS the settlement is what is still open, not what ever happened — otherwise an
+  // answered refund holds its settlement forever.
+  assert.match(sync, /const adjustments = recorded\.open\.length/,
+    "the settlement holds on refunds that have already been answered");
+});
+
+test("[TERUGBETALING] the bell rings on the refund being new, not on the settlement being new", () => {
+  const sync = code("src/lib/mollie-settlement-sync.ts");
+  // A refund usually lands on a settlement we already knew and had already held. Under the old
+  // `!existing` condition that notification would never have been sent at all.
+  // Anchored on the CONDITION itself. An earlier version cut a window at the first mention of
+  // `recorded.inserted > 0` and compared two indexOf()s inside it — which still passed with the
+  // condition mutated to `recorded.inserted > 0 && false`, because the mention was still there.
+  assert.match(sync, /if \(recorded\.inserted > 0\) \{[\s\S]{0,400}?createNotification\(/,
+    "the refund bell no longer fires on a newly recorded refund");
+  // And the settlement bell is the FALL-THROUGH, so the two can never both ring for one run.
+  assert.match(sync, /\} else if \(lineVerdict === "hold" && !existing\) \{/,
+    "the settlement bell is no longer the else of the refund bell");
+});
+
+test("[TERUGBETALING] the partial rule lives in ONE place and the route asks for it", () => {
+  // €100 back on a €300 payment: reversing the whole row takes two hundred euro off an invoice
+  // that really was paid. Every figure downstream stays internally consistent while being wrong,
+  // which is why this rule may not be re-derived at a second desk.
+  const route = code("src/app/api/mollie/terugbetaling/route.ts");
+  assert.match(route, /mayReverse\(/, "the route no longer asks the rule whether it may reverse");
+  assert.doesNotMatch(route, /Math\.abs\([^)]*amount/,
+    "the route compares the amounts itself instead of asking mayReverse");
+  // Inside the FUNCTION, not anywhere in the file: "partial-refund" is also a member of the
+  // ReverseRefusal union three screens up, so a file-wide match stayed green with the rule itself
+  // deleted. Cut on real code, and assert both ends were found — a slice on -1 runs to the end of
+  // the file and measures something far larger than it claims.
+  const pure = code("src/lib/mollie-refund.ts");
+  const van = pure.indexOf("export function mayReverse");
+  assert.ok(van > 0, "mayReverse is gone");
+  const tot = pure.indexOf("return { ok: true };", van);
+  assert.ok(tot > van, "the end of mayReverse could not be found");
+  assert.match(pure.slice(van, tot), /refusal: "partial-refund"/,
+    "mayReverse no longer refuses a partial refund — reversing would take the whole payment off");
+});
+
+test("[TERUGBETALING] the route answers in codes and the screen writes the sentences", () => {
+  // [SERVER-ZIN] in both directions, and the two lists check each other: a code with no sentence
+  // shows the owner nothing, and a sentence for a code the route cannot return is dead weight
+  // that outlives the reason it was written.
+  const route = readFileSync("src/app/api/mollie/terugbetaling/route.ts", "utf8");
+  const paneel = readFileSync("src/components/settings/TerugbetalingLijst.tsx", "utf8");
+
+  const refused = new Set<string>();
+  for (const m of route.matchAll(/refuse\('([a-z_]+)'/g)) refused.add(m[1]);
+  // The three that are the caller's fault, not a state the owner can read a sentence about.
+  for (const plumbing of ["invalid_body", "lookup_failed", "list_failed", "payment_lookup_failed", "save_failed", "reverse_failed", "not_found"]) {
+    refused.delete(plumbing);
+  }
+  assert.ok(refused.size >= 5, `expected the route to name the real refusals, saw ${[...refused].join(", ")}`);
+
+  const mapped = new Set<string>();
+  const kaart = paneel.slice(paneel.indexOf("const WEIGERING"), paneel.indexOf("export function TerugbetalingLijst"));
+  assert.ok(kaart.length > 40, "the WEIGERING map could not be cut out of the panel");
+  for (const m of kaart.matchAll(/^\s{2}([a-z_]+):/gm)) mapped.add(m[1]);
+
+  for (const c of refused) {
+    assert.ok(mapped.has(c), `the route refuses with '${c}' and the screen has no sentence for it`);
+  }
+  // The refusals mayReverse() produces reach the wire through `refusal.replace(/-/g, '_')`, so
+  // they never appear as a literal in the route. They are read from the pure module's own union
+  // instead of being waved through: an earlier version accepted ANY mapped code as soon as the
+  // route contained that replace() call, which made this whole direction vacuous.
+  assert.match(route, /verdict\.refusal\.replace\(\/-\/g, '_'\)/,
+    "the route no longer forwards mayReverse's refusals — this list is reading the wrong thing");
+  const pureSrc = readFileSync("src/lib/mollie-refund.ts", "utf8");
+  const unionStart = pureSrc.indexOf("export type ReverseRefusal");
+  assert.ok(unionStart > 0, "ReverseRefusal is gone — the refusals below cannot be enumerated");
+  const union = pureSrc.slice(unionStart, pureSrc.indexOf(";", unionStart));
+  for (const m of union.matchAll(/"([a-z-]+)"/g)) refused.add(m[1].replace(/-/g, "_"));
+
+  for (const c of mapped) {
+    assert.ok(refused.has(c), `the screen has a sentence for '${c}' that the route can never return`);
+  }
+  // And the route never ships Dutch of its own.
+  assert.doesNotMatch(route.replace(/\/\/[^\n]*/g, ""), /error:\s*['"][^'"]* [a-z]+ [a-z]+/,
+    "the route writes a sentence instead of a code");
+});
+
+test("[TERUGBETALING] nothing at rest: the panel renders nothing when there is nothing to decide", () => {
+  // [RUSTIG] A standing "no refunds" card on the settings page is exactly the kind of text the
+  // ratchet exists to keep out — and worse here, because a card that is usually empty is a card
+  // people stop reading on the day it is not.
+  const paneel = code("src/components/settings/TerugbetalingLijst.tsx");
+  assert.match(paneel, /if \(!refunds \|\| refunds\.length === 0\) return null/,
+    "the refund panel renders something when there is nothing to answer");
+});
+
+test("[TERUGBETALING] the reversal RPC derives, refuses a bank line, and is granted narrowly", () => {
+  const sql = readFileSync("supabase/migrations/invoice_reverse_payment.sql", "utf8");
+  // DERIVES. A subtract-from-amount_paid would drift the moment a second instalment exists.
+  assert.match(sql, /SELECT coalesce\(sum\(coalesce\(amount_applied, 0\)\), 0\) INTO v_sum/,
+    "the reversal subtracts instead of re-deriving amount_paid from the surviving links");
+  // The bank case belongs to /api/bank/unlink, which does four more things.
+  assert.match(sql, /payment has a bank line/,
+    "the reversal accepts a bank-linked payment — two doors reversing the same thing differently");
+  // The caller guard every money RPC in this repo carries.
+  assert.match(sql, /auth\.uid\(\) IS NOT NULL AND auth\.uid\(\) <> p_user_id/,
+    "the reversal RPC does not check the caller against p_user_id");
+  assert.match(sql, /REVOKE ALL ON FUNCTION public\.reverse_invoice_payment/,
+    "the reversal RPC is left executable by PUBLIC");
+  // The accountant's lock wins here as everywhere.
+  assert.match(sql, /verwerkt/, "the accountant lock is not checked before un-paying an invoice");
+});

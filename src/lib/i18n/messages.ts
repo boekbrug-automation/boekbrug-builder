@@ -13504,6 +13504,81 @@ export const MESSAGES = {
   // grenzen en niet «ترقية»: er is geen ander plan gekocht, er is meer ruimte gegeven.
   'log.control.grant_created': { nl: 'Ruimere grenzen toegekend', en: 'Wider limits granted', ar: 'مُنحت حدود أوسع', tr: 'Daha geniş sınırlar verildi' },
   'log.control.grant_revoked': { nl: 'Ruimere grenzen ingetrokken', en: 'Wider limits withdrawn', ar: 'سُحبت الحدود الأوسع', tr: 'Daha geniş sınırlar geri alındı' },
+  // [TERUGBETALING] «استرجاع» is het woord dat bank.storno.uitleg en bank.why.reversal al gebruiken
+  // voor teruggeboekt geld; hier niet opnieuw beslist ([AR-TERMEN]).
+  'log.mollie.refund_reversed': { nl: 'Betaling teruggedraaid na terugbetaling', en: 'Payment reversed after a refund', ar: 'أُلغيت الدفعة بعد استرجاع', tr: 'İade sonrası ödeme geri alındı' },
+  'log.mollie.refund_answered': { nl: 'Terugbetaling beantwoord', en: 'Refund answered', ar: 'تمت الإجابة عن الاسترجاع', tr: 'İade yanıtlandı' },
+
+  // ── [TERUGBETALING] Geld dat via Mollie terugging ───────────────────────────────────────────
+  // De kaart verschijnt alleen als er iets te beslissen valt ([RUSTIG]: niets in rust). De drie
+  // knoppen zijn de drie antwoorden; de app kiest er geen van, want een chargeback hoort van de
+  // factuur af en een terugbetaling is normaal een creditnota — zie mollie-refund.ts.
+  // [AR-TERMEN] «استرجاع» is teruggeboekt geld (bank.why.reversal gebruikt het al) en «رد المبلغ»
+  // is het teruggeven zelf; «إشعار دائن» is de creditnota, zoals overal elders in deze app.
+  'terugbetaling.titel': { nl: 'Geld terug via Mollie', en: 'Money refunded via Mollie', ar: 'أموال أُعيدت عبر Mollie', tr: "Mollie üzerinden iade edilen para" },
+  'terugbetaling.uitleg': {
+    nl: 'Dit geld ging terug naar de klant. Zeg wat er met de factuur moet gebeuren.',
+    en: 'This money went back to the customer. Say what should happen to the invoice.',
+    ar: 'عاد هذا المبلغ إلى العميل. حدّد ما يجب أن يحدث للفاتورة.',
+    tr: 'Bu para müşteriye geri gitti. Faturaya ne olması gerektiğini belirtin.',
+  },
+  'terugbetaling.soort.refund': { nl: 'Terugbetaling', en: 'Refund', ar: 'رد المبلغ', tr: 'İade' },
+  'terugbetaling.soort.chargeback': { nl: 'Chargeback', en: 'Chargeback', ar: 'ردّ قسري', tr: 'Ters ibraz' },
+  'terugbetaling.opFactuur': { nl: 'op factuur {number}', en: 'on invoice {number}', ar: 'على الفاتورة {number}', tr: '{number} numaralı faturada' },
+  'terugbetaling.geenFactuur': {
+    nl: 'Geen factuur van BoekBrug bij deze betaling',
+    en: 'No BoekBrug invoice behind this payment',
+    ar: 'لا توجد فاتورة من BoekBrug خلف هذه الدفعة',
+    tr: 'Bu ödemenin arkasında BoekBrug faturası yok',
+  },
+  'terugbetaling.knop.terugdraaien': { nl: 'Haal de betaling van de factuur', en: 'Take the payment off the invoice', ar: 'أزل الدفعة من الفاتورة', tr: 'Ödemeyi faturadan kaldır' },
+  'terugbetaling.knop.creditnota': { nl: 'Ik maak een creditnota', en: 'I will issue a credit note', ar: 'سأصدر إشعار دائن', tr: 'Bir iade faturası keseceğim' },
+  'terugbetaling.knop.nietVanMij': { nl: 'Hoort niet bij een factuur', en: 'Not about an invoice', ar: 'لا يخص فاتورة', tr: 'Bir faturayla ilgili değil' },
+  'terugbetaling.bezig': { nl: 'Bezig…', en: 'Working…', ar: 'جارٍ التنفيذ…', tr: 'Çalışıyor…' },
+  // [SERVER-ZIN] De route geeft codes; dit zijn de zinnen. [KNOP-IN-ZIN] de eerste noemt de knop
+  // zoals hij er nu staat — verandert dat woord, dan verandert deze zin mee.
+  'terugbetaling.fout.partial_refund': {
+    nl: 'Er kwam minder terug dan er is betaald. Kies «Ik maak een creditnota».',
+    en: 'Less came back than was paid. Choose «I will issue a credit note».',
+    ar: 'المبلغ العائد أقل مما دُفع. اختر «سأصدر إشعار دائن».',
+    tr: 'Geri gelen tutar ödenenden az. «Bir iade faturası keseceğim» seçin.',
+  },
+  'terugbetaling.fout.no_invoice': {
+    nl: 'Deze terugbetaling hoort bij geen enkele factuur van BoekBrug.',
+    en: 'This refund belongs to no BoekBrug invoice.',
+    ar: 'هذا الاسترجاع لا يخص أي فاتورة من BoekBrug.',
+    tr: 'Bu iade hiçbir BoekBrug faturasına ait değil.',
+  },
+  'terugbetaling.fout.payment_gone': {
+    nl: 'De betaling staat niet meer op de factuur.',
+    en: 'The payment is no longer on the invoice.',
+    ar: 'لم تعد الدفعة على الفاتورة.',
+    tr: 'Ödeme artık faturada değil.',
+  },
+  'terugbetaling.fout.accountant_lock': {
+    nl: 'Je boekhouder heeft deze factuur verwerkt. Vraag hem dat eerst terug te draaien.',
+    en: 'Your accountant has processed this invoice. Ask them to undo that first.',
+    ar: 'قام محاسبك بمعالجة هذه الفاتورة. اطلب منه التراجع عن ذلك أولاً.',
+    tr: 'Muhasebeciniz bu faturayı işledi. Önce bunu geri almasını isteyin.',
+  },
+  'terugbetaling.fout.has_bank_line': {
+    nl: 'Deze betaling heeft een bankregel — draai hem terug op de bankpagina.',
+    en: 'This payment has a bank line — reverse it on the bank page.',
+    ar: 'لهذه الدفعة سطر بنكي — تراجع عنها في صفحة البنك.',
+    tr: 'Bu ödemenin bir banka satırı var — banka sayfasından geri alın.',
+  },
+  'terugbetaling.fout.already_answered': {
+    nl: 'Deze vraag is al beantwoord.',
+    en: 'This question has already been answered.',
+    ar: 'تمت الإجابة عن هذا السؤال بالفعل.',
+    tr: 'Bu soru zaten yanıtlandı.',
+  },
+  'terugbetaling.fout.algemeen': {
+    nl: 'Dit lukte niet. Probeer het opnieuw.',
+    en: 'That did not work. Try again.',
+    ar: 'لم ينجح ذلك. حاول مرة أخرى.',
+    tr: 'Bu işe yaramadı. Tekrar deneyin.',
+  },
 
   // [LOGBOEK] The screen's own words. `log.onbekend` is the one that matters most: an action with
   // no sentence is still SHOWN, phrased neutrally and carrying its raw name — an audit trail that
