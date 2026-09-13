@@ -22,12 +22,13 @@ import {
 import type { Locale } from '@/lib/i18n/locale'
 // [SERVER-ZIN] Een code is geen zin: wat de route stuurt gaat hier langs failureText, dat een
 // Nederlandse zin doorlaat en een machinewoord vervangt door wat dit scherm zelf zegt.
-import { failureText } from '@/lib/server-message'
+import { failureText, serverSentence } from '@/lib/server-message'
 // [TAAL] Een component houdt geen eigen taal. De boekhouder is een ingelogde gebruiker met een
 // eigen taalinstelling — de eerste kantoren op dit product lezen Arabisch — en dit is precies het
 // scherm waarop een Nederlandse foutmelding het verschil is tussen een formulier dat hij afmaakt
 // en een dat hij laat staan.
 import { translator } from '@/lib/i18n/t'
+import type { MessageKey } from '@/lib/i18n/messages'
 import { useLocale } from '@/lib/i18n/use-locale'
 
 const card: React.CSSProperties = {
@@ -48,6 +49,20 @@ const knop: React.CSSProperties = {
 }
 const knopUit: React.CSSProperties = { ...knop, background: '#fff', color: '#1a73e8' }
 
+// [TAAL] Een MELDING is een sleutel, geen zin — behalve wanneer de server er zelf een stuurde, en
+// dan IS die zin het antwoord.
+//
+// Waarom niet gewoon t() aanroepen op het moment van zetten: dan staat de zin er in de taal van
+// tóén. Zet de boekhouder daarna zijn taal om en er staat nog steeds de oude, want het laad-effect
+// draait niet opnieuw — dat hoort maar één keer te draaien. De sleutel bewaren en pas bij het
+// renderen vertalen lost allebei op, en het is dezelfde vorm die `problemen` al heeft.
+//
+// Buiten de component, omdat het niets van de component nodig heeft: binnenin is het elke render
+// een nieuwe functie, en dan wil de dependency-regel hem in het laad-effect hebben — dat effect
+// zou dan bij iedere render opnieuw gaan ophalen.
+type Melding = { soort: 'sleutel'; sleutel: MessageKey } | { soort: 'server'; tekst: string }
+const sleutel = (k: MessageKey): Melding => ({ soort: 'sleutel', sleutel: k })
+
 export default function KantoorgidsPaneel() {
   const locale = useLocale()
   const t = translator(locale)
@@ -66,8 +81,9 @@ export default function KantoorgidsPaneel() {
   // Als string[] zou een willekeurige string hier langs de vertaler glippen en als sleutel op het
   // scherm belanden — 'gids.eis.naam' onder een veld is erger dan Nederlands onder een veld.
   const [problemen, setProblemen] = useState<DirectoryProblem[]>([])
-  const [fout, setFout] = useState<string | null>(null)
-  const [gelukt, setGelukt] = useState<string | null>(null)
+  const zegMaar = (m: Melding): string => (m.soort === 'sleutel' ? t(m.sleutel) : m.tekst)
+  const [fout, setFout] = useState<Melding | null>(null)
+  const [gelukt, setGelukt] = useState<Melding | null>(null)
 
   useEffect(() => {
     let levend = true
@@ -77,7 +93,10 @@ export default function KantoorgidsPaneel() {
         const json = await res.json().catch(() => null)
         if (!levend) return
         if (!res.ok) {
-          setFout(failureText(res.status, json, t('gids.fout.lezen')))
+          // Een zin van de server is al een zin en gaat er zo in; is er geen, dan onthouden we
+          // onze eigen sleutel en vertaalt het scherm hem straks in de taal van dat moment.
+          const zin = serverSentence(res.status, json)
+          setFout(zin === null ? sleutel('gids.fout.lezen') : { soort: 'server', tekst: zin })
           return
         }
         if (json?.entry) {
@@ -91,7 +110,7 @@ export default function KantoorgidsPaneel() {
         }
         setPublished(json?.published === true)
       } catch {
-        if (levend) setFout(t('gids.fout.lezen'))
+        if (levend) setFout(sleutel('gids.fout.lezen'))
       } finally {
         if (levend) setLaden(false)
       }
@@ -139,15 +158,13 @@ export default function KantoorgidsPaneel() {
       const json = await res.json().catch(() => null)
       if (!res.ok) {
         if (Array.isArray(json?.problems) && json.problems.length > 0) setProblemen(json.problems)
-        else setFout(failureText(res.status, json, t('gids.fout.opslaan')))
+        else setFout({ soort: 'server', tekst: failureText(res.status, json, t('gids.fout.opslaan')) })
         return
       }
       setPublished(json?.published === true)
-      setGelukt(json?.published === true
-        ? t('gids.opgeslagen.in')
-        : t('gids.opgeslagen.uit'))
+      setGelukt(sleutel(json?.published === true ? 'gids.opgeslagen.in' : 'gids.opgeslagen.uit'))
     } catch {
-      setFout(t('gids.fout.opslaan'))
+      setFout(sleutel('gids.fout.opslaan'))
     } finally {
       setBezig(false)
     }
@@ -157,11 +174,11 @@ export default function KantoorgidsPaneel() {
     setBezig(true); setFout(null); setGelukt(null); setProblemen([])
     try {
       const res = await fetch('/api/kantoorgids', { method: 'DELETE' })
-      if (!res.ok) { setFout(t('gids.fout.verwijderen')); return }
+      if (!res.ok) { setFout(sleutel('gids.fout.verwijderen')); return }
       setPublished(false)
-      setGelukt(t('gids.weg'))
+      setGelukt(sleutel('gids.weg'))
     } catch {
-      setFout(t('gids.fout.verwijderen'))
+      setFout(sleutel('gids.fout.verwijderen'))
     } finally {
       setBezig(false)
     }
@@ -262,10 +279,10 @@ export default function KantoorgidsPaneel() {
           </ul>
         )}
         {fout !== null && (
-          <p style={{ marginTop: 18, fontSize: 14, color: '#c5221f' }}>{fout}</p>
+          <p style={{ marginTop: 18, fontSize: 14, color: '#c5221f' }}>{zegMaar(fout)}</p>
         )}
         {gelukt !== null && (
-          <p style={{ marginTop: 18, fontSize: 14, color: '#137333' }}>{gelukt}</p>
+          <p style={{ marginTop: 18, fontSize: 14, color: '#137333' }}>{zegMaar(gelukt)}</p>
         )}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 22 }}>
