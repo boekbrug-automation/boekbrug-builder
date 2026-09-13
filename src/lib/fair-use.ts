@@ -62,6 +62,8 @@ export const NEAR_LIMIT_RATIO = 0.8;
 /** Meetperiode: een kalendermaand. Op de 1e van de maand begint alles opnieuw. */
 export const FAIR_USE_PERIOD = "kalendermaand" as const;
 
+import { keptCeiling } from "./fair-use-history";
+
 export type FairUseKey =
   | "aiDocuments"
   | "invoicesSent"
@@ -90,7 +92,8 @@ export interface FairUseLimit {
  * een winkel verwerkt tientallen inkoopbonnen, een ZZP'er stuurt er een handvol uit. De
  * grens ligt daar ruim boven, zodat "gratis" ook echt gratis blijft en niet een fuik is.
  * Wat de grens overschrijdt is bijna altijd een zaak die van BoekBrug zijn dagelijkse
- * gereedschap heeft gemaakt — en dan is €12,99 een eerlijke prijs.
+ * gereedschap heeft gemaakt — en dan is de Plus-prijs hierboven een eerlijke prijs.
+ * (Hier stond een bedrag overgetypt. Zie de kop van plan.ts: één bron, PLUS_PRICE_EUR.)
  */
 export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
   {
@@ -176,20 +179,72 @@ export function fairUseLimit(key: FairUseKey): FairUseLimit {
 }
 
 /**
+ * [GRENS-BLIJFT] De grens waar DIT account recht op heeft.
+ *
+ * Meestal precies wat hierboven staat. Anders wanneer §5.5.1 in het spel is: een grens die een
+ * bestaand account al had, verlagen wij niet — zie fair-use-history.ts, waar ook staat waarom die
+ * lijst leeg is en waarom een niet-dateerbaar account de ruimste uitkomst krijgt.
+ *
+ * Staat HIER en niet in dat bestand omdat hier de huidige getallen staan: zo houdt de geschiedenis
+ * geen tweede kopie van de grenzen bij, en loopt de afhankelijkheid één kant op.
+ */
+export function entitledLimit(
+  key: FairUseKey,
+  plan: "free" | "plus",
+  accountStartedAt: string | null | undefined,
+): number {
+  const limit = fairUseLimit(key);
+  return keptCeiling(key, plan, accountStartedAt, plan === "plus" ? limit.plus : limit.free);
+}
+
+/**
+ * Waar dit account MEER heeft dan wat wij vandaag publiceren — en hoeveel.
+ *
+ * Voor het scherm dat moet uitleggen waarom zijn getallen afwijken van /eerlijk-gebruik. Alleen de
+ * grenzen die echt verschillen, zodat een gewoon account een lege lijst oplevert en geen enkel
+ * scherm hoeft te beslissen of "hetzelfde" een zin waard is.
+ */
+export function keptLimits(
+  plan: "free" | "plus",
+  accountStartedAt: string | null | undefined,
+): Array<{ key: FairUseKey; kept: number; published: number }> {
+  const out: Array<{ key: FairUseKey; kept: number; published: number }> = [];
+  for (const limit of FAIR_USE_LIMITS) {
+    const published = plan === "plus" ? limit.plus : limit.free;
+    const kept = entitledLimit(limit.key, plan, accountStartedAt);
+    if (kept > published) out.push({ key: limit.key, kept, published });
+  }
+  return out;
+}
+
+/**
  * Toets het verbruik van een gratis account tegen de grenzen.
  *
  * Ontbrekende of onzinnige tellers (NaN, negatief) tellen als 0: bij twijfel is een
  * gebruiker binnen de grens. Iemand blokkeren op een kapotte teller is erger dan een maand
  * te veel weggeven.
  */
-export function evaluateFairUse(usage: UsageCounts, plan: "free" | "plus" = "free"): FairUseStatus {
+export function evaluateFairUse(
+  usage: UsageCounts,
+  plan: "free" | "plus" = "free",
+  /**
+   * [GRENS-BLIJFT] profiles.created_at. §5.5.1 promises that a limit an account already had is
+   * never lowered, so what this account is measured against is what IT is entitled to — not what
+   * FAIR_USE_LIMITS publishes today. Absent resolves to the most generous answer, so an untaught
+   * caller can only be too kind; see fair-use-history.ts for why that direction and not the other.
+   *
+   * Passed in rather than looked up because this module is pure and has no database, which is the
+   * same reason evaluateFairUse takes `usage` instead of counting it.
+   */
+  accountStartedAt?: string | null,
+): FairUseStatus {
   const exceeded: FairUseKey[] = [];
   const nearLimit: FairUseKey[] = [];
 
   for (const limit of FAIR_USE_LIMITS) {
     const raw = usage[limit.key];
     const used = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
-    const ceiling = plan === "plus" ? limit.plus : limit.free;
+    const ceiling = entitledLimit(limit.key, plan, accountStartedAt);
 
     if (used > ceiling) {
       exceeded.push(limit.key);
@@ -209,9 +264,22 @@ export function evaluateFairUse(usage: UsageCounts, plan: "free" | "plus" = "fre
   return { withinLimits: exceeded.length === 0, exceeded, nearLimit };
 }
 
-/** Leesbare weergave van een grens: "50 per maand", "2 GB". */
-export function formatLimit(limit: FairUseLimit, plan: "free" | "plus"): string {
-  const value = plan === "plus" ? limit.plus : limit.free;
+/**
+ * Leesbare weergave van een grens: "50 per maand", "2 GB".
+ *
+ * [GRENS-BLIJFT] `accountStartedAt` is optioneel en met opzet. Zónder is dit de GEPUBLICEERDE
+ * grens — wat /prijzen, /eerlijk-gebruik en de voorwaarden tonen, en dat hoort het aanbod van
+ * vandaag te zijn. Mét is het de grens die DIT account heeft, en die kan hoger liggen (§5.5.1).
+ * Een scherm dat een gebruiker vertelt waar hij tegenaan loopt hoort de tweede te tonen.
+ */
+export function formatLimit(
+  limit: FairUseLimit,
+  plan: "free" | "plus",
+  accountStartedAt?: string | null,
+): string {
+  const value = accountStartedAt === undefined
+    ? (plan === "plus" ? limit.plus : limit.free)
+    : entitledLimit(limit.key, plan, accountStartedAt);
   if (limit.unit === "MB") {
     return value >= 1024 ? `${Math.round(value / 1024)} GB` : `${value} MB`;
   }

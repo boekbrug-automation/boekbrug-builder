@@ -33,6 +33,8 @@ export const dynamic = 'force-dynamic'
 
 type BillingProfile = {
   role?: string | null
+  /** [GRENS-BLIJFT] Sinds wanneer dit account bestaat — §5.5.1 hangt eraan. Zie fair-use-history.ts. */
+  created_at?: string | null
   subscription_status?: string | null
   subscription_plan?: string | null
   current_period_end?: string | null
@@ -74,7 +76,7 @@ export default async function FactureringPage({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (supabase as any)
       .from('profiles')
-      .select('role, subscription_status, subscription_plan, current_period_end, stripe_customer_id')
+      .select('role, created_at, subscription_status, subscription_plan, current_period_end, stripe_customer_id')
       .eq('id', user.id)
       .single() as Promise<{ data: BillingProfile | null; error: unknown }>,
     // [TOEKENNING] Lopende toekenningen — de welkomstperiode, een pilot, een verlenging. Eigen
@@ -132,7 +134,12 @@ export default async function FactureringPage({
   // voor hen wordt er niets gemeten en niets getoond.
   const usage = decision.plan === 'boekhouder' ? {} : await measureUsage(supabase, user.id)
   const limitsPlan = limitsPlanFor(decision.plan)
-  const status = evaluateFairUse(usage, limitsPlan)
+  // [GRENS-BLIJFT] Gemeten tegen de grens waar DIT account recht op heeft, niet tegen wat wij
+  // vandaag publiceren. §5.5.1: een grens die je al had, verlagen wij niet. Vandaag is dat voor
+  // iedereen hetzelfde getal (de lijst met wijzigingen is leeg) — en dat hoort zo te blijven zonder
+  // dat iemand hier iets moet aanpassen op de dag dat er wél een wijziging is.
+  const startedAt = profile?.created_at ?? null
+  const status = evaluateFairUse(usage, limitsPlan, startedAt)
 
   return (
     /* [HEADER-SYSTEM] The title "Facturering" and the back chevron now come from
@@ -244,8 +251,8 @@ export default async function FactureringPage({
                     <span style={{ color: '#3c4043', lineHeight: 1.4 }}>{limit.label}</span>
                     <span style={{ color: kleur, fontWeight: 600, whiteSpace: 'nowrap' }}>
                       {known
-                        ? `${limit.unit === 'MB' ? formatMb(used) : used} / ${formatLimit(limit, limitsPlan)}`
-                        : `— / ${formatLimit(limit, limitsPlan)}`}
+                        ? `${limit.unit === 'MB' ? formatMb(used) : used} / ${formatLimit(limit, limitsPlan, startedAt)}`
+                        : `— / ${formatLimit(limit, limitsPlan, startedAt)}`}
                     </span>
                   </div>
                   <div style={{ height: 6, background: '#f1f3f4', borderRadius: 3, overflow: 'hidden' }}>

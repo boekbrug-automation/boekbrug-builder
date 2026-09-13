@@ -34,6 +34,7 @@ import {
   fairUseLimit,
   type FairUseKey,
   type UsageCounts,
+  entitledLimit,
 } from "./fair-use";
 
 /** De metrieken die echt geteld moeten worden. De rest wordt gemeten. */
@@ -66,9 +67,20 @@ export function currentPeriod(now: Date = new Date()): string {
  * dichtdraaien. Loopt een Plus-gebruiker structureel ver over zijn grens heen, dan is dat
  * een gesprek — precies zoals §8 van /eerlijk-gebruik het beschrijft.
  */
-export function limitForPlan(key: FairUseKey, plan: UsagePlan): number {
+export function limitForPlan(
+  key: FairUseKey,
+  plan: UsagePlan,
+  /**
+   * [GRENS-BLIJFT] profiles.created_at. §5.5.1: a limit an account already had is never lowered,
+   * so the ceiling that gates a costly action is the one THIS account is entitled to — not
+   * whatever FAIR_USE_LIMITS says today. Optional, and an absent value resolves to the most
+   * generous answer (fair-use-history.ts), so a caller that has not been taught to pass it can
+   * only be too kind. Never too strict: too strict is the breach.
+   */
+  accountStartedAt?: string | null,
+): number {
   if (plan !== "free") return 0;
-  return fairUseLimit(key).free;
+  return entitledLimit(key, "free", accountStartedAt);
 }
 
 export type ConsumeVerdict = {
@@ -96,9 +108,11 @@ export async function consumeFairUse(params: {
   plan: UsagePlan;
   amount?: number;
   now?: Date;
+  /** [GRENS-BLIJFT] profiles.created_at — see limitForPlan. */
+  accountStartedAt?: string | null;
 }): Promise<ConsumeVerdict> {
   const period = currentPeriod(params.now);
-  const limit = limitForPlan(params.metric, params.plan);
+  const limit = limitForPlan(params.metric, params.plan, params.accountStartedAt);
   const amount = Math.max(1, params.amount ?? 1);
 
   try {

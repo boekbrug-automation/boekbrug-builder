@@ -21,6 +21,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ACCOUNTANT_BANDS, ACCOUNTANT_PRICING_ACTIVE, inclBtw } from "@/lib/accountant-pricing";
+import { readFileSync } from "node:fs";
 
 import voorwaarden from "./algemene-voorwaarden";
 
@@ -107,4 +108,78 @@ test("the payment trigger stays growth, never the passage of time", () => {
     "§5.8 must keep the growth-not-time commitment",
   );
   assert.ok(voorwaarden.includes("Er is geen proefperiode die afloopt en geen maand-na-een-jaar"));
+});
+
+// ─── [GRENS-BLIJFT] The clause is not only written down — it runs ────────────────────────────
+//
+// The three tests above prove §5.5.1 still SAYS what it says. They were green for months while the
+// promise had no mechanism at all: FAIR_USE_LIMITS is a flat constant, and every reader took
+// whatever it said today. Lower one `free:` number and every existing account silently gets the
+// lower one — the clause breached, with the clause itself still on the page.
+//
+// A promise that only exists in the Terms is the shape this whole test file was written to catch,
+// one level down.
+
+/** Source with comments stripped — these files explain the mistake the gate looks for. */
+function code(path: string): string {
+  return readFileSync(path, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+}
+
+test("[GRENS-BLIJFT] the readers that decide what an ACCOUNT gets ask for its entitlement", () => {
+  // Two readers decide what an account is actually held to. Both must go through entitledLimit();
+  // reading FAIR_USE_LIMITS straight is the breach.
+  const usage = code("src/lib/fair-use-usage.ts");
+  assert.match(
+    usage, /return entitledLimit\(key, "free", accountStartedAt\);/,
+    "limitForPlan() is back to the published limit — that is the ceiling that PAUSES an action, so " +
+      "this is where §5.5.1 is either kept or quietly broken",
+  );
+
+  const fairUse = code("src/lib/fair-use.ts");
+  assert.match(
+    fairUse, /const ceiling = entitledLimit\(limit\.key, plan, accountStartedAt\);/,
+    "evaluateFairUse() measures against the published limit again — the owner would be told he is " +
+      "over a limit he was promised he still had",
+  );
+
+  // And the date has to REACH them, or the argument is decoration. planAndStartFor carries it out
+  // of the profiles row the gate already reads.
+  const gate = code("src/lib/fair-use-gate.ts");
+  assert.match(gate, /export async function planAndStartFor\(/);
+  assert.match(gate, /accountStartedAt: resolved\.startedAt,/, "the reservation no longer receives the date");
+  assert.match(
+    gate, /limit: entitledLimit\(params\.metric,/,
+    "the 402 answer names the published limit again — a refusal that quotes a number the owner is " +
+      "not held to tells him the promise was not kept",
+  );
+});
+
+test("[GRENS-BLIJFT] the history is append-only, dated, and carries its reason", () => {
+  const history = code("src/lib/fair-use-history.ts");
+  // Every entry must be datable and explainable. A change with no announcement date cannot be
+  // applied at all (§5.5.1 keys on the announcement), and one with no reason is unreadable in five
+  // years — which is when somebody will need it.
+  for (const field of ["announcedOn", "was", "note"]) {
+    assert.match(history, new RegExp(`${field}[?]?:`), `LimitChange lost its ${field}`);
+  }
+  assert.match(history, /export const LIMIT_CHANGES: readonly LimitChange\[\]/);
+
+  // The generosity direction, which is the whole safety argument: an account that cannot be dated,
+  // or a broken row in our own list, must never cost somebody a ceiling.
+  assert.match(history, /if \(announced !== null && started !== null && started > announced\) continue;/,
+    "an unreadable date now excludes the account from a limit it may be entitled to");
+});
+
+test("[GRENS-BLIJFT] what we PUBLISH stays today's offer, not somebody's kept limit", () => {
+  // The other half, and it is easy to get backwards. /prijzen and /eerlijk-gebruik describe what we
+  // offer NOW to someone who has no account yet. Feeding a personal entitlement into those pages
+  // would advertise one visitor's grandfathered ceiling to everyone.
+  const fairUse = code("src/lib/fair-use.ts");
+  const table = fairUse.slice(fairUse.indexOf("export function fairUseTableMarkdown"));
+  assert.doesNotMatch(table.slice(0, table.indexOf("}")), /entitledLimit/,
+    "the published table started resolving a personal entitlement");
+  assert.match(fairUse, /accountStartedAt === undefined/,
+    "formatLimit lost the distinction between the published limit and this account's");
 });

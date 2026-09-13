@@ -6653,9 +6653,16 @@ test("[EERLIJK-GEBRUIK-UITLEG] the fair-use refusal opens a modal and quotes pub
 
   // And the server has to send the limit, or the modal can only state a count with nothing to
   // place it against.
+  //
+  // [GRENS-BLIJFT] It is entitledLimit() now and not the published table, and that is a
+  // sharpening of this same assertion rather than a relaxation of it. §5.5.1 promises that a limit
+  // an account already had is never lowered, so for such an account the published number and the
+  // one it is actually held to are two different figures. Quoting the published one in a refusal
+  // would be the app naming a ceiling the owner was promised he had passed — a worse failure than
+  // naming none, because it looks like an answer.
   assert.match(
-    code("src/lib/fair-use-gate.ts"), /limit: plan === "plus" \? fairUseLimit\(params\.metric\)\.plus/,
-    "the 402 body must carry the limit beside the count",
+    code("src/lib/fair-use-gate.ts"), /limit: entitledLimit\(params\.metric, plan === "plus" \? "plus" : "free", resolved\.startedAt\)/,
+    "the 402 body must carry the limit THIS account is held to, beside the count",
   );
 });
 

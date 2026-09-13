@@ -28,7 +28,7 @@ import { NextResponse } from "next/server";
 import { decidePlan } from "./subscription";
 import { grantStanding, type GrantStanding, type PlanGrantRow } from "./plan-grants";
 import { consumeFairUse, exceededMessage, releaseFairUse, type UsagePlan } from "./fair-use-usage";
-import { fairUseLimit, type FairUseKey } from "./fair-use";
+import { entitledLimit, type FairUseKey } from "./fair-use";
 
 /** Minimale vorm van een Supabase-client die het profiel kan lezen. */
 type ProfileReader = {
@@ -44,6 +44,26 @@ type ProfileReader = {
  * de uitleg bij decidePlan() in subscription.ts.
  */
 export async function planForUser(client: ProfileReader, userId: string): Promise<UsagePlan> {
+  return (await planAndStartFor(client, userId)).plan;
+}
+
+/**
+ * [GRENS-BLIJFT] The same lookup, plus the day the account began.
+ *
+ * §5.5.1 promises that a limit an account already had is never lowered, so the ceiling a costly
+ * action is measured against depends on WHEN the account started. That date sits in the same
+ * profiles row this function already reads, so carrying it costs nothing — and fetching it
+ * separately would be a second query on the hot path of every AI read.
+ *
+ * `startedAt` is null whenever the read failed or the column was empty. That is not a gap to be
+ * filled with "today": fair-use-history.ts reads an absent date as the MOST generous answer,
+ * because withholding a promised limit is the failure nobody would ever see.
+ */
+export async function planAndStartFor(
+  client: ProfileReader,
+  userId: string,
+): Promise<{ plan: UsagePlan; startedAt: string | null }> {
+  let startedAt: string | null = null;
   try {
     // De abonnementskolommen komen uit billing_subscription.sql (met de hand toegepast) en
     // staan niet in de gegenereerde typen → ontspannen client. Bestaan ze nog niet, dan
@@ -51,9 +71,10 @@ export async function planForUser(client: ProfileReader, userId: string): Promis
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (client as any)
       .from("profiles")
-      .select("role, subscription_status, current_period_end")
+      .select("role, subscription_status, current_period_end, created_at")
       .eq("id", userId)
       .single();
+    if (data && typeof data.created_at === "string") startedAt = data.created_at;
 
     if (error || !data) {
       // Rol alsnog los proberen: een boekhouder mag nooit tegen een grens lopen, ook niet
@@ -61,10 +82,11 @@ export async function planForUser(client: ProfileReader, userId: string): Promis
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data: basic } = await (client as any)
         .from("profiles")
-        .select("role")
+        .select("role, created_at")
         .eq("id", userId)
         .single();
-      return basic?.role === "accountant" ? "boekhouder" : "free";
+      if (basic && typeof basic.created_at === "string") startedAt = basic.created_at;
+      return { plan: basic?.role === "accountant" ? "boekhouder" : "free", startedAt };
     }
 
     // [TOEKENNING] Lopende toekenningen erbij: de welkomstperiode van 90 dagen, een pilot van een
@@ -83,16 +105,19 @@ export async function planForUser(client: ProfileReader, userId: string): Promis
       // standing blijft leeg — zie hierboven.
     }
 
-    return decidePlan({
-      role: data.role ?? null,
-      subscriptionStatus: data.subscription_status ?? null,
-      currentPeriodEnd: data.current_period_end ?? null,
-      grantedPlusUntil: standing.grantedPlusUntil,
-      grantOpenEnded: standing.grantOpenEnded,
-      nowMs: new Date().getTime(),
-    }).plan;
+    return {
+      plan: decidePlan({
+        role: data.role ?? null,
+        subscriptionStatus: data.subscription_status ?? null,
+        currentPeriodEnd: data.current_period_end ?? null,
+        grantedPlusUntil: standing.grantedPlusUntil,
+        grantOpenEnded: standing.grantOpenEnded,
+        nowMs: new Date().getTime(),
+      }).plan,
+      startedAt,
+    };
   } catch {
-    return "free";
+    return { plan: "free", startedAt };
   }
 }
 
@@ -159,8 +184,18 @@ export async function gateFairUse(params: {
   /** Al bekend? Dan schelen we een profielquery. */
   plan?: UsagePlan;
 }): Promise<FairUseGate> {
-  const plan = params.plan ?? (await planForUser(params.client, params.userId));
-  const verdict = await consumeFairUse({ userId: params.userId, metric: params.metric, plan });
+  // [GRENS-BLIJFT] One lookup, two answers: which plan, and since when. The second decides which
+  // ceiling §5.5.1 entitles this account to — see planAndStartFor.
+  const resolved = params.plan
+    ? { plan: params.plan, startedAt: null as string | null }
+    : await planAndStartFor(params.client, params.userId);
+  const plan = resolved.plan;
+  const verdict = await consumeFairUse({
+    userId: params.userId,
+    metric: params.metric,
+    plan,
+    accountStartedAt: resolved.startedAt,
+  });
 
   if (verdict.allowed) {
     let released = false;
@@ -194,7 +229,10 @@ export async function gateFairUse(params: {
         // "je hebt er 50 gebruikt" and not what 50 is out of — which is the difference between a
         // number and an explanation. Taken from the same table /eerlijk-gebruik publishes, so the
         // modal, the policy page and Instellingen cannot disagree.
-        limit: plan === "plus" ? fairUseLimit(params.metric).plus : fairUseLimit(params.metric).free,
+        // [GRENS-BLIJFT] The ceiling THIS account has, not the one we publish today. A refusal
+        // that names a number the owner is not actually held to is worse than no number: it is the
+        // app telling him the promise was not kept.
+        limit: entitledLimit(params.metric, plan === "plus" ? "plus" : "free", resolved.startedAt),
         plan,
         // Waar de gebruiker heen kan. Twee uitwegen, allebei goed — precies zoals
         // /eerlijk-gebruik §4 het beschrijft.
