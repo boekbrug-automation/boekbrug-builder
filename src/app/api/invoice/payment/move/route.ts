@@ -29,7 +29,7 @@ import {
 } from "@/lib/payment-move";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { reconcileCashWithRetry } from "@/lib/cash-settle";
-import { requireOwner } from '@/lib/owner-only'
+import { requireOwnerPermission } from '@/lib/access/context'
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +44,7 @@ const INVOICE_FIELDS =
 export async function GET(req: NextRequest) {
   // [ACTING-FOR] Alleen de eigenaar — zie src/lib/owner-only.ts. Een medewerker hier
   // doorlaten zou een tweede nummerreeks onder hetzelfde BTW-nummer openen.
-  { const w = await requireOwner('Een betaling verplaatsen'); if (w.response) return w.response }
+  { const w = await requireOwnerPermission('payment.allocate', 'Een betaling verplaatsen'); if (w.response) return w.response }
 
   const supabase = await createServerSupabaseClient();
   const {
@@ -244,7 +244,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   // [ACTING-FOR] Alleen de eigenaar — zie src/lib/owner-only.ts. Een medewerker hier
   // doorlaten zou een tweede nummerreeks onder hetzelfde BTW-nummer openen.
-  { const w = await requireOwner('Een betaling verplaatsen'); if (w.response) return w.response }
+  { const w = await requireOwnerPermission('payment.allocate', 'Een betaling verplaatsen'); if (w.response) return w.response }
 
   const supabase = await createServerSupabaseClient();
   const {

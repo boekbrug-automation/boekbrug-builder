@@ -39,7 +39,7 @@ import { fetchAllRowsForIds } from "@/lib/supabase-paginate";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { logAuditAction, getClientIP } from "@/lib/audit";
-import { requireOwner } from "@/lib/owner-only";
+import { requireOwnerPermission } from "@/lib/access/context";
 import { resolvePaymentPlan, remainderNote, type PlanInvoice, type PlanLine } from "@/lib/payment-plan";
 import { round2 } from "@/lib/invoice-totals";
 import { allocatedOnLine } from "@/lib/bank-line-budget";
@@ -58,7 +58,7 @@ export async function POST(req: NextRequest) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   // [OWNER-ONLY] Booking money is the owner's own act — a linked accountant may look, never book.
-  const { response: notOwner } = await requireOwner("Een betaling boeken");
+  const { response: notOwner } = await requireOwnerPermission("payment.allocate", "Een betaling boeken");
   if (notOwner) return notOwner;
 
   let body: { transactionId?: string; lines?: PlanLine[] };

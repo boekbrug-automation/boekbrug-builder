@@ -17,6 +17,7 @@ import { quarterBounds, figuresOf, readFiling, readFilingWithCarry } from "@/lib
 // [KAS-NEGATIEF] The same drawer witness /dashboard/klaar blocks on — see the gate below.
 import { loadDrawerWitness } from "@/lib/drawer-witness";
 import { logAuditAction, getClientIP } from "@/lib/audit";
+import { requirePermission } from "@/lib/access/context";
 // [TZ] "Has this quarter ended?" is an Amsterdam-day question — see the filing-window gate below.
 import { amsterdamToday, formatDateNL } from "@/lib/format-nl";
 import { telWoord, vervoeg } from "@/lib/nl-plural";
@@ -83,6 +84,15 @@ export async function POST(req: NextRequest) {
   const supabase = await createServerSupabaseClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // [EEN-POORT] `vat.submit`. This is the declaration itself — the figures frozen here are what
+  // the owner says they told the Belastingdienst, and the lock that follows is what makes every
+  // later divergence read as a suppletie. Nobody but the owner of the administration declares it:
+  // art. 52 AWR leaves that duty with the entrepreneur, which is also why a mandated accountant
+  // holds `vat.submit` nowhere in the catalogue.
+  {
+    const gate = await requirePermission("vat.submit", { ownerId: user.id });
+    if (gate.response) return gate.response;
+  }
 
   const body = await req.json().catch(() => ({}));
   const period = parsePeriod(body?.year, body?.quarter);
@@ -250,6 +260,15 @@ export async function POST(req: NextRequest) {
   // race-proof rather than merely guarded: two tabs that both read "not filed" cannot both write —
   // the unique (user_id, year, quarter) constraint refuses the second, and 23505 is answered with
   // the same "already_filed" question the check above asks, on fresher facts.
+  // [EEN-POORT] `period.close`, named at the line that actually closes. In this product filing a
+  // quarter IS closing it — this row is the lock every other screen reads — so the two permissions
+  // live on one handler rather than on two doors that do not exist. They are asked separately
+  // because they are two different acts: `vat.submit` is the declaration, this is the freeze, and
+  // `period.reopen` in the DELETE below is the only thing that undoes it.
+  {
+    const gate = await requirePermission("period.close", { ownerId: user.id });
+    if (gate.response) return gate.response;
+  }
   const { error } = replacing
     ? await db.from("btw_filings").upsert(snapshot, { onConflict: "user_id,year,quarter" })
     : await db.from("btw_filings").insert(snapshot);
@@ -298,6 +317,14 @@ export async function DELETE(req: NextRequest) {
   const supabase = await createServerSupabaseClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // [EEN-POORT] `period.reopen`, and the header below says why it is exactly as consequential as
+  // filing: the lock comes off, the divergence signal disappears, and the figures the owner
+  // declared stop being recorded anywhere. A protected operation gets a named permission, not a
+  // session check.
+  {
+    const gate = await requirePermission("period.reopen", { ownerId: user.id });
+    if (gate.response) return gate.response;
+  }
 
   const sp = req.nextUrl.searchParams;
   const period = parsePeriod(sp.get("year"), sp.get("quarter"));

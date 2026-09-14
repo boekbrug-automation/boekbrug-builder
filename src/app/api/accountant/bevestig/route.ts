@@ -30,7 +30,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
 import { createNotification } from '@/lib/notifications'
-import { canConfirmForClientServer } from '@/lib/acting-for-server'
+import { can } from '@/lib/access/context'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { logAuditAction, getClientIP } from '@/lib/audit'
 import { creditnotaSignConflict } from '@/lib/creditnota-signal'
@@ -61,9 +61,14 @@ export async function POST(request: NextRequest) {
 
     // De machtiging, en precies de juiste soort. Een factuurmandaat geeft hier niets —
     // zie canConfirmForClient() in accountant-mandate.ts.
-    if (!(await canConfirmForClientServer(klantId))) {
+    // [EEN-POORT] Through the one catalogue: `expense.approve`, whose MANDATE_PROOF says the
+    // CONFIRMING switch is what proves it — an invoicing mandate gives nothing here, exactly as
+    // canConfirmForClient() has always said. The decision moved; the sentence did not, because it
+    // is what the accountant reads on the screen.
+    const besluit = await can('expense.approve', { ownerId: klantId }, klantId)
+    if (!besluit.allowed) {
       return NextResponse.json(
-        { error: 'Je hebt geen toestemming om namens deze klant te bevestigen' },
+        { error: 'Je hebt geen toestemming om namens deze klant te bevestigen', code: besluit.reasonCode },
         { status: 403 },
       )
     }

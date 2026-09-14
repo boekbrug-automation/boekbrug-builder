@@ -26,7 +26,7 @@ import { logAuditAction, getClientIP } from "@/lib/audit";
 // [MANUAL-PARTIAL-PAY] one shape for a booked payment — the write path and the replay path
 // must answer identically, or the clients cannot tell a deelbetaling from a settlement.
 import { buildPaymentResult } from "@/lib/partial-payment";
-import { requireOwner } from '@/lib/owner-only'
+import { requireOwnerPermission } from '@/lib/access/context'
 // [HAND-DUBBEL] One definition of "these two rows are the same invoice" — the pay screen's own.
 import { findPayableDuplicates, duplicateWarningText, type DuplicateCandidateRow } from "@/lib/duplicate-payable";
 import { round2 } from "@/lib/invoice-totals";
@@ -65,7 +65,7 @@ type LinkRow = {
 export async function POST(req: NextRequest) {
   // [ACTING-FOR] Alleen de eigenaar — zie src/lib/owner-only.ts. Een medewerker hier
   // doorlaten zou een tweede nummerreeks onder hetzelfde BTW-nummer openen.
-  { const w = await requireOwner('Een factuur op betaald zetten'); if (w.response) return w.response }
+  { const w = await requireOwnerPermission('payment.create', 'Een factuur op betaald zetten'); if (w.response) return w.response }
 
   const supabase = await createServerSupabaseClient();
   const { data: { user } } = await supabase.auth.getUser();

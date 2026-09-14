@@ -44,11 +44,37 @@ test("[EEN-POORT] no role may move money or close a period except the owner", ()
 });
 
 test("[EEN-POORT] an accountant never reaches further than a mandate", () => {
+  // This used to read `s === "none" || s === "mandated"`, and it failed the day the catalogue was
+  // corrected against the rules the product actually ships. The letter was wrong, not the code:
+  // `own` is NARROWER than `mandated`, not wider. It requires the resource to belong to the
+  // administration being acted for — which for an accountant is only ever the one
+  // getActingForClient() proved — AND the row to have been created by this actor. A mandate is
+  // permission to write invoices in someone's name; it was never permission to finish or re-price
+  // the ones the client wrote themselves, and `own` is how the catalogue says that.
+  //
+  // The scope that WOULD reach past a mandate is `administration`: everything in the client's
+  // books, regardless of who made it. That is the one an accountant may never hold.
   for (const p of PERMISSIONS) {
     const s = scopeFor("boekhouder", p);
-    assert.ok(s === "none" || s === "mandated",
-      `an accountant holds ${p} at scope ${s} — that reaches past the mandate`);
+    assert.notEqual(s, "administration",
+      `an accountant holds ${p} over the whole administration — that reaches past the mandate`);
   }
+});
+
+test("[EEN-POORT] what an accountant may WRITE stays narrowed to what they made themselves", () => {
+  // Pinned one by one rather than by a predicate, because the drift that matters here is from
+  // `own` to `mandated` — still "inside the mandate", still a widening from "the invoices I typed
+  // for this client" to "every invoice this client has". canAccessInvoice() draws that line, and
+  // decision.test.ts asserts authorize() draws it in the same place.
+  for (const p of ["invoice.finalize", "invoice.send", "invoice.credit",
+    "invoice.create", "invoice.update"] as Permission[]) {
+    assert.equal(scopeFor("boekhouder", p), "own",
+      `${p} reaches past the invoices this accountant made for this client`);
+  }
+  // And approving an expense is deliberately NOT `own`: the purchase invoices an accountant signs
+  // off are the CLIENT's, never the accountant's own typing. It rests on the other mandate kind —
+  // MANDATE_PROOF — which is why it can be wider without being wider than a grant.
+  assert.equal(scopeFor("boekhouder", "expense.approve"), "mandated");
 });
 
 test("[EEN-POORT] a sales member's invoices are their OWN, and access control is not theirs", () => {

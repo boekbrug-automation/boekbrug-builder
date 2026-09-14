@@ -12626,7 +12626,13 @@ test("[CREDIT-NAMENS] a mandated accountant may credit their own issuance, throu
 
   // The wall. If this line ever loosens, a third party can lower another company's turnover and
   // reclaim its BTW on a document that company never touched.
-  assert.match(route, /if \(!canAccessInvoice\(acting, original\)\)/,
+  // [EEN-POORT] Asked of the catalogue by name now — `invoice.credit`, whose scope for a
+  // boekhouder is `own` — instead of through canAccessInvoice(). Same rule: decision.test.ts
+  // asserts the two agree on every combination of role, administration and creator. What must not
+  // change is that BOTH facts travel into the question: an administration with no creator beside
+  // it would make a boekhouder and a medewerker exactly as wide as the owner.
+  assert.match(route,
+    /authorize\(contextFromActing\(acting\), 'invoice\.credit', \{[\s\S]{0,160}?ownerId: original\.sender_id,[\s\S]{0,80}?createdBy: original\.created_by,[\s\S]{0,40}?\}\)\.allowed/,
     "the per-invoice check stays, and stays the narrow one");
 
   // [RLS-UIT] The accountant's session cannot see the client's rows, so the reads and writes run
@@ -13382,7 +13388,9 @@ test("[REGEL-FACTUUR] no btw on a purchase without a document, the guard is aske
   assert.match(route, /recordPaymentLinks\(pipeline, user\.id, transactionId, \[invoiceId\], \{ \[invoiceId\]: d\.totalIncBtw \}\)/, "the join row carries the amount");
   assert.match(route, /source: "created"/);
   assert.match(route, /_btw_withheld_no_document: d\.btwWithheldNoDocument/, "the reason for a 0 stays on the row");
-  assert.match(route, /requireOwner\(/);
+  // [EEN-POORT] Still owner-only, and now the capability is named: making an invoice out of a
+  // bank line IS bank matching, and a sales member holds `bank.match` nowhere.
+  assert.match(route, /requireOwnerPermission\("bank\.match", "Een factuur maken van een bankregel"\)/);
   const sheet = code("src/components/bank/LijnFactuurSheet.tsx");
   assert.match(sheet, /const btwOff = isPurchase && !hasDoc;/, "the screen mirrors the rule: chips off without a document");
   assert.match(code("src/app/dashboard/bank/BankClient.tsx"), /<LijnFactuurSheet/);
@@ -34734,9 +34742,13 @@ test("[EEN-POORT] no authorization mechanism reaches further than its registered
   for (const m of ACCESS_REGISTER) {
     // The register describes the rest of the app, never itself: a needle counted inside
     // access/register.ts would make every mechanism look one file wider than it is.
+    // Through code(), not readFileSync: a needle that also appears in a COMMENT counted a file
+    // that had already been migrated — /invoice/send still "used" canSendInvoice because its new
+    // comment says which rule authorize() replaced. A ratchet measuring prose is not a ratchet.
+    // SQL keeps the raw read; code() strips // and /* */, not --.
     const count = bestanden[m.where]
       .filter((f) => !f.startsWith("src/lib/access/"))
-      .filter((f) => readFileSync(f, "utf8").includes(m.needle)).length;
+      .filter((f) => (m.where === "migrations" ? readFileSync(f, "utf8") : code(f)).includes(m.needle)).length;
     gemeten.push(`${m.key}=${count}/${m.ceiling}`);
     assert.ok(count <= m.ceiling,
       `[${m.klass}] ${m.key} now reaches ${count} files, ceiling ${m.ceiling}. ${m.note}\n` +
@@ -34794,8 +34806,12 @@ test("[EEN-POORT] the context is the promotion of the existing resolver, not a s
   assert.doesNotMatch(ctx, /from\(\s*["']company_members["']\s*\)/,
     "the canonical context queries membership itself — that is the ninth mechanism");
   // An accountant is never 'an accountant' in general: the mandate travels for ONE client.
-  assert.match(ctx, /mandatedOwnerIds: acting\.role === "boekhouder" \? \[acting\.ownerId\] : \[\]/,
+  assert.match(ctx, /mandatedOwnerIds: boekhouder \? \[acting\.ownerId\] : \[\]/,
     "an accountant's mandate reaches further than the client that was asked for and proved");
+  // And the two mandates stay two. An invoicing grant filled into the confirming list would hand
+  // every invoicing accountant the sign-off their client never switched on.
+  assert.match(ctx, /confirmMandatedOwnerIds: boekhouder && mayConfirm \? \[acting\.ownerId\] : \[\]/,
+    "the confirming list is filled from something other than the confirming mandate");
 });
 
 test("[EEN-POORT] a mandate counts only for somebody who IS an accountant, in both spellings", () => {
@@ -34812,4 +34828,121 @@ test("[EEN-POORT] a mandate counts only for somebody who IS an accountant, in bo
   const ts = code("src/lib/accountant-mandate.ts");
   assert.match(ts, /callerRole/,
     "resolveAccountantActing no longer reads the caller's role — then SQL is the only spelling again");
+});
+
+// ── [EEN-POORT-DEUR] The high-risk money routes ask the catalogue, by name ────────────────────
+//
+// The engine landed first and the routes second, which is the right order and also the dangerous
+// one: a canonical decision nothing calls is a document. These gates measure the calling.
+//
+// The thing they are really guarding against is subtler than "somebody removed a check". It is
+// that the catalogue could DISAGREE with the product and nobody would notice, because the
+// catalogue is only read where it is asked. permissions.ts said a boekhouder holds `invoice.send`
+// nowhere while /api/invoice/send has carried `namens_klant_id` since [CREDIT-NAMENS]; migrating
+// that route onto the catalogue as it stood would have taken accountant invoicing away from every
+// mandated accountant, on the door that mints invoice numbers. decision.test.ts now asserts the
+// two rules equal on every combination; these gates assert the routes actually ask.
+
+test("[EEN-POORT-DEUR] every protected operation is declared as having a door, or as not having one", async () => {
+  const { PROTECTED_OPERATIONS } = await import("./access/permissions");
+  const { PROTECTED_DOORS, PROTECTED_WITHOUT_DOOR } = await import("./access/register");
+
+  for (const p of PROTECTED_OPERATIONS) {
+    const heeft = Object.prototype.hasOwnProperty.call(PROTECTED_DOORS, p);
+    const niet = Object.prototype.hasOwnProperty.call(PROTECTED_WITHOUT_DOOR, p);
+    assert.ok(heeft || niet,
+      `${p} is protected and appears in neither map — a capability nobody decided about is a ` +
+        "silence, and §38 says a protected operation may not rest on a session");
+    assert.ok(!(heeft && niet), `${p} is declared both with and without a door`);
+  }
+  // And nothing may be declared that is not protected: a door list that drifts away from the
+  // catalogue stops describing it.
+  for (const key of [...Object.keys(PROTECTED_DOORS), ...Object.keys(PROTECTED_WITHOUT_DOOR)]) {
+    assert.ok((PROTECTED_OPERATIONS as readonly string[]).includes(key),
+      `${key} is declared as a door but is not a protected operation`);
+  }
+  // Pinned exactly, like a frozen class: closing one of these is an edit somebody can see.
+  assert.equal(Object.keys(PROTECTED_WITHOUT_DOOR).length, 4,
+    "the list of protected operations without a door changed — lower it when you close one, and " +
+      "write down the reason when you add one");
+});
+
+test("[EEN-POORT-DEUR] each declared door really names its permission, and asks the catalogue", async () => {
+  const { PROTECTED_DOORS } = await import("./access/register");
+
+  let gemeten = 0;
+  for (const [permission, files] of Object.entries(PROTECTED_DOORS)) {
+    assert.ok(files.length > 0, `${permission} declares a door list with nothing in it`);
+    for (const f of files) {
+      assert.ok(existsSync(f), `${permission} names ${f}, which does not exist`);
+      const bron = code(f);
+      // Spelled exactly, in quotes: a permission assembled from a variable cannot be read here and
+      // cannot be read by the next person either.
+      assert.ok(bron.includes(`"${permission}"`) || bron.includes(`'${permission}'`),
+        `${f} is declared as the door for ${permission} but never names it`);
+      // And it must reach the canonical decision — not merely mention the word in a string.
+      assert.match(bron, /requirePermission\(|requireOwnerPermission\(|authorize\(|\bcan\(/,
+        `${f} names ${permission} without asking the catalogue anything`);
+      gemeten++;
+    }
+  }
+  assert.ok(gemeten >= 14, `expected every declared door to be measured, saw ${gemeten}`);
+});
+
+test("[EEN-POORT-DEUR] the migrated money routes no longer hold the role test they came off", () => {
+  // Six routes moved from requireOwner() to requireOwnerPermission(). The move is only real if the
+  // old call is gone: two doors on one handler would mean the second one decides and the first is
+  // decoration — and decoration is what gets deleted by the next person "cleaning up".
+  for (const f of [
+    "src/app/api/invoice/pay-toggle/route.ts",
+    "src/app/api/invoice/payment/move/route.ts",
+    "src/app/api/bank/allocate/route.ts",
+    "src/app/api/bank/storno/route.ts",
+    "src/app/api/bank/line-invoice/route.ts",
+    "src/app/api/mollie/terugbetaling/route.ts",
+  ]) {
+    const bron = code(f);
+    assert.doesNotMatch(bron, /requireOwner\(/, `${f} answers the same question twice`);
+    assert.match(bron, /requireOwnerPermission\(\s*["'][a-z]+\.[a-z_]+["']/,
+      `${f} no longer names a capability at its door`);
+  }
+});
+
+test("[EEN-POORT-DEUR] the named door says exactly what the role test said, word for word", () => {
+  // The whole point of requireOwnerPermission() is that the DECISION moves and the ANSWER does
+  // not: a dozen screens read `error` and show it. If these two sentences ever differ, a money
+  // screen starts showing `access.missing_permission` to a Dutch entrepreneur — a regression
+  // dressed as an improvement, and one that no type would catch.
+  const zin = (bron: string): string => {
+    const m = bron.match(/kan alleen de eigenaar van de administratie doen\.[^`"']*/);
+    assert.ok(m, "the refusal sentence is not where it was");
+    return m![0];
+  };
+  const oud = zin(code("src/lib/owner-only.ts"));
+  const nieuw = zin(code("src/lib/access/context.ts"));
+  assert.equal(nieuw, oud, "the canonical door and the role test refuse in different words");
+  // And the status codes: 401 with no session, 403 for a member. Not the other way round — a 403
+  // to somebody who is not logged in sends the client to a "vraag je werkgever" screen.
+  const ctx = code("src/lib/access/context.ts");
+  assert.match(ctx, /access\.no_session"\)\s*\{[\s\S]{0,200}?status: 401/,
+    "requireOwnerPermission stopped answering 401 when there is no session");
+});
+
+test("[EEN-POORT-DEUR] a confirming mandate and an invoicing mandate stay two different proofs", () => {
+  // One accountant may hold either, both or neither. Reading one as the other is the widening
+  // accountant-mandate.ts exists to prevent, and the catalogue could not even describe it until
+  // MANDATE_PROOF existed — which is why permissions.ts said an accountant may never approve an
+  // expense while /api/accountant/bevestig had been letting them do exactly that.
+  const perms = code("src/lib/access/permissions.ts");
+  assert.match(perms, /MANDATE_PROOF[\s\S]{0,200}?"expense\.approve":\s*"bevestigen"/,
+    "the confirming mandate is no longer what proves expense.approve");
+  const dec = code("src/lib/access/decision.ts");
+  assert.match(dec, /mandateProofFor\(permission\) === "bevestigen"[\s\S]{0,160}?confirmMandatedOwnerIds/,
+    "authorize() reads one mandate list for both kinds again");
+  // And the route that uses it must not have kept its own copy of the proof.
+  const bevestig = code("src/app/api/accountant/bevestig/route.ts");
+  assert.doesNotMatch(bevestig, /canConfirmForClientServer\(/,
+    "the confirming route proves the mandate itself again, beside the catalogue");
+  assert.match(bevestig, /can\('expense\.approve'/,
+    "the confirming route stopped asking the catalogue");
 });

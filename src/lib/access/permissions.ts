@@ -104,6 +104,10 @@ export const PROTECTED_OPERATIONS: readonly Permission[] = [
   "invoice.finalize", "invoice.send", "invoice.credit",
   "payment.create", "payment.refund", "payment.allocate",
   "bank.match", "vat.submit", "period.close", "period.reopen",
+  // Approving a purchase invoice is on this list although it is not a money MOVE: it is what puts
+  // voorbelasting into an aangifte, and it is the act a client hands to an accountant with their
+  // own switch. Both of those are reasons to name it rather than to let it rest on a session.
+  "expense.approve",
   "access.member_invite", "access.member_revoke",
   "access.mandate_grant", "access.mandate_revoke",
 ];
@@ -156,19 +160,63 @@ export const ROLE_SCOPES: Readonly<Record<AccessRole, Readonly<Record<Permission
   // An accountant. Reaches only the administrations that mandated them, and even there does not
   // move money: [GEEN-ACHTERDEUR] and the accountant-amount trigger both say an accountant may
   // change what the books SAY about themselves, never what they contain.
+  //
+  // ── WHY THE INVOICE ROW SAYS `own` AND NOT `mandated` ────────────────────────────────────
+  //
+  // This map was written as a policy opinion and then MEASURED against the rules the product
+  // actually ships, and it was wrong in five places. A mandated accountant does invoice for their
+  // client — that is [CREDIT-NAMENS] and the whole `namens_klant_id` path on /api/invoice/send
+  // and /api/invoice/creditnota. Writing "none" here would not have documented a restriction; it
+  // would have taken a live feature away from every accountant the moment a route asked.
+  //
+  // But it is not `mandated` either, and the difference is the one canAccessInvoice() draws:
+  // a mandate is permission to WRITE invoices in someone's name, never permission to finish or
+  // re-price the ones the client wrote themselves. `own` says exactly that — inside the
+  // administration proved by the mandate, the rows this actor created. A gate asserts authorize()
+  // and canAccessInvoice() agree, so this row cannot drift away from the rule again.
   boekhouder: {
-    "invoice.finalize": "none", "invoice.send": "none", "invoice.credit": "mandated",
+    "invoice.finalize": "own", "invoice.send": "own", "invoice.credit": "own",
     "payment.create": "none", "payment.refund": "none", "payment.allocate": "none",
     "bank.match": "none", "vat.submit": "none",
     "period.close": "none", "period.reopen": "none",
-    "invoice.read": "mandated", "invoice.create": "none", "invoice.update": "none",
+    "invoice.read": "mandated", "invoice.create": "own", "invoice.update": "own",
     "customer.read": "mandated", "customer.create": "none", "customer.update": "none",
-    "expense.read": "mandated", "expense.approve": "none",
+    // [BEVESTIGEN] Confirming is granted by its OWN switch — a different mandate kind, and a
+    // client who allowed invoicing has not thereby allowed sign-off. MANDATE_PROOF below says
+    // which switch proves this one; canConfirmForClient() is the rule it mirrors.
+    "expense.read": "mandated", "expense.approve": "mandated",
     "payment.read": "mandated", "bank.read": "mandated",
     "access.member_invite": "none", "access.member_revoke": "none",
     "access.mandate_grant": "none", "access.mandate_revoke": "none",
   },
 };
+
+/**
+ * The kinds of mandate a client can grant an accountant. Mirrors accountant_invoice_mandates.kind
+ * and mandateKindOf() — the database, the pure rule and this catalogue spell it one way.
+ */
+export type MandateKind = "facturen" | "bevestigen";
+
+/**
+ * Which mandate PROVES a `mandated` scope for this permission.
+ *
+ * `mandated` is not one grant. A client has two switches and they are separate on purpose: one
+ * lets the accountant write invoices in their name (art. 35 lid 1 Wet OB explicitly allows a
+ * third party to issue), the other lets them sign off what came in. Reading either as the other
+ * is the silent widening accountant-mandate.ts exists to prevent, and until this map existed the
+ * catalogue had exactly one notion of "mandated" and therefore could not tell them apart.
+ *
+ * Absent ⇒ the invoicing mandate, because that is what every other `mandated` row here means and
+ * what getActingForClient() proves.
+ */
+export const MANDATE_PROOF: Readonly<Partial<Record<Permission, MandateKind>>> = {
+  "expense.approve": "bevestigen",
+};
+
+/** Which mandate proves this permission. Defaults to the invoicing mandate. */
+export function mandateProofFor(permission: Permission): MandateKind {
+  return MANDATE_PROOF[permission] ?? "facturen";
+}
 
 /** How far this role reaches for this permission. `none` when it may not at all. */
 export function scopeFor(role: AccessRole, permission: Permission): AccessScope {

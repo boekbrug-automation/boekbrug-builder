@@ -20,6 +20,7 @@ import { runBankAutoConfirm } from "@/lib/bank-auto-confirm";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 // [EEN-SCHRIJFPAD] The payment goes through the locked door, with a derived idempotency key.
 import { deriveKey } from "@/lib/contracts/idempotency";
+import { requirePermission } from "@/lib/access/context";
 import { reportHandledFailure } from "@/lib/report-handled";
 // [MONEY-GUARD] The one predicate for "this invoice already holds money" — shared with the
 // dedicated archive route so the two doors to the same act cannot disagree.
@@ -130,6 +131,19 @@ export async function POST(
   const action = body.action ?? "verify";
   if (action !== "verify" && action !== "pay") {
     return NextResponse.json({ error: "Onbekende actie" }, { status: 400 });
+  }
+
+  // [EEN-POORT] One word in the body, two capabilities behind it, and they are asked for by their
+  // own names: 'verify' approves a purchase invoice into the books (`expense.approve` — it becomes
+  // a Crediteur the accountant sees and voorbelasting the aangifte claims), 'pay' books money
+  // against it (`payment.create`). The resource is the administration the invoice was addressed
+  // to, which the read above already proved is this session's own.
+  {
+    const gate = await requirePermission(
+      action === "pay" ? "payment.create" : "expense.approve",
+      { ownerId: invoice.receiver_id },
+    );
+    if (gate.response) return gate.response;
   }
 
   // [BRIDGE-CREDITNOTA-SIGN] A normal invoice's amounts are ≥ 0. A creditnota follows the safecore

@@ -84,3 +84,129 @@ test("[EEN-POORT] a refusal never says whether the resource exists or whose it i
   assert.deepEqual(Object.keys(d).sort(), ["allowed", "permission", "reasonCode", "scope"]);
   assert.ok(!JSON.stringify(d).includes("someone-else"), "the refusal leaked the resource's owner");
 });
+
+// ── The catalogue is a READING of the shipped rules, and this is what makes that claim checkable ──
+//
+// permissions.ts used to say a boekhouder holds `invoice.send` NOWHERE. That was not a policy
+// decision written down, it was an opinion written down — the product has shipped accountant
+// invoicing since [CREDIT-NAMENS], and /api/invoice/send has carried `namens_klant_id` for as
+// long. A route migrated onto the catalogue as it stood would have taken a live feature away from
+// every mandated accountant, silently, on a door that mints invoice numbers.
+//
+// So the equivalence is asserted exhaustively rather than asserted in prose: for the three roles
+// and every combination of "whose administration" and "who created it", authorize() and
+// canAccessInvoice() must give the same answer. Whichever of the two moves first, this fails.
+
+test("[EEN-POORT] authorize() and canAccessInvoice() are the same rule, on every combination", async () => {
+  const { canAccessInvoice } = await import("../acting-for");
+
+  const actors: Array<{ label: string; acting: import("../acting-for").ActingFor; ctx: ActingContext }> = [
+    {
+      label: "eigenaar",
+      acting: { ownerId: "u1", actorId: "u1", role: "eigenaar" },
+      ctx: { actorId: "u1", ownerId: "u1", role: "eigenaar", mandatedOwnerIds: [], confirmMandatedOwnerIds: [] },
+    },
+    {
+      label: "verkoop",
+      acting: { ownerId: "u1", actorId: "m1", role: "verkoop" },
+      ctx: { actorId: "m1", ownerId: "u1", role: "verkoop", mandatedOwnerIds: [], confirmMandatedOwnerIds: [] },
+    },
+    {
+      label: "boekhouder",
+      acting: { ownerId: "u1", actorId: "a1", role: "boekhouder" },
+      ctx: { actorId: "a1", ownerId: "u1", role: "boekhouder", mandatedOwnerIds: ["u1"], confirmMandatedOwnerIds: [] },
+    },
+  ];
+  const rows = [
+    { sender_id: "u1", created_by: "u1" },
+    { sender_id: "u1", created_by: "m1" },
+    { sender_id: "u1", created_by: "a1" },
+    { sender_id: "u1", created_by: null },
+    { sender_id: "other", created_by: "m1" },
+    { sender_id: null, created_by: "m1" },
+  ];
+  // The three capabilities the two invoice money doors ask for. invoice.read is deliberately NOT
+  // among them and is asserted separately below: canAccessInvoice() is the ISSUING rule, and
+  // reading is wider on purpose for an accountant (canRemindInvoice explains why — a chase-list
+  // scoped to the invoices the accountant happened to type is not a chase-list).
+  const permissions = ["invoice.send", "invoice.finalize", "invoice.credit"] as const;
+
+  let checked = 0;
+  for (const { label, acting, ctx } of actors) {
+    for (const row of rows) {
+      const oud = canAccessInvoice(acting, row);
+      for (const p of permissions) {
+        const nieuw = authorize(ctx, p, { ownerId: row.sender_id, createdBy: row.created_by }).allowed;
+        assert.equal(
+          nieuw,
+          oud,
+          `${label} · ${p} · sender=${String(row.sender_id)} created_by=${String(row.created_by)}: ` +
+            `catalogue says ${nieuw}, acting-for.ts says ${oud}`,
+        );
+        checked++;
+      }
+    }
+  }
+  assert.equal(checked, 3 * 6 * 3, "the equivalence was asserted over fewer cases than it claims");
+});
+
+test("[EEN-POORT] invoice.read is wider than canAccessInvoice, and exactly as wide as reminding", async () => {
+  // The one place the catalogue deliberately does NOT mirror canAccessInvoice, so it is pinned
+  // against the rule it DOES mirror. A mandated accountant reaches every invoice of that client —
+  // canRemindInvoice says why in full — while a sales member stays on what they typed.
+  const { canRemindInvoice } = await import("../acting-for");
+  const actors = [
+    { label: "eigenaar", acting: { ownerId: "u1", actorId: "u1", role: "eigenaar" as const },
+      ctx: { actorId: "u1", ownerId: "u1", role: "eigenaar" as const, mandatedOwnerIds: [], confirmMandatedOwnerIds: [] } },
+    { label: "verkoop", acting: { ownerId: "u1", actorId: "m1", role: "verkoop" as const },
+      ctx: { actorId: "m1", ownerId: "u1", role: "verkoop" as const, mandatedOwnerIds: [], confirmMandatedOwnerIds: [] } },
+    { label: "boekhouder", acting: { ownerId: "u1", actorId: "a1", role: "boekhouder" as const },
+      ctx: { actorId: "a1", ownerId: "u1", role: "boekhouder" as const, mandatedOwnerIds: ["u1"], confirmMandatedOwnerIds: [] } },
+  ];
+  const rows = [
+    { sender_id: "u1", created_by: "u1" },
+    { sender_id: "u1", created_by: "m1" },
+    { sender_id: "u1", created_by: "a1" },
+    { sender_id: "other", created_by: "m1" },
+  ];
+  for (const { label, acting, ctx } of actors) {
+    for (const row of rows) {
+      // reminders_paused is left off: it is the owner overruling a decision, not a capability.
+      const oud = canRemindInvoice(acting, row).allowed;
+      const nieuw = authorize(ctx, "invoice.read", { ownerId: row.sender_id, createdBy: row.created_by }).allowed;
+      assert.equal(nieuw, oud,
+        `${label} · invoice.read · sender=${row.sender_id} created_by=${row.created_by}: ` +
+          `catalogue says ${nieuw}, acting-for.ts says ${oud}`);
+    }
+  }
+});
+
+test("[EEN-POORT] an invoicing mandate is not a confirming mandate, and the reverse", () => {
+  // Two switches a client sets separately. Reading either as the other is the widening
+  // accountant-mandate.ts exists to prevent — and until MANDATE_PROOF existed the catalogue had
+  // one notion of "mandated" and could not tell them apart at all.
+  const invoicing: ActingContext = {
+    actorId: "a1", ownerId: "c1", role: "boekhouder",
+    mandatedOwnerIds: ["c1"], confirmMandatedOwnerIds: [],
+  };
+  const confirming: ActingContext = {
+    actorId: "a1", ownerId: "c1", role: "boekhouder",
+    mandatedOwnerIds: [], confirmMandatedOwnerIds: ["c1"],
+  };
+  const resource = { ownerId: "c1" };
+
+  assert.equal(authorize(invoicing, "expense.approve", resource).allowed, false,
+    "an invoicing mandate signed off the client's books");
+  assert.equal(authorize(confirming, "expense.approve", resource).allowed, true,
+    "the confirming mandate no longer reaches the capability it is the proof for");
+
+  assert.equal(authorize(invoicing, "invoice.read", resource).allowed, true,
+    "the invoicing mandate stopped reaching the client's invoices");
+  assert.equal(authorize(confirming, "invoice.read", resource).allowed, false,
+    "a confirming-only mandate reached the invoicing capabilities");
+
+  // And a missing list is never a wildcard, in either direction.
+  const naked: ActingContext = { actorId: "a1", ownerId: "c1", role: "boekhouder" };
+  assert.equal(authorize(naked, "expense.approve", resource).allowed, false);
+  assert.equal(authorize(naked, "invoice.read", resource).allowed, false);
+});

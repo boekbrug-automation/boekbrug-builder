@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
-import { requireOwner } from '@/lib/owner-only'
+import { requireOwnerPermission } from '@/lib/access/context'
 import { logAuditAction, getClientIP } from '@/lib/audit'
 import { isRefundAnswer, mayReverse, type RefundKind } from '@/lib/mollie-refund'
 import { reportHandledFailure } from '@/lib/report-handled'
@@ -114,7 +114,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabaseClient()
-  { const w = await requireOwner('Een terugbetaling beantwoorden'); if (w.response) return w.response }
+  { const w = await requireOwnerPermission('payment.refund', 'Een terugbetaling beantwoorden'); if (w.response) return w.response }
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 

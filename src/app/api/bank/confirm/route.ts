@@ -52,6 +52,7 @@ import { readOverApplied, overAppliedNotice } from "@/lib/bank-overapplied";
 import { undeclaredMissingInvoices } from "@/lib/bank-batch-reconcile";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { round2 } from "@/lib/invoice-totals";
+import { requirePermission } from "@/lib/access/context";
 
 export async function POST(req: NextRequest) {
   // 1. Auth
@@ -61,6 +62,15 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  // [EEN-POORT] Booking a bank line against an invoice is `bank.match` — it moves amount_paid and
+  // decides what the quarter will say. Until now this door asked only "is somebody logged in",
+  // which is exactly the shape §38 of the specification calls insufficient for a protected
+  // operation. The administration is this session's own: a sales member reaching here would act
+  // for their employer everywhere else in the app, and bank matching is not theirs to do.
+  {
+    const gate = await requirePermission("bank.match", { ownerId: user.id });
+    if (gate.response) return gate.response;
   }
 
   // 2. Body

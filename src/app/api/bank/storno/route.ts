@@ -16,7 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { logAuditAction, getClientIP } from "@/lib/audit";
-import { requireOwner } from "@/lib/owner-only";
+import { requireOwnerPermission } from "@/lib/access/context";
 import { findStornoOrigin } from "@/lib/bank-storno";
 import { POST as unlinkLine } from "@/app/api/bank/unlink/route";
 import { POST as setAside } from "@/app/api/bank/ignore/route";
@@ -28,7 +28,7 @@ const SELECT = "id, status, invoice_id, amount, date, counterpart_iban, counterp
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabaseClient();
-  { const w = await requireOwner("Een teruggeboekte incasso terugdraaien"); if (w.response) return w.response; }
+  { const w = await requireOwnerPermission("payment.allocate", "Een teruggeboekte incasso terugdraaien"); if (w.response) return w.response; }
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => null);

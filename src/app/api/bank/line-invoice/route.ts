@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { logAuditAction, getClientIP } from "@/lib/audit";
-import { requireOwner } from "@/lib/owner-only";
+import { requireOwnerPermission } from "@/lib/access/context";
 import { buildLineInvoice, isLineRate } from "@/lib/line-invoice";
 import { deriveVendorRate } from "@/lib/vendor-vat-rate";
 import { resolveSupplierForImport } from "@/lib/supplier-registry";
@@ -93,7 +93,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabaseClient();
-  { const w = await requireOwner("Een factuur maken van een bankregel"); if (w.response) return w.response; }
+  { const w = await requireOwnerPermission("bank.match", "Een factuur maken van een bankregel"); if (w.response) return w.response; }
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => null);

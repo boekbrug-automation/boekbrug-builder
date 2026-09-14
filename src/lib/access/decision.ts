@@ -31,7 +31,7 @@
 
 import {
   type AccessRole, type AccessScope, type Permission,
-  isPermission, scopeFor,
+  isPermission, mandateProofFor, scopeFor,
 } from "./permissions";
 
 /** Why access was refused. Namespaced like every other refusal — see contracts/reason-codes.ts. */
@@ -64,10 +64,17 @@ export interface ActingContext {
   ownerId: string;
   role: AccessRole;
   /**
-   * For an accountant: the administrations that granted a live invoice mandate. Empty for
+   * For an accountant: the administrations that granted a live INVOICING mandate. Empty for
    * everyone else, and empty is not a wildcard — a `mandated` scope with an empty list denies.
    */
   mandatedOwnerIds?: readonly string[];
+  /**
+   * And the administrations that granted a live CONFIRMING mandate. A second list rather than a
+   * flag on the first, because they are two switches a client sets separately: one accountant may
+   * hold either, both or neither, and merging them is the widening that canConfirmForClient()
+   * refuses. MANDATE_PROOF says which permission reads which list.
+   */
+  confirmMandatedOwnerIds?: readonly string[];
 }
 
 /** The thing being acted on, as far as authorization is concerned. */
@@ -113,9 +120,14 @@ export function authorize(
   if (!resourceOwner) return deny("access.other_administration", permission, scope);
 
   if (scope === "mandated") {
+    // WHICH mandate — an invoicing grant is not a confirming grant, and reading one as the other
+    // would hand an accountant a capability their client never switched on.
+    const mandated =
+      mandateProofFor(permission) === "bevestigen"
+        ? context.confirmMandatedOwnerIds ?? []
+        : context.mandatedOwnerIds ?? [];
     // Empty is not a wildcard. An accountant with no live mandate reaches nothing, which is the
     // whole difference between "has the accountant role" and "may see this client".
-    const mandated = context.mandatedOwnerIds ?? [];
     if (!mandated.includes(resourceOwner)) return deny("access.no_mandate", permission, scope);
     return { allowed: true, permission, scope };
   }
