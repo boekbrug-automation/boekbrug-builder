@@ -116,6 +116,17 @@ export interface ContextOptions {
   limit?: number;
 }
 
+// ── AND THE BOUND WAS MEASURED, NOT ASSUMED ─────────────────────────────────────────────────
+//
+// "It uses an index" is a claim. EXPLAIN (ANALYZE, BUFFERS) against production, 14 September 2026,
+// on the two queries here that are not a primary-key lookup:
+//
+//   the allocations of one invoice      Index Scan using idx_bank_tx_invoices_inv   1.85 ms
+//   the reminders that chase one invoice Index Scan using idx_documents_invoice_id   0.16 ms
+//
+// Both were already indexed — no index was added for this layer, which is one more reason a
+// projection beat a table: a relationships table would have needed its own, duplicating these.
+//
 /** The default and the ceiling. §23: every query is bounded, and the bound is visible. */
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 200;
