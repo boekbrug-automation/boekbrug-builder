@@ -31,6 +31,18 @@
 // The rule is one sentence — an edge is visible when its far end is — and everything else follows
 // from the permission catalogue without this file knowing what a sales member is.
 //
+// ── THERE IS NO API ROUTE YET, AND THAT IS A DECISION ───────────────────────────────────────
+//
+// One was written — /api/context/[type]/[id], walking resolveActingContext → authorize → query in
+// exactly the order the specification asks for — and [GEEN-DEUR] refused it: no screen called it.
+// The gate is right, and it is the same objection this file makes elsewhere about a catalogue
+// nobody asks. A route with no caller is surface with an attack surface and no user.
+//
+// So the door was deleted instead of being added to that gate's allow-list, which is for routes
+// unreachable ON PURPOSE and not for ones whose caller has not been written yet. This layer is a
+// library until a screen needs it, and the screen will bring its own route — which will then pass
+// [GEEN-DEUR] because it is used, rather than because somebody made an exception for it.
+//
 // ── AND A PARTIAL ANSWER SAYS THAT IT IS PARTIAL ────────────────────────────────────────────
 //
 // [NO-SILENT-EMPTY] applies with a twist: an actor who may not see an edge must not learn what it
@@ -417,4 +429,77 @@ export async function getLineage(
   }
 
   return chain;
+}
+
+/**
+ * Everything related to one customer: the invoices addressed to them.
+ *
+ * The thinnest of the four V1 relationships by volume — 18 rows — and the one whose shape is most
+ * likely to be misread. A "customer" here is a row in the owner's OWN customer book (clients), not
+ * a BoekBrug user: the counterpart of an incoming invoice is a supplier, and the counterpart of an
+ * invoice between two BoekBrug users has never occurred in production. So this walks one edge and
+ * makes no claim about the other two.
+ */
+export async function getCustomerContext(
+  db: ContextReader,
+  context: ActingContext,
+  customerId: string,
+  options?: ContextOptions,
+): Promise<ContextAnswer | null> {
+  const limit = boundedLimit(options);
+
+  const { data } = await db
+    .from("clients").select("id, name, user_id").eq("id", customerId).maybeSingle();
+  const client = data as { id: string; name: string | null; user_id: string } | null;
+  if (!client) return null;
+  if (!authorize(context, "customer.read", { ownerId: client.user_id }).allowed) return null;
+
+  const centre: ContextNode = { type: "customer", id: client.id, label: client.name ?? "klant" };
+  const relations: ContextRelation[] = [];
+  let withheld = 0;
+
+  const { data: invoices } = await db
+    .from("invoices")
+    .select(INVOICE_COLUMNS)
+    .eq("client_id", client.id)
+    .order("id", { ascending: true })
+    .limit(limit);
+
+  for (const raw of (invoices ?? []) as InvoiceRow[]) {
+    const resource = { ownerId: invoiceOwner(raw, context), createdBy: raw.created_by };
+    if (!mayReach(context, "customer", "invoice", resource)) { withheld++; continue; }
+    if (relations.length >= limit) break;
+    relations.push({
+      type: "BELONGS_TO",
+      from: { type: "invoice", id: raw.id, label: raw.invoice_number ?? raw.client_name ?? "factuur" },
+      to: centre,
+      carrier: carrierOf("BELONGS_TO", "invoice", "customer"),
+      source: "domain",
+    });
+  }
+
+  return { centre, relations, withheld, truncated: relations.length >= limit };
+}
+
+/**
+ * One door for a screen that has an id and a kind and wants the neighbourhood.
+ *
+ * Deliberately a switch over the three centres that exist rather than a generic walker: a function
+ * that took any entity and followed any edge would be the generic graph abstraction the scope
+ * forbids, and it would make "what does this return" unanswerable without running it.
+ */
+export type ContextCentre = "invoice" | "payment" | "customer";
+
+export async function getContext(
+  db: ContextReader,
+  context: ActingContext,
+  centre: ContextCentre,
+  id: string,
+  options?: ContextOptions,
+): Promise<ContextAnswer | null> {
+  switch (centre) {
+    case "invoice": return getInvoiceContext(db, context, id, options);
+    case "payment": return getPaymentContext(db, context, id, options);
+    case "customer": return getCustomerContext(db, context, id, options);
+  }
 }

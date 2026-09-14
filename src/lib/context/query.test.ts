@@ -8,7 +8,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { getInvoiceContext, getPaymentContext, getLineage, DEFAULT_LIMIT, MAX_LIMIT } from "./query";
+import {
+  getInvoiceContext, getPaymentContext, getCustomerContext, getContext, getLineage,
+  DEFAULT_LIMIT, MAX_LIMIT,
+} from "./query";
 import type { ActingContext } from "@/lib/access/decision";
 // The fixture spells the marker through the constant, not by hand: a fixture that drifts from the
 // column it stands for is a test that keeps passing about something that no longer happens.
@@ -170,4 +173,45 @@ test("[SAMENHANG] there is no unbounded context query", async () => {
   const one = await getInvoiceContext(makeDb(), asOwner, "inv-1", { limit: 1 });
   assert.equal(one!.relations.length, 1, "the limit did not bind");
   assert.equal(one!.truncated, true, "a cut answer did not say it was cut");
+});
+
+test("[SAMENHANG] a customer's context is their invoices, narrowed the same way", async () => {
+  const answer = await getCustomerContext(makeDb(), asOwner, "cli-1");
+  assert.ok(answer, "the owner could not reach their own customer");
+  assert.equal(answer!.centre.type, "customer");
+  assert.equal(answer!.relations.length, 1, "the customer lost the invoice addressed to them");
+  assert.equal(answer!.relations[0].type, "BELONGS_TO");
+  assert.equal(answer!.relations[0].from.type, "invoice", "BELONGS_TO points the wrong way");
+
+  // A member may read customers administration-wide but only the invoices they made themselves.
+  const member = await getCustomerContext(makeDb(), asMember, "cli-1");
+  assert.ok(member, "a member could not open a customer of the administration they act for");
+  assert.equal(member!.relations.length, 1, "the member lost the invoice they created themselves");
+
+  // And an invoice a colleague made is withheld, counted, not described.
+  const other = makeDb({
+    invoices: [{
+      id: "inv-4", invoice_number: "2026004", client_name: "Bakkerij Jansen", sender_id: OWNER,
+      receiver_id: null, created_by: "colleague", client_id: "cli-1", supplier_id: null,
+      document_id: null, original_invoice_id: null,
+    }],
+  });
+  const narrowed = await getCustomerContext(other, asMember, "cli-1");
+  assert.equal(narrowed!.relations.length, 0, "a member read a colleague's invoice through the customer door");
+  assert.equal(narrowed!.withheld, 1, "the member was not told that something was withheld");
+  assert.ok(!JSON.stringify(narrowed).includes("2026004"), "a refused invoice leaked its number");
+});
+
+test("[SAMENHANG] a customer of another administration is not reachable", async () => {
+  const db = makeDb({ clients: [{ id: "cli-9", name: "Andermans klant", user_id: "someone-else" }] });
+  assert.equal(await getCustomerContext(db, asOwner, "cli-9"), null, "a customer crossed a tenant boundary");
+});
+
+test("[SAMENHANG] getContext is a switch over the centres that exist, not a generic walker", async () => {
+  const db = makeDb();
+  assert.ok(await getContext(db, asOwner, "invoice", "inv-1"));
+  assert.ok(await getContext(db, asOwner, "payment", "pay-1"));
+  assert.ok(await getContext(db, asOwner, "customer", "cli-1"));
+  // An id of the wrong kind answers null rather than guessing which table it meant.
+  assert.equal(await getContext(db, asOwner, "customer", "inv-1"), null);
 });

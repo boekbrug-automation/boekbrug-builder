@@ -35078,3 +35078,24 @@ test("[SAMENHANG] the integrity checker is generated from one catalogue and can 
   assert.match(gen, /AS check_id/, "the output column is a reserved word again");
   assert.doesNotMatch(gen, /ORDER BY kind DESC, check;/, "the ORDER BY names a reserved word again");
 });
+
+test("[SAMENHANG] there is deliberately no API door yet, and the reason is written down", () => {
+  // A first version of this layer shipped with /api/context/[type]/[id] — resolveActingContext →
+  // authorize → query, exactly the required order. [GEEN-DEUR] refused it, and was right: no
+  // screen called it. A route nobody opens is surface with an attack surface and no user, and the
+  // allow-list beside that gate is for doors that are unreachable ON PURPOSE, not for ones whose
+  // caller has not been written.
+  //
+  // So the door was deleted rather than excused. The layer is a library until a screen needs it,
+  // and the screen brings its own route. This test holds that decision in place: if a context
+  // route reappears, it appears WITH the screen that opens it.
+  assert.ok(!existsSync("src/app/api/context"),
+    "a context API route is back. It may come back — with the screen that calls it, so that " +
+      "[GEEN-DEUR] passes because the door is used and not because it was added to a list.");
+  // And the layer stays callable, so "no route" never quietly becomes "no engine".
+  assert.ok(existsSync("src/lib/context/query.ts"));
+  const q = code("src/lib/context/query.ts");
+  for (const fn of ["getInvoiceContext", "getPaymentContext", "getCustomerContext", "getContext", "getLineage"]) {
+    assert.ok(q.includes(`export async function ${fn}`), `${fn} is gone from the query API`);
+  }
+});
