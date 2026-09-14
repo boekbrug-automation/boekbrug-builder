@@ -35099,3 +35099,60 @@ test("[SAMENHANG] there is deliberately no API door yet, and the reason is writt
     assert.ok(q.includes(`export async function ${fn}`), `${fn} is gone from the query API`);
   }
 });
+
+test("[SAMENHANG] the relationship layer never reads the audit log as an edge", () => {
+  // Acceptance criterion 12, mechanically. The audit log is EVIDENCE of what happened, not a
+  // statement about what IS — and it is the one place in this schema where a pointer can dangle,
+  // because audit_logs.entity_id is polymorphic and carries no foreign key. Measured 14 September
+  // 2026: 589 of 3.111 rows point at something deleted (174 invoice, 415 document). Every FK-backed
+  // relationship has zero orphans, which is the key working rather than anybody's discipline.
+  //
+  // A graph built on that table would answer "what is connected to what" with "what was once
+  // done". Those are different questions, and only one of them is this layer's.
+  for (const f of ["query.ts", "vocabulary.ts", "integrity.ts"]) {
+    const src = code(`src/lib/context/${f}`);
+    assert.ok(!src.includes('"audit_logs"') && !src.includes("'audit_logs'") && !src.includes("from(\"audit_logs"),
+      `src/lib/context/${f} reads audit_logs. It is evidence, not a relationship — and it is the ` +
+        "one table in this schema whose pointers are allowed to dangle.");
+  }
+});
+
+test("[SAMENHANG] the allocation table's missing UPDATE policy is recorded as the design", async () => {
+  // Found by the relationship survey, verified against production: bank_tx_invoices carries three
+  // policies (select, insert, delete) and NO update, while bank_transactions carries four. An
+  // earlier note in service-role-register.ts said four for both. That error matters exactly once
+  // and completely — a route switched to the session client on the strength of it would have had
+  // its UPDATEs match zero rows silently, because `authenticated` holds the UPDATE grant and RLS
+  // then filters every row away rather than raising.
+  const { RLS_GAP_REMEDIATION } = await import("./access/service-role-register");
+  const entry = RLS_GAP_REMEDIATION.find((g) => g.table === "bank_tx_invoices");
+  assert.ok(entry, "the allocation table's UPDATE gap is no longer recorded");
+  assert.equal(entry!.verdict, "is-the-design",
+    "an UPDATE policy on the allocation table would be a fourth way to change amount_applied, " +
+      "beside the three the money invariant is proved over");
+  // RAW, not code(): the corrected sentence lives in a COMMENT, and code() strips comments — so a
+  // gate that read it through code() could not see the wrong claim come back. It was proved: the
+  // mutation that restored the false count passed this gate until this line changed. AGENTS.md
+  // names this trap for lifecycle gates that CUT on a comment; it bites just as hard on one that
+  // ASSERTS about one.
+  const regRaw = readFileSync("src/lib/access/service-role-register.ts", "utf8");
+  assert.doesNotMatch(regRaw, /bank_transactions and bank_tx_invoices both carry/,
+    "the corrected policy count drifted back to the wrong one");
+  assert.match(regRaw, /bank_tx_invoices carries THREE/,
+    "the register stopped saying how many policies the allocation table actually has");
+});
+
+test("[SAMENHANG] the money RPC caller guard is described as what it is", () => {
+  // The same survey caught the register calling the guard "the reason a service-role client cannot
+  // quietly act for a stranger". It is not: the guard reads `auth.uid() IS NOT NULL AND auth.uid()
+  // <> p_user_id`, and auth.uid() is NULL for service-role — so for that caller it does nothing.
+  // invoice_reverse_payment.sql states the contract in full, and the register now matches it.
+  const reg = code("src/lib/access/register.ts");
+  assert.match(reg, /for a SESSION caller/,
+    "the caller guard is described as covering more than a session again");
+  assert.match(reg, /auth\.uid\(\) is NULL for a service-role caller/,
+    "the register stopped saying what the guard does NOT do");
+  const sql = readFileSync("supabase/migrations/invoice_reverse_payment.sql", "utf8");
+  assert.match(sql, /service-role -> NULL \(pinned via p_user_id\)/,
+    "the migration that states the contract no longer states it");
+});

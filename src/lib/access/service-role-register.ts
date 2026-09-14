@@ -43,8 +43,14 @@
 // filter is the ONLY lock instead of the second one. The EIGHTEEN bank routes in this class are
 // the clearest case (twenty routes live under bank/, but bank/attachment and bank/delete-statement
 // are rls-gap, not unproven — the first count said nineteen and was simply wrong):
-// bank_transactions and bank_tx_invoices both carry `user_id = auth.uid()` policies for
-// SELECT, INSERT, UPDATE and DELETE, and the one comment on record says
+// bank_transactions carries `user_id = auth.uid()` policies for SELECT, INSERT, UPDATE and
+// DELETE; bank_tx_invoices carries THREE — select, insert, delete — and has no UPDATE policy at
+// all. The first version of this paragraph said four for both and was wrong, which matters
+// exactly once and completely: a route switched to the session client on the strength of it would
+// have had its UPDATEs match zero rows, silently, on the allocation table. (The grant is there —
+// `authenticated` holds UPDATE — so the failure would not be a permission error, it would be a
+// no-op.) In practice nothing updates an allocation: the money functions delete and re-insert.
+// The one comment on record says
 // "service_role is safe here: every query below is pinned to this user's own data" — which is an
 // assertion about the code, not a reason for the bypass.
 //
@@ -428,6 +434,20 @@ export interface RlsGapItem {
 }
 
 export const RLS_GAP_REMEDIATION: readonly RlsGapItem[] = [
+  {
+    table: "bank_tx_invoices",
+    command: "UPDATE",
+    routes: [],
+    verdict: "is-the-design",
+    why: "Three policies exist — select, insert, delete — and no UPDATE. That is not an omission: " +
+      "an allocation is never edited. Every money function that changes one DELETEs the row and " +
+      "INSERTs a replacement inside the same locked transaction, because a payment that moved is " +
+      "two events and not a changed field. An UPDATE policy would make a fourth way to change " +
+      "amount_applied, beside the three the invariant is proved over. The `authenticated` role " +
+      "does hold the UPDATE grant, so an UPDATE from a session is a silent no-op rather than a " +
+      "permission error — worth knowing before anybody switches a route to the session client.",
+    policyShape: "",
+  },
   {
     table: "bank_tx_attachments",
     command: "INSERT and DELETE",

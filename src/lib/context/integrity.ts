@@ -42,6 +42,24 @@
 // check to be real and not enough for it to be strong, which is exactly why it is a repeatable
 // script and not a sentence in a commit message.
 
+// ── WHAT A FOREIGN KEY CANNOT REACH, AND WHY IT IS NOT CHECKED HERE ─────────────────────────
+//
+// Measured on 14 September 2026: `audit_logs` holds 3.111 rows, and 589 of them point at
+// something that no longer exists — 174 with entity_type 'invoice', 415 with 'document'. That is
+// not carelessness. `audit_logs.entity_id` is a POLYMORPHIC reference with no foreign key, which
+// is the only shape in this schema where a dangling pointer is even possible: everywhere a
+// foreign key exists, the orphan count is zero, and that is the key working rather than anybody's
+// discipline.
+//
+// It is deliberately NOT a check in this file, for two reasons that point the same way. The audit
+// log is EVIDENCE of what happened, not a statement about what is — a row recording that an
+// invoice was archived stays true after the invoice is deleted, and "repairing" it would destroy
+// the record. And the relationship layer must never read it as an edge: a graph built on the
+// audit log would answer "what is connected to what" with "what was once done", which are
+// different questions. A gate asserts the layer never touches the table.
+//
+// A checker that reported 589 findings forever is also a checker nobody reads.
+
 /** What a passing result looks like for this check. */
 import { DOC_TYPE_REMINDER } from "@/lib/skipped-import";
 

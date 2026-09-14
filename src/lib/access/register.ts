@@ -197,8 +197,14 @@ export const ACCESS_REGISTER: readonly AccessMechanism[] = [
     needle: "auth.uid() IS NOT NULL AND auth.uid() <>",
     where: "migrations",
     ceiling: 99,
-    note: "The floor under every money RPC, and the reason a service-role client cannot quietly " +
-      "act for a stranger. An enforcement layer; grows with the money functions.",
+    note: "The floor under every money RPC — for a SESSION caller. This note used to say it was " +
+      "'the reason a service-role client cannot quietly act for a stranger', and that was an " +
+      "overstatement: the guard reads `auth.uid() IS NOT NULL AND auth.uid() <> p_user_id`, and " +
+      "auth.uid() is NULL for a service-role caller, so for that caller it does nothing at all. " +
+      "invoice_reverse_payment.sql says the contract exactly — 'session client -> auth.uid() = " +
+      "the user; service-role -> NULL (pinned via p_user_id)'. What pins the tenant on the " +
+      "service-role path is p_user_id, which the ROUTE supplies, which is why the route's own " +
+      "scoping is not redundant. An enforcement layer; grows with the money functions.",
   },
   {
     key: "frontend-organization",
