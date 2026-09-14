@@ -40,8 +40,10 @@
 // It does NOT mean "insecure". Every one of these routes scopes its queries to the session user by
 // hand, and the [RLS-UIT] gate encodes that discipline for the money line. It means: RLS could do
 // that scoping, and here it is switched off for no reason anybody wrote down — so the hand-written
-// filter is the ONLY lock instead of the second one. The nineteen bank routes are the clearest
-// case: bank_transactions and bank_tx_invoices both carry `user_id = auth.uid()` policies for
+// filter is the ONLY lock instead of the second one. The EIGHTEEN bank routes in this class are
+// the clearest case (twenty routes live under bank/, but bank/attachment and bank/delete-statement
+// are rls-gap, not unproven — the first count said nineteen and was simply wrong):
+// bank_transactions and bank_tx_invoices both carry `user_id = auth.uid()` policies for
 // SELECT, INSERT, UPDATE and DELETE, and the one comment on record says
 // "service_role is safe here: every query below is pinned to this user's own data" — which is an
 // assertion about the code, not a reason for the bypass.
@@ -278,13 +280,255 @@ export const SERVICE_ROLE_CEILINGS: Readonly<Record<ServiceRoleClass, number>> =
 /**
  * The order to close `unproven` in, decided once so it is not re-argued per route.
  *
- * The bank block first, because it is nineteen of the forty and they all touch the same two
- * tables with the same owner policies — one change of client, one gate, nineteen routes. Then the
+ * The bank block first, because it is eighteen of the forty and they all touch the same two
+ * tables with the same owner policies — one change of client, one gate, eighteen routes. Then the
  * read-only reporting routes, which cannot corrupt anything if the switch is wrong. Then the rest,
  * one at a time.
  */
 export const UNPROVEN_ORDER: readonly string[] = [
-  "the bank block (19): bank_transactions and bank_tx_invoices carry full owner CRUD policies",
+  "the bank block (18): bank_transactions and bank_tx_invoices carry full owner CRUD policies",
   "the reporting reads (cashflow, daily-truth, geleerd, grootboek, ib-jaar, money-audit, truth, uren, xaf)",
   "the remainder, one route at a time, each with its own measurement",
 ];
+
+// ── THE BACKLOG, SO THAT "40 WITH NO REASON" DOES NOT BECOME A PERMANENT STATE ───────────────
+//
+// A classification is a snapshot. A snapshot that nobody is assigned to act on is a note, and a
+// note is what "temporarily" looked like for the four legacy mechanisms in register.ts. So the
+// forty carry a BATCH (when they move), an OWNER (which part of the product moves them) and the
+// EVIDENCE that has to exist before one of them may be reclassified.
+//
+// `expectedClass` is deliberately "unproven" for every row today. It is not a prediction: guessing
+// where a route will land is how a survey becomes a story. A row changes class only after the
+// evidence named beside it exists, and then it moves in SERVICE_ROLE_ROUTES and its ceiling drops.
+
+export interface ServiceRoleBacklogItem {
+  route: string;
+  /** Which batch closes it. Batches are ordered; a route is not picked out of order. */
+  batch: "bank-1" | "reporting-2" | "rest-3";
+  /** Which part of the product owns closing it — a name somebody can be. */
+  owner: string;
+  /** Where it is expected to land. Always "unproven" until the evidence exists. */
+  expectedClass: ServiceRoleClass;
+  /** What has to be MEASURED before this row may move. Not an intention — a measurement. */
+  evidenceNeeded: string;
+}
+
+export const SERVICE_ROLE_BACKLOG: readonly ServiceRoleBacklogItem[] = [
+  { route: "bank/allocate", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/attach-invoice", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/auto-confirm", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/categorize", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/confirm", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/delete-line", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/enablebanking/sync", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/ignore", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/ignored", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/line-invoice", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/match", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/match-checked", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/reconciliation", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/refresh-names", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/rematch", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/storno", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/unlink", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "bank/upload", batch: "bank-1", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "one staging run of this route on the session client, with the row counts before and after" },
+  { route: "btw-reservation", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "cashflow", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "daily-truth", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "geleerd", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "grootboek", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "grootboek/kaart", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "ib-jaar", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "money-audit", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "truth", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "uren", batch: "reporting-2", owner: "Work",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "xaf", batch: "reporting-2", owner: "Reporting & Aangifte",
+    expectedClass: "unproven", evidenceNeeded: "a read-only diff: the same request answered on the session client and on service_role, row for row" },
+  { route: "account/delete", batch: "rest-3", owner: "Platform",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "account/export", batch: "rest-3", owner: "Platform",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "articles", batch: "rest-3", owner: "Product & Item",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "articles/[id]", batch: "rest-3", owner: "Product & Item",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "feedback", batch: "rest-3", owner: "Platform",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "onboarding/reset", batch: "rest-3", owner: "Platform",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "push/unsubscribe", batch: "rest-3", owner: "Platform",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "reconcile/run", batch: "rest-3", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "ritten", batch: "rest-3", owner: "Work",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "supplier/incasso", batch: "rest-3", owner: "Supplier & Direct Debit",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+  { route: "wachtkoppeling", batch: "rest-3", owner: "Bank & Reconciliation",
+    expectedClass: "unproven", evidenceNeeded: "read the route, name every (table, command) it runs, and check each against pg_policy" },
+];
+
+/** How many routes each batch holds today. Pinned, and only ever lowered. */
+export const BACKLOG_BATCHES: Readonly<Record<string, number>> = {
+  "bank-1": 18,
+  "reporting-2": 11,
+  "rest-3": 11,
+};
+
+// ── THE SEVEN RLS GAPS ARE NOT ALL THE SAME KIND OF GAP ─────────────────────────────────────
+//
+// "The command has no policy" is a measurement, not a verdict. Five of the seven are a policy
+// somebody never wrote; two — three, counting one table twice — are the DESIGN, because the right
+// to act is proved by a TOKEN in the request body and RLS cannot see a request body. Treating
+// those as debt would mean writing a policy that says "anyone may update any invitation", which is
+// the opposite of a fix.
+//
+// This is the list the owner asked to keep as remediation rather than let it read as "everything
+// is fine because the reads matched".
+
+export type RlsGapVerdict = "close-with-policy" | "is-the-design";
+
+export interface RlsGapItem {
+  table: string;
+  command: string;
+  routes: readonly string[];
+  verdict: RlsGapVerdict;
+  why: string;
+  /** For close-with-policy: the shape the policy would take. Empty when it is the design. */
+  policyShape: string;
+}
+
+export const RLS_GAP_REMEDIATION: readonly RlsGapItem[] = [
+  {
+    table: "bank_tx_attachments",
+    command: "INSERT and DELETE",
+    routes: ["bank/attachment"],
+    verdict: "close-with-policy",
+    why: "The owner attaching their own receipt to their own bank line. The table already has " +
+      "bank_tx_attachments_owner_read for SELECT; the write half was never written.",
+    policyShape: "user_id = auth.uid(), mirroring bank_tx_invoices_insert_own / _delete_own",
+  },
+  {
+    table: "bank_statement_periods",
+    command: "DELETE",
+    routes: ["bank/delete-statement"],
+    verdict: "close-with-policy",
+    why: "The owner deleting their own imported statement period. bsp_owner_read covers reading " +
+      "it and nothing covers removing it.",
+    policyShape: "the same expression bsp_owner_read already uses, as a DELETE policy",
+  },
+  {
+    table: "push_subscriptions",
+    command: "INSERT",
+    routes: ["push/subscribe"],
+    verdict: "close-with-policy",
+    why: "SELECT and DELETE own-policies exist and INSERT does not — a plain omission. The route " +
+      "upserts user_id = user.id, so the policy would refuse nothing it does today.",
+    policyShape: "user_id = auth.uid() WITH CHECK, beside the existing select/delete pair",
+  },
+  {
+    table: "invoice_corrections",
+    command: "UPDATE",
+    routes: ["invoice-corrections/[id]"],
+    verdict: "close-with-policy",
+    why: "Two SELECT policies exist (accountant side and client side) and no UPDATE. The client " +
+      "accepting or rejecting a proposal is their own row on their own invoice. Care is owed: " +
+      "this route also holds an applying_since LEASE, and a policy must not make the lease " +
+      "release path unreachable.",
+    policyShape: "client_id = auth.uid() for the decision; the lease columns stay server-written",
+  },
+  {
+    table: "invitations",
+    command: "UPDATE — the CANCEL direction only",
+    routes: ["invite/cancel"],
+    verdict: "close-with-policy",
+    why: "invite/cancel has a session and already filters .eq('zzper_id', user.id): a policy " +
+      "would express exactly that. It does NOT close the table, because accept and decline on the " +
+      "same table are token-proved — see the row below. Half a table is closeable and half is not, " +
+      "and saying so is the point of this list.",
+    policyShape: "zzper_id = auth.uid() AND status = 'pending', for UPDATE only",
+  },
+  {
+    table: "invitations",
+    command: "UPDATE — the ACCEPT and DECLINE directions",
+    routes: ["invite/accept", "invite/decline"],
+    verdict: "is-the-design",
+    why: "The invitation TOKEN is the credential. invite/decline has no session at all — the " +
+      "person clicking the link may not have an account — and invite/accept proves the token " +
+      "before it will touch the row. RLS cannot see a token in a request body, so a policy that " +
+      "allowed these would have to allow everyone.",
+    policyShape: "",
+  },
+  {
+    table: "accountant_clients",
+    command: "INSERT",
+    routes: ["invite/accept"],
+    verdict: "is-the-design",
+    why: "The row that pairs an accountant with a client is created by redeeming an invitation " +
+      "token. A session policy would have to say 'any accountant may add any client', which is " +
+      "the exact grant the invitation exists to withhold.",
+    policyShape: "",
+  },
+  {
+    table: "company_members",
+    command: "INSERT",
+    routes: ["company/members/accept"],
+    verdict: "is-the-design",
+    why: "The same shape, and the header of that route says it in full: this row is what puts " +
+      "somebody inside another company's administration, under another company's BTW number. The " +
+      "table carries the invite's HASH and the link carries the secret; a policy cannot check a " +
+      "secret it never sees.",
+    policyShape: "",
+  },
+];
+
+/**
+ * ── WHAT THE PRODUCTION MEASUREMENT DID AND DID NOT PROVE ───────────────────────────────────
+ *
+ * Kept as a named export rather than a comment, so that a gate can assert it is still here and a
+ * reader looking for "is the service-role work finished" finds the honest answer first.
+ *
+ * The read parity measured above (five tables, row for row, on a real account) proves exactly one
+ * thing: for those SELECTs, RLS returns what the hand-written filter returns. It does not prove:
+ *
+ *   · that the WRITES are equivalent. The policies carry the same `user_id = auth.uid()`
+ *     expression, which is a good reason to expect it, and an expectation is not a measurement.
+ *   · that every route's queries are covered. Parity was measured per TABLE, not per query; a
+ *     route joining or filtering in a way no policy anticipated would still change behaviour.
+ *   · anything about the 22 routes outside the unproven class. Those have reasons, not parity.
+ *
+ * What would prove the write side: one staging run per batch that performs the route's real
+ * INSERT/UPDATE/DELETE on the session client and compares the resulting rows. Not production.
+ */
+export const WRITE_SIDE_NOT_PROVEN =
+  "Read parity is not write safety. The service-role classification is complete; the service-role " +
+  "MIGRATION is not, and this constant exists so that nobody can read the first as the second.";
