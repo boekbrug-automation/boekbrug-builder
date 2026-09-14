@@ -30,6 +30,10 @@ import { requireOwnerPermission } from '@/lib/access/context'
 // [HAND-DUBBEL] One definition of "these two rows are the same invoice" — the pay screen's own.
 import { findPayableDuplicates, duplicateWarningText, type DuplicateCandidateRow } from "@/lib/duplicate-payable";
 import { round2 } from "@/lib/invoice-totals";
+// [CONTRACT] The one derivation of an idempotency key, and the one shape test for a key a
+// client sent. Both live in contracts/idempotency.ts so two writers cannot key one event
+// differently — not colliding is exactly what a double booking IS.
+import { deriveKey, isKeyShaped } from "@/lib/contracts/idempotency";
 
 export const dynamic = "force-dynamic";
 
@@ -40,9 +44,10 @@ export const dynamic = "force-dynamic";
 // that repairs exactly that cannot run. A ceiling well above the real work keeps that shut.
 export const maxDuration = 60;
 
-// [MANUAL-PARTIAL-PAY] Idempotency keys are uuids — reject anything else rather than
-// letting a junk key through as "no key" (which would silently re-enable double booking).
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// [MANUAL-PARTIAL-PAY] Idempotency keys are uuids — a junk key is refused rather than let through
+// as "no key". The shape test is isKeyShaped() in contracts/idempotency.ts: a local copy of the
+// regex is a second answer to "will the uuid column take this", which is how the four unrelated
+// derivation schemes that contract exists to end got there in the first place.
 
 /**
  * One payment link on an invoice, with everything a restore needs.
@@ -299,8 +304,24 @@ export async function POST(req: NextRequest) {
     }
     // Idempotency key: LEAST() clamps over-payment but does NOT deduplicate, so without
     // this a double tap or a retried POST would book the instalment twice.
+    //
+    // [PAY-SLEUTEL-ALTIJD] …and it used to be OPTIONAL here. `null` reaches apply_manual_payment,
+    // whose replay branch is `IF p_client_key IS NOT NULL`, so a caller that sent none got no
+    // deduplication at all — while the sibling door /api/email/confirm derived one server-side.
+    // Measured: the two partial-payment dialogs do send a key; /dashboard/vandaag sends none and
+    // was safe only because it also sends no amount, so its full settlement is refused the second
+    // time by the RPC's own 'already fully paid'. Safe by accident, one field away from not being.
+    //
+    // The client's key WINS when it is sent: it is minted once per dialog opening and is the only
+    // thing that can tell two identical instalments apart. When it is absent the key is DERIVED
+    // from the booking — invoice, amount, date, method — which refuses a retry of the same
+    // instalment and still allows a genuinely different one. For the one case it cannot separate
+    // (the same amount, twice, on the same day, same method) it refuses, and refusing a second
+    // real instalment costs a corrected date; booking a duplicate costs the owner money.
     const rawKey = (body as { clientKey?: unknown }).clientKey;
-    const clientKey = typeof rawKey === "string" && UUID_RE.test(rawKey) ? rawKey : null;
+    const clientKey = isKeyShaped(rawKey)
+      ? rawKey
+      : deriveKey("manual-pay", invoiceId, payAmount == null ? "full" : payAmount.toFixed(2), paymentDate, paymentMethod);
 
     // Session client so the B.4 'verwerkt' trigger sees a real auth.uid(); the RPC also
     // re-checks verwerkt AND the payable status under its own row lock.

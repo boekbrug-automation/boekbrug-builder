@@ -215,7 +215,7 @@ export async function POST(req: NextRequest) {
     .from("invoices")
     // [PARTIAL-PAY] amount_paid decides what this invoice still has OPEN — the guard below
     // refuses to call a payment "full" when it cannot cover that balance.
-    .select("id, invoice_number, status, accountant_status, sender_id, receiver_id, direction, total_inc_btw, amount_paid")
+    .select("id, invoice_number, status, accountant_status, sender_id, receiver_id, direction, total_inc_btw, amount_paid, invoice_date")
     .eq("id", invoiceId)
     .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
     .maybeSingle();
@@ -274,7 +274,15 @@ export async function POST(req: NextRequest) {
       // guard then refused it. Auto-confirm passes the full row and worked; only the human
       // path was blocked.
       total_inc_btw: inv.total_inc_btw ?? null,
-      invoice_date: null,
+      // [BANK-MATCH-STRICT] The third field, and the same defect twice over. isEligible refuses a
+      // payment dated more than ten days BEFORE its invoice — a real guard against pairing this
+      // month's line with next month's bill — and it is written `if (tx.date && inv.invoice_date)`,
+      // so a null here does not soften the rule, it DELETES it. The automatic pass hands over the
+      // full row and is held to it; this door, the one a human presses, was held to less. A guard
+      // whose whole claim is "the SAME invariants the matcher used" may not be handed a smaller
+      // invoice than the matcher had — that is what the two notes above already say about
+      // description/reference and about total_inc_btw, one field at a time.
+      invoice_date: inv.invoice_date ?? null,
       due_date: null,
       client_name: null,
       direction: (inv.direction ?? null) as "outgoing" | "incoming" | null,

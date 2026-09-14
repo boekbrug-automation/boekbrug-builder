@@ -586,12 +586,45 @@ export async function runBankAutoConfirm(args: {
       [invoiceId]: Math.abs(Number(inv.total_inc_btw ?? 0)),
     });
     if (!linksRecorded) {
+      // [KOPPELRIJ-OF-NIETS] The paragraph above states the consequence exactly — «geld dat binnen
+      // is, als schuld» — and this branch used to REPORT it and then fall through to
+      // confirmed.push(). So the one outcome the comment calls unacceptable was counted as a
+      // successful booking, told to the owner as one, and written to the logbook as one.
+      //
+      // Step (b) already rolls back when ITS write fails. This is the same fault one step later,
+      // and it gets the same answer: undo both writes and leave the line for a human. Two writes
+      // to undo now, not one, because the tx link DID land.
+      //
+      // Rolling back is the safe direction for an additional reason: this pass only books
+      // fully-open invoices, so nothing is lost by refusing — the line comes back next run, or the
+      // owner confirms it with one tap. Booking with no reversal index is what cannot be undone.
+      const rollbackTx: Record<string, unknown> = { status: "pending", invoice_id: null };
+      if (tier === "amount_only") rollbackTx.auto_match_reason = null;
+      const { error: txRbErr } = await pipeline
+        .from("bank_transactions")
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .update(rollbackTx as any)
+        .eq("id", txId)
+        .eq("user_id", userId)
+        .eq("status", "matched");
+      const { error: invRbErr } = await payClient
+        .from("invoices")
+        .update({ status: inv.status, amount_paid: inv.amount_paid ?? 0, payment_method: null, marked_paid_at: null, payment_date: null })
+        .eq("id", invoiceId)
+        .eq("status", "paid");
       reportHandledFailure({
         tag: "BANK-TX-INVOICES",
-        message: "payment link not recorded for an auto-confirmed invoice — the reversal index is incomplete",
+        message: txRbErr || invRbErr
+          ? "payment link not recorded AND the rollback failed — invoice may be paid with no reversal index"
+          : "payment link not recorded for an auto-confirmed invoice — booking rolled back, the line stays for a human",
         severity: "data-integrity",
-        context: { userId, invoiceId, txId },
+        context: {
+          userId, invoiceId, txId,
+          txRollback: txRbErr ? txRbErr.message : "ok",
+          invoiceRollback: invRbErr ? invRbErr.message : "ok",
+        },
       });
+      continue;
     }
 
     confirmed.push({ transactionId: txId, invoiceId, invoiceNumber: inv.invoice_number, amount: m.transaction.amount ?? 0, tier, paymentDate: m.transaction.date || null });

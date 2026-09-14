@@ -35156,3 +35156,116 @@ test("[SAMENHANG] the money RPC caller guard is described as what it is", () => 
   assert.match(sql, /service-role -> NULL \(pinned via p_user_id\)/,
     "the migration that states the contract no longer states it");
 });
+
+// ─── [R0-GELD] Four enforcement points that knew the damage and permitted it ───────────────────
+//
+// The Rules survey found a shape, not four unrelated bugs: in all four places the code's OWN
+// comment states the consequence precisely, and the line below it allows the state that produces
+// it. That is not missing knowledge. It is knowledge with no enforcement point, which is the whole
+// argument for the layer these four fixes come before — so they are gated as one family.
+//
+// Each assertion below was proved red by mutation before it was kept.
+
+test("[R0-GELD] the upload door asks the IBAN-change question before it resolves a supplier", () => {
+  const upload = code("src/app/api/email/upload/route.ts");
+
+  // The bare registry is not enough, and the reason is an ORDER: resolveSupplierForImport may
+  // attach the number printed on THIS invoice to the supplier, and the check would then compare a
+  // forged account against itself. intake-supplier.ts owns that order; the door must use it.
+  assert.doesNotMatch(upload, /resolveSupplierForImport/,
+    "the upload door calls the bare registry again — the IBAN check is skippable there");
+  assert.match(upload, /resolveSupplierAtIntake\(pipeline, user\.id, \{/,
+    "the manual upload no longer goes through the shared check-then-resolve step");
+
+  // A verdict nobody stores is a check that did not run. It must reach field_confidence._safecore,
+  // which is what classifyImportHealth reads and what holds the invoice for a human.
+  assert.match(upload, /mergeSafecore\(base, uploadedSupplier\.safecore\)/,
+    "the IBAN verdict is computed and then dropped before the insert");
+  // …and onto the object the insert actually writes. Mutating `(x ?? {})` edits a throwaway.
+  assert.match(upload, /fieldConfidence = base as typeof fieldConfidence;/,
+    "a null field_confidence would swallow the verdict — the common case for a clean read");
+  assert.match(upload, /field_confidence: fieldConfidence,/,
+    "the insert no longer writes the object the verdict was merged onto");
+});
+
+test("[R0-GELD] a manual payment always carries an idempotency key", () => {
+  const route = code("src/app/api/invoice/pay-toggle/route.ts");
+
+  // The RPC's replay branch is `IF p_client_key IS NOT NULL`, so `null` means no deduplication at
+  // all. The client's key wins when sent; when it is absent one is DERIVED from the booking.
+  assert.doesNotMatch(route, /\?\s*rawKey\s*:\s*null/,
+    "the key fell back to null again — a retried POST books the instalment twice");
+  assert.match(route, /deriveKey\("manual-pay", invoiceId,/,
+    "no server-side derivation: the door trusts the caller to protect the owner's money");
+  assert.match(route, /isKeyShaped\(rawKey\)/,
+    "the shape test must be the contract's, not a local regex — two answers is how the four " +
+    "unrelated key schemes contracts/idempotency.ts ended got there");
+
+  // The derivation identifies the BOOKING, not the attempt. Amount, date and method are what make
+  // a second genuine instalment a different event; drop one and two real instalments collide.
+  //
+  // Measured INSIDE the call. The first version of this loop asked whether each name appeared
+  // anywhere in the route, and every one of them does — `paymentMethod` is declared forty lines up
+  // and handed to the RPC below. Dropping it from the KEY changed nothing the gate could see, and
+  // the mutation walked straight through. A check satisfied by an unrelated occurrence of its own
+  // needle is a check that cannot fail.
+  // …and the window runs to the end of the STATEMENT, not to the first ")". An argument of its
+  // own contains one — payAmount.toFixed(2) — so a lazy [^)]* cut the call in half and the
+  // last two arguments fell outside the thing being measured.
+  const call = route.match(/deriveKey\("manual-pay"[\s\S]{0,240}?\);/);
+  assert.ok(call, "the manual-pay derivation is gone from this route");
+  for (const part of ["invoiceId", "payAmount", "paymentDate", "paymentMethod"]) {
+    assert.ok(call[0].includes(part),
+      `the derived key no longer varies with ${part} — two different bookings would collide`);
+  }
+
+  // And the namespace is declared where the derivation lives, not invented at the call site.
+  assert.match(code("src/lib/contracts/idempotency.ts"), /\| "manual-pay";/,
+    "the namespace union no longer carries manual-pay");
+});
+
+test("[R0-GELD] the human confirm door is held to the same invariants as the automatic pass", () => {
+  const route = code("src/app/api/bank/confirm/route.ts");
+
+  // isEligible's date rule is written `if (tx.date && inv.invoice_date)`. A null there does not
+  // soften the rule — it deletes it. The route must read the column and pass it.
+  assert.match(route, /total_inc_btw, amount_paid, invoice_date"\)/,
+    "invoice_date is not selected, so the door cannot hand isEligible what the matcher had");
+  assert.match(route, /invoice_date: inv\.invoice_date \?\? null,/,
+    "the confirm door blanks invoice_date again — the payment-predates-invoice rule stops running");
+  assert.doesNotMatch(route, /\n\s*invoice_date: null,/,
+    "a blanked invoice_date is back in the eligibility call");
+
+  // The rule it re-enables, in the module that owns it — so this gate goes red if the guard moves.
+  const matcher = code("src/lib/bank-matching.ts");
+  assert.match(matcher, /if \(tx\.date && inv\.invoice_date\) \{/,
+    "the date-sanity guard changed shape; this gate is measuring a rule that no longer exists");
+});
+
+test("[R0-GELD] a booking whose reversal index was not written is undone, never reported as done", () => {
+  const src = code("src/lib/bank-auto-confirm.ts");
+
+  // Measure INSIDE the failure branch. `confirmed.push` also appears on the success path, so a
+  // file-wide search would compare two different code paths and pass for the wrong reason.
+  const at = src.indexOf("if (!linksRecorded) {");
+  assert.ok(at > 0, "the link-failure branch was renamed — this gate measures nothing");
+  const after = src.slice(at);
+  const end = after.indexOf("confirmed.push(");
+  assert.ok(end > 0, "no confirmed.push after the branch — the window is wrong");
+  const branch = after.slice(0, end);
+  assert.ok(branch.length > 400, "the failure branch collapsed to a report again");
+
+  // The two writes that DID land must both come back.
+  assert.match(branch, /status: "pending", invoice_id: null/,
+    "the bank line is left matched to an invoice whose payment was never indexed");
+  assert.match(branch, /\.update\(\{ status: inv\.status, amount_paid: inv\.amount_paid \?\? 0/,
+    "the invoice is left paid with no reversal index — amount_paid vs SUM(amount_applied) diverges");
+  // And the branch must END the iteration. Without this the report is decoration.
+  assert.match(branch, /\n\s*continue;\n/,
+    "execution still falls through to confirmed.push — the failure is counted as a success");
+
+  // The rollback can itself fail, and that is the one state this design promises never exists.
+  // It may not be indistinguishable from a clean rollback in the alert.
+  assert.match(branch, /rollback failed/,
+    "a failed rollback reports the same message as a successful one");
+});

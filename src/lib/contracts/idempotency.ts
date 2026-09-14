@@ -45,7 +45,20 @@ export type IdempotencyNamespace =
   /** The Mollie settlement fee invoice, keyed on (settlement row, invoice). Since August 2026. */
   | "mollie-fee"
   /** A purchase invoice the owner confirmed as already paid from the verify queue. */
-  | "email-confirm-pay";
+  | "email-confirm-pay"
+  /**
+   * A manual payment booked through /api/invoice/pay-toggle, keyed on the BOOKING — invoice,
+   * amount, date, method — and not on the attempt.
+   *
+   * The browser mints its own key per dialog opening and that one wins when it is sent, because
+   * it can tell two identical instalments apart and this derivation cannot. What this namespace
+   * is for is the caller that sends NONE: the key was optional at that door, and optional means a
+   * retried POST or a double tap books the instalment twice, since LEAST() clamps over-payment
+   * but does not deduplicate. Deriving from the booking refuses the retry and still allows a
+   * genuinely different instalment, which is the safe direction for the one case it cannot
+   * separate.
+   */
+  | "manual-pay";
 
 /**
  * A stable uuid-shaped key for one event.
