@@ -44,7 +44,8 @@ import { workKey } from "../modules/accountant/work-grouping";
 // [MANDAAT-SOORT] Het oordeel als WAARDE — een decide() die altijd toestaat haalt elke broncontrole.
 import { decide as decideAutonomy } from "./autonomy-scope";
 import { RULE_REGISTER, RULE_IDS, ENFORCED_ELSEWHERE } from "./rules/register";
-import { deriveDoors, sourceOf, firstMatchIndex, withoutImports, NOT_DOORS } from "./rules/doors";
+import { NON_GATE_REFUSALS } from "./auto-advance";
+import { deriveDoors, sourceOf, firstMatchIndex, withoutImports, NOT_DOORS, productFiles } from "./rules/doors";
 // [WERK-GEDAAN] De weigering als WAARDE — een estimateMinutes die 42 teruggeeft haalt elke broncontrole.
 import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutesFor } from "./work-done";
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
@@ -2003,9 +2004,14 @@ test("[BON-AUTO] the paid-suggestion block still holds everything it is NOT sett
   // bij een document waarover niemand twijfelde. Nu twee takken, twee namen. Wat hier bewaakt
   // wordt is ongewijzigd: een betaalspoor dat niet in dezelfde stap wordt afgerekend, boekt niet.
   const mail = code("src/lib/email-integration.ts");
-  assert.match(mail, /pay\.suggestPaid && !settlePlan\.settle\s*\n\s*\? \{ advance: false, reason: 'paid_mark_not_settled' \}/,
+  // [REGEL-BESLIST] Same rule, and it is now a FACT the door hands over instead of a refusal it
+  // builds. The hole is still settle-shaped: the condition is unchanged and it still yields the
+  // name that says a pay mark went unsettled, rather than the one that says the read was weak.
+  assert.match(mail, /pay\.suggestPaid && !settlePlan\.settle\s*\n\s*\? 'paid_mark_not_settled'/,
     "the e-mail door's hole must be settle-shaped, not open");
-  assert.match(mail, /: !classification\.uncertain\s*\n\s*\? shouldAutoAdvanceInvoice\(/,
+  // …and an uncertain read still never reaches the quality gates: the rule short-circuits on it,
+  // before forcedDuplicate, which [REGEL-BESLIST] pins by position.
+  assert.match(mail, /readerUncertain: classification\.uncertain === true/,
     "…and an uncertain read must still never reach the quality gates at all");
   assert.match(
     code("src/app/api/intake/route.ts"),
@@ -2360,8 +2366,11 @@ test("[MAILTEKST] a body-only invoice is found, stored as a document, and never 
   // [ZELF-EERST] One branch now precedes it — the owner's own "show me everything" switch. That
   // does not weaken this claim: that branch is also a refusal, so the body case is still decided
   // before any QUALITY consideration, which is what "before every other consideration" meant.
+  // [REGEL-BESLIST] The door states the fact; the rule refuses on it, at candidacy — which sits
+  // above every quality check by position, asserted there. "Before every quality consideration"
+  // is therefore still literally true, and now true for both doors from one place.
   assert.match(
-    src, /: attachment\.fromBody === true\s*\n\s*\? \{ advance: false, reason: 'from_email_body' \}/,
+    src, /attachment\.fromBody === true\s*\n\s*\? 'from_email_body'/,
     "a body-rendered invoice must be refused before every quality consideration",
   );
   // The owner is told what they are looking at before they confirm it.
@@ -2554,6 +2563,15 @@ test("[POORT-OPBRENGST] the yield script cannot silently miss a gate", () => {
 
   // The one reason that is not a refusal — it is what advance:true carries.
   reasons.delete("clean_high_confidence");
+  // …and the refusals that are not GATES. [REGEL-BESLIST] moved six of these into the rule, and
+  // this check would have demanded a marginal yield for a switch the owner threw. The rule
+  // declares them, so the exclusion cannot be a quiet subtraction here: NON_GATE_REFUSALS is the
+  // list, and four of its members are returned through a variable that this scan cannot see at
+  // all — the same blind spot that once hid the kind_ family.
+  for (const notAGate of NON_GATE_REFUSALS) reasons.delete(notAGate);
+  assert.ok(NON_GATE_REFUSALS.every((r) => aa.includes(r)),
+    "NON_GATE_REFUSALS names a refusal the rule cannot produce — an exclusion for a case that " +
+    "does not exist hides the next one that does");
   assert.ok(reasons.size >= 15, `expected the full refusal set, found ${reasons.size}`);
 
   const registry = script.slice(script.indexOf("const GATES"), script.indexOf("interface Row"));
@@ -5470,13 +5488,24 @@ test("[ZELF-EERST] both auto-booking doors ask the owner's permission first", ()
   // "the read was weak" in the audit trail or the queue.
   const intake = code("src/app/api/intake/route.ts");
   assert.match(intake, /const magAutoBoeken = await autoBoekenAllowed\(supabase, user\.id\)/);
-  assert.match(intake, /const autoAdv = !magAutoBoeken\s*\n?\s*\?/, "asked BEFORE every quality signal");
-  assert.match(intake, /reason: "owner_reviews_everything"/);
+  // [REGEL-BESLIST] The door no longer builds this refusal; it hands the FACT over and the rule
+  // answers first. The precedence itself is pinned in [REGEL-BESLIST] — policy before candidacy
+  // before the reader's flag before every quality check — so this gate asserts what IT is for:
+  // that both doors ask the owner's switch at all, and pass it to the one thing that ranks it.
+  assert.match(intake, /ownerReviewsEverything: !magAutoBoeken/, "the camera door stopped asking the owner's switch");
 
   const sync = code("src/lib/email-integration.ts");
   assert.match(sync, /const magAutoBoeken = await autoBoekenAllowed\(supabase, userId\)/);
-  assert.match(sync, /const autoAdv = !magAutoBoeken\s*\n?\s*\?/, "the mail door asks the same question first");
-  assert.match(sync, /reason: 'owner_reviews_everything'/);
+  assert.match(sync, /ownerReviewsEverything: !magAutoBoeken/, "the mail door stopped asking the same question");
+
+  // The reason itself is asserted where it is PRODUCED. It used to be asserted twice, once per
+  // door, because each door minted it — and the two spellings (double quotes here, single there)
+  // are the fingerprint of that duplication. One producer, one assertion: a door that stopped
+  // handing the switch over is caught by the two matches above, and a rule that stopped naming
+  // the refusal is caught here.
+  assert.match(code("src/lib/auto-advance.ts"),
+    /if \(s\.ownerReviewsEverything === true\) return \{ advance: false, reason: "owner_reviews_everything" \};/,
+    "the rule no longer answers the owner's switch — both doors now hand over a fact nobody ranks");
 
   // The switch exists where the owner can reach it, saved in its own isolated write so a missing
   // column cannot brick the whole profile save (the ochtend_mail precedent).
@@ -35428,4 +35457,82 @@ test("[REGEL-DEUR] the register keeps no rule of its own, and states what it can
   assert.match(regRaw, /mustCall: \/p_client_key:\\s\*\(\?!null\)\//,
     "manual-pay-key stopped refusing an explicit null — which is exactly the value that turns " +
     "apply_manual_payment's replay branch off");
+});
+
+// ─── [REGEL-BESLIST] One rule decides, two doors execute ───────────────────────────────────────
+//
+// Measured before: shouldAutoAdvanceInvoice could return 20 refusal tags, and the two doors that
+// call it produced SIX MORE that the rule had never heard of — owner_reviews_everything,
+// from_email_body, paid_mark_not_settled, multiple_invoices_in_file, not_eligible, uncertain.
+// They reached field_confidence._auto_hold exactly like the rule's own, and hold-reasons.ts ranks
+// them as if one thing produced them.
+//
+// And the doors disagreed. A pay mark the settlement pass could not settle was
+// `paid_mark_not_settled` by e-mail — a door that had fixed this for itself and said so at length
+// — and folded into `not_eligible` by camera. Same document, same decision, two answers, in the
+// very list that decides what gets built next.
+//
+// The doors now supply FACTS and the rule names the refusal. That is the whole change: no new
+// shape, no envelope, no abstraction. What moved is authorship.
+test("[REGEL-BESLIST] no door builds a hold decision of its own", () => {
+  const offenders: string[] = [];
+  for (const path of productFiles()) {
+    if (path === "src/lib/auto-advance.ts") continue;
+    const src = sourceOf(path);
+    // A door constructing the rule's own answer. `advance:` is the field the rule returns, so this
+    // finds a hand-built decision whatever the tag inside it is called.
+    for (const m of src.matchAll(/advance:\s*false/g)) {
+      offenders.push(`${path}:${src.slice(0, m.index ?? 0).split("\n").length}`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    "a door is building its own hold decision again. Hand the FACT to shouldAutoAdvanceInvoice " +
+    "(ownerReviewsEverything / candidacy / readerUncertain) and let it name the refusal — or the " +
+    "two doors will disagree about one document, which is what this change removed.");
+
+  // The three inputs are typed by WHAT THEY ARE, not by the refusal they produce. A policy switch
+  // renamed as a quality finding is how "the reader was not sure" ends up printed over an invoice
+  // that was read perfectly — the defect the e-mail door's own comment describes.
+  const rule = code("src/lib/auto-advance.ts");
+  for (const input of ["ownerReviewsEverything?: boolean", "candidacy?: Candidacy", "readerUncertain?: boolean"]) {
+    assert.ok(rule.includes(input), `the rule lost its ${input} input`);
+  }
+  assert.match(rule, /export type Candidacy =/, "candidacy stopped being a closed set");
+
+  // The owner's switch outranks every quality check, LITERALLY. Both doors stated this in a
+  // comment and each restated it; it lives in the rule now, so the two cannot drift.
+  const fn = rule.slice(rule.indexOf("export function shouldAutoAdvanceInvoice"));
+  const policy = fn.indexOf("ownerReviewsEverything === true");
+  const candidacyAt = fn.indexOf("s.candidacy &&");
+  // The reader's own flag SHORT-CIRCUITS, ahead of the quality checks — because that is what the
+  // e-mail door did before the rule owned this, and preserving that exactly is the difference
+  // between moving authorship and changing what an owner reads. Asserting the input exists on the
+  // TYPE is not enough: deleting the branch leaves the type intact and silently sends every
+  // uncertain attachment through the checks instead. That mutation survived until this line.
+  const readerAt = fn.indexOf("readerUncertain === true");
+  const firstQuality = fn.indexOf("forcedDuplicate === true");
+  assert.ok(policy > 0 && candidacyAt > 0 && readerAt > 0 && firstQuality > 0,
+    "one of the four branches is gone — the rule no longer answers a question a door used to");
+  assert.ok(policy < candidacyAt, "the owner's switch no longer outranks candidacy");
+  assert.ok(candidacyAt < readerAt, "candidacy no longer outranks the reader's own flag");
+  assert.ok(readerAt < firstQuality,
+    "a quality check now runs before the reasons that are not about quality — an owner who " +
+    "switched auto-booking off would read that the read was weak");
+
+  // Every tag the rule can now produce still has both an operator label and an owner sentence.
+  // Moving a refusal into the rule must not create one nobody has words for.
+  const labels = code("src/lib/hold-reasons.ts");
+  const sentences = code("src/lib/why-waiting.ts");
+  for (const tag of ["owner_reviews_everything", "from_email_body", "paid_mark_not_settled",
+                     "multiple_invoices_in_file", "not_eligible", "uncertain"]) {
+    assert.ok(labels.includes(`${tag}:`), `${tag} has no operator label in hold-reasons.ts`);
+    assert.ok(sentences.includes(`${tag}:`), `${tag} has no owner sentence in why-waiting.ts`);
+  }
+
+  // Both doors hand over the pay-mark fact under the SAME name. This is the contradiction that
+  // was measured and removed; a gate that does not pin it lets the camera door fold it back.
+  assert.match(code("src/app/api/intake/route.ts"), /\?\s*"paid_mark_not_settled"/,
+    "the camera door folded the pay-mark fact back into its catch-all");
+  assert.match(code("src/lib/email-integration.ts"), /\?\s*'paid_mark_not_settled'/,
+    "the e-mail door stopped naming the pay-mark fact");
 });

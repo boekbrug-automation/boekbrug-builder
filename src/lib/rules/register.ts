@@ -58,7 +58,9 @@ export type RuleId =
   /** [LEVERANCIER-INTAKE] Is this supplier's account number the one we know for them? */
   | "iban-change"
   /** [PAY-SLEUTEL-ALTIJD] Is this booking the same one we already made? */
-  | "manual-pay-key";
+  | "manual-pay-key"
+  /** [REGEL-BESLIST] May this freshly-read invoice book itself, or must it wait for a human? */
+  | "auto-advance";
 
 /**
  * How the set of doors is DERIVED. Never a list of paths.
@@ -129,6 +131,19 @@ export const RULE_REGISTER: Readonly<Record<RuleId, RuleEntry>> = {
         "signature, and it calls nothing. Excluding generated types by path pattern instead " +
         "would excuse every future generated file from every rule, silently.",
     },
+  },
+
+  "auto-advance": {
+    question: "May this freshly-read invoice book itself, or must it wait for a human?",
+    owner: "src/lib/auto-advance.ts",
+    // Every door that RECORDS why a document is waiting. The object literal is what makes this a
+    // write: `_auto_hold\s*[:=]` alone also matched `fc._auto_hold === "object"` in hold-reasons.ts,
+    // which READS the field to rank refusals and decides nothing — and the gate correctly refused
+    // the sloppy query by naming a reader as a silent door.
+    protects: { kind: "calls", needle: /_auto_hold\s*[:=]\s*\{/ },
+    mustCall: /shouldAutoAdvanceInvoice\(/,
+    enforcement: "route",
+    excused: {},
   },
 };
 

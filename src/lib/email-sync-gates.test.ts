@@ -187,17 +187,25 @@ test("[BON-EMAIL] a paid suggestion is never auto-booked as an unpaid debt", () 
   // verschillende oorzaken — de lezer die twijfelde, en een perfect gelezen factuur met een
   // betaalspoor. De eigenaar las daarbij "de lezer was niet zeker genoeg" over een document
   // waarover niemand twijfelde. Nu een eigen tak met een eigen naam, vóór de kwaliteitspoorten.
+  // [REGEL-BESLIST] Derde vormverandering, en de eerste die de twee deuren gelijk maakt. De deur
+  // bouwt het besluit niet meer: hij geeft het FEIT door — dezelfde voorwaarde, dezelfde naam —
+  // en de regel weigert erop, boven elke kwaliteitspoort. De cameradeur noemde ditzelfde feit
+  // 'not_eligible'; sinds deze wijziging noemen beide het hetzelfde, wat deze assertie ("as the
+  // camera path is") eindelijk letterlijk waar maakt in plaats van bij benadering.
   assert.match(
-    SYNC, /const autoAdv[\s\S]{0,700}?pay\.suggestPaid && !settlePlan\.settle\s*\n\s*\? \{ advance: false, reason: 'paid_mark_not_settled' \}/,
+    SYNC, /const candidacy[\s\S]{0,400}?pay\.suggestPaid && !settlePlan\.settle\s*\n\s*\? 'paid_mark_not_settled'/,
     "the sync's auto-advance must be held back by a paid suggestion, as the camera path is",
   );
-  // And the refusal that now precedes it: mail we assembled into a document never books itself.
-  // [ZELF-EERST] One branch sits before it since the owner got a "show me everything" switch —
-  // also a refusal, so the body case is still decided before any QUALITY consideration.
+  // And the refusal that precedes it: mail we assembled into a document never books itself.
   assert.match(
-    SYNC, /: attachment\.fromBody === true\s*\n\s*\? \{ advance: false, reason: 'from_email_body' \}/,
+    SYNC, /attachment\.fromBody === true\s*\n\s*\? 'from_email_body'/,
     "a body-rendered invoice is held before any quality consideration",
   );
+  // The fact is handed to the rule, not acted on here. Without this the two assertions above pass
+  // over a door that computes `candidacy` and then ignores it.
+  assert.match(SYNC, /const autoAdv = shouldAutoAdvanceInvoice\(\{\s*\n\s*ownerReviewsEverything/,
+    "the sync builds its own hold decision again instead of handing the facts over");
+  assert.match(SYNC, /\n\s*candidacy,\n/, "the candidacy fact is computed and never passed");
 });
 
 test("[BON-EMAIL] the markers are written for EVERY row, not only flagged ones", () => {

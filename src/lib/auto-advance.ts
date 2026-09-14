@@ -46,7 +46,48 @@ const MIN_OVERALL = 0.7;
 // much higher one, because the money field is the one that must never be wrong.
 const VERY_HIGH_OVERALL = 0.9;
 
+/**
+ * [REGEL-BESLIST] Why this document is not even a candidate for the question.
+ *
+ * These are facts a DOOR knows and this rule cannot derive: where the document came from, what a
+ * sibling pass decided about it, how many invoices are in the file. They are not reading problems
+ * and they are deliberately not renamed as any — «de lezer was niet zeker genoeg» over an invoice
+ * that was read perfectly and merely carries a pay mark is not vague, it is untrue, and it sends
+ * the owner to the wrong field. The e-mail door fixed that for itself; the camera door folded the
+ * same fact into `not_eligible` and never got the fix.
+ */
+export type Candidacy =
+  | "ok"
+  /** Read out of the mail BODY rather than an attachment. */
+  | "from_email_body"
+  /** The paper carries a pay mark that the settlement pass did not settle in the same step. */
+  | "paid_mark_not_settled"
+  /** One file holds several invoices; only some of them were taken over. */
+  | "multiple_invoices_in_file"
+  /** Wrong destination, or a read this door could not use. The honest catch-all. */
+  | "not_eligible";
+
 export interface AutoAdvanceSignals {
+  /**
+   * [BELEID] The owner's own switch, and NOT a quality finding.
+   *
+   * It outranks every check below, literally: "waiting because you asked to see everything" must
+   * never read as "the read was weak". The audit row and the queue both show this reason, and an
+   * owner testing the app deserves to see their own switch working. Both doors had this rule and
+   * both stated it in a comment; it lives here now so the precedence cannot drift between them.
+   */
+  ownerReviewsEverything?: boolean;
+  /** [KANDIDAAT] See Candidacy. Absent means the door made no claim, which is `ok`. */
+  candidacy?: Candidacy;
+  /**
+   * [LEZING] The reader's own "I was not sure" flag, for a door that has one.
+   *
+   * Only the e-mail path carries it, and it short-circuits ahead of the checks below — exactly as
+   * that door did before this rule owned it. The camera path passes nothing and is unchanged: it
+   * hands `confidence` to the checks instead. That asymmetry is real and is NOT closed here,
+   * because closing it changes which sentence an owner reads on rows nobody complained about.
+   */
+  readerUncertain?: boolean;
   is_invoice?: boolean | null;
   is_statement?: boolean | null;
   is_reminder?: boolean | null;
@@ -110,7 +151,41 @@ export interface AutoAdvanceDecision {
  * the human). Auto-booking sends a number into the P&L / BTW / accountant package with no human
  * in the loop, so the bar is deliberately high. Pure.
  */
+/**
+ * The refusals that are NOT quality gates, declared so a yield measurement cannot mistake them.
+ *
+ * scripts/gate-yield.ts asks one question of every refusal: how often was this gate the ONLY thing
+ * holding the invoice — the marginal yield that says whether a check still earns the human
+ * attention it costs. That question is meaningless for the three answers above the quality checks:
+ * a switch the owner threw has no yield to measure, and "this document was never a candidate" is
+ * not a gate anybody could delete.
+ *
+ * Declared HERE rather than as an absence in the script's registry, for the reason the script's
+ * own drift check exists: `reason: s.candidacy` is a variable, so a scan for quoted strings cannot
+ * see four of these at all — the same blind spot that once hid `kind_${kind}` and had the check
+ * accusing the script of four phantom entries it returns every day.
+ */
+export const NON_GATE_REFUSALS: readonly string[] = [
+  "owner_reviews_everything",
+  "from_email_body",
+  "paid_mark_not_settled",
+  "multiple_invoices_in_file",
+  "not_eligible",
+  "uncertain",
+];
+
 export function shouldAutoAdvanceInvoice(s: AutoAdvanceSignals): AutoAdvanceDecision {
+  // ── [REGEL-BESLIST] THE THREE ANSWERS THAT ARE NOT ABOUT THE READING ──────────────────────
+  //
+  // They come first, in this order, and the order is the product rule rather than a convenience.
+  // Both doors used to build these refusals themselves, which meant six tags this function had
+  // never heard of reached field_confidence._auto_hold — and the two doors disagreed: a pay mark
+  // that could not be settled was `paid_mark_not_settled` by e-mail and `not_eligible` by camera.
+  // The door now supplies the FACT and this function names the refusal, so there is one producer.
+  if (s.ownerReviewsEverything === true) return { advance: false, reason: "owner_reviews_everything" };
+  if (s.candidacy && s.candidacy !== "ok") return { advance: false, reason: s.candidacy };
+  if (s.readerUncertain === true) return { advance: false, reason: "uncertain" };
+
   // A duplicate the owner forced past the warning is never auto-booked.
   if (s.forcedDuplicate === true) return { advance: false, reason: "forced_duplicate" };
 

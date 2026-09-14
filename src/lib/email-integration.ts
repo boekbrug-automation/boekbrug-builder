@@ -54,7 +54,7 @@ import { makeOwnInvoiceLookup } from '@/lib/own-invoice-lookup'
 // [ZELF-EERST] The owner's grip on the autopilot — see the helper for the fail matrix.
 import { autoBoekenAllowed } from '@/lib/auto-boeken'
 import { loadReadingMemory } from '@/lib/reading-memory-source'
-import { shouldAutoAdvanceInvoice } from '@/lib/auto-advance'
+import { shouldAutoAdvanceInvoice, type Candidacy } from '@/lib/auto-advance'
 // [MULTI-INVOICE] / [ONE-INVOICE-UNVERIFIED] The same two questions /api/intake asks before it
 // lets anything auto-book — one file can hold several invoices, and a scanned stack cannot be
 // checked at all. Same module, same mergers, so the queue reads identically on both doors.
@@ -4608,18 +4608,26 @@ export async function syncUserEmails(
         shifted: (fieldConfidenceValue as { _btw_verlegd?: unknown } | null)?._btw_verlegd != null,
       })
 
-      const autoAdv = !magAutoBoeken
-        ? { advance: false, reason: 'owner_reviews_everything' }
-        : attachment.fromBody === true
-        ? { advance: false, reason: 'from_email_body' }
-        // [WAAROM-VASTGEHOUDEN] Twee oorzaken, twee redenen. Deze regel gaf ze allebei de naam
-        // 'uncertain', en de zin die de eigenaar daarbij leest is "de lezer was niet zeker genoeg
-        // over deze bijlage" — over een factuur die perfect gelezen is en alleen een betaalspoor
-        // draagt. Dat is niet vaag maar onwaar, en het stuurt hem het verkeerde veld in.
-        : pay.suggestPaid && !settlePlan.settle
-        ? { advance: false, reason: 'paid_mark_not_settled' }
-        : !classification.uncertain
-        ? shouldAutoAdvanceInvoice({
+      // [REGEL-BESLIST] De FEITEN die deze deur kent, doorgegeven; het besluit is van de regel.
+      //
+      // [WAAROM-VASTGEHOUDEN] Twee oorzaken, twee redenen. Deze regel gaf ze allebei de naam
+      // 'uncertain', en de zin die de eigenaar daarbij leest is "de lezer was niet zeker genoeg
+      // over deze bijlage" — over een factuur die perfect gelezen is en alleen een betaalspoor
+      // draagt. Dat is niet vaag maar onwaar, en het stuurt hem het verkeerde veld in. Dat
+      // onderscheid blijft; wat verdwijnt is dat deze deur het zelf uitsprak en de cameradeur
+      // hetzelfde feit anders noemde.
+      const candidacy: Candidacy =
+        attachment.fromBody === true
+          ? 'from_email_body'
+          : pay.suggestPaid && !settlePlan.settle
+            ? 'paid_mark_not_settled'
+            : 'ok'
+      const autoAdv = shouldAutoAdvanceInvoice({
+            ownerReviewsEverything: !magAutoBoeken,
+            candidacy,
+            // Alleen deze deur heeft dit vlaggetje; het kortsluit vóór de kwaliteitscontroles,
+            // precies zoals hier gebeurde toen deze deur het besluit nog zelf nam.
+            readerUncertain: classification.uncertain === true,
             is_invoice: classification.isInvoice,
             is_statement: classification.isStatement,
             is_reminder: classification.isReminder,
@@ -4662,7 +4670,6 @@ export async function syncUserEmails(
               field_confidence: fieldConfidenceValue,
             },
           })
-        : { advance: false, reason: 'uncertain' }
       // [OVERALL-BEWAARD] Zie de gelijknamige noot in intake/route.ts — op élke rij, beide paden.
       fieldConfidenceValue = {
         ...(fieldConfidenceValue ?? {}),

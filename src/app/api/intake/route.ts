@@ -72,7 +72,7 @@ import { planSpreadsheetIngest, ledgerKindLabel } from "@/lib/spreadsheet-ingest
 import { looksLikeDailySalesReport, parseDailySalesReport } from "@/lib/daily-sales-report"
 import { bookTurnoverRows, bookLedgerRows } from "@/lib/turnover-book"
 import { escapeLikeValue } from "@/lib/sanitize"
-import { shouldAutoAdvanceInvoice } from "@/lib/auto-advance"
+import { shouldAutoAdvanceInvoice, type Candidacy } from "@/lib/auto-advance"
 // [BON-AUTO] Mag een kassabon zichzelf afboeken? Alleen als het PAPIER de tenderregel afdrukt.
 import { planReceiptSettlement, settleNoticeText } from "@/lib/receipt-auto-settle"
 // [MULTI-INVOICE] "Eén PDF = één factuur" stond onder elke uploadknop en werd nergens
@@ -1366,14 +1366,28 @@ async function runIntake(req: NextRequest) {
   Object.assign(fieldConfidence, markUnexplainedZeroBtw({}, storedAmounts, {
     btwRate: v.btw_rate, shifted: (v.field_confidence as { _btw_verlegd?: unknown } | null)?._btw_verlegd != null,
   }));
-  const autoAdv = !magAutoBoeken
-    ? // Its own reason string, ahead of every quality check: "waiting because you asked to see
-      // everything" must never read as "the read was weak" — the audit row and the queue both
-      // show this reason, and an owner testing the app deserves to see their own switch working.
-      { advance: false as const, reason: "owner_reviews_everything" }
-    : (decision.destination === "invoice" || (decision.destination === "receipt" && settlePlan.settle)) &&
+  // [REGEL-BESLIST] The FACTS this door knows, handed over; the decision is the rule's.
+  //
+  // These three used to be refusals this route built for itself — and the e-mail door built its
+  // own, differently, so the same document could be held for one reason here and another there.
+  // The precedence that used to live in the comment below now lives in the rule, where both doors
+  // inherit it instead of each restating it.
+  const candidacy: Candidacy =
+    (decision.destination === "invoice" || (decision.destination === "receipt" && settlePlan.settle)) &&
     (!decision.suggestPaid || settlePlan.settle) && !multiInvoice && !oneInvoiceUnverified
-      ? shouldAutoAdvanceInvoice({
+      ? "ok"
+      : multiInvoice
+        ? "multiple_invoices_in_file"
+        // [WAAROM-VASTGEHOUDEN] A pay mark this pass could not settle is exactly what the e-mail
+        // door has called `paid_mark_not_settled` since it fixed this for itself. Folding it into
+        // `not_eligible` told the owner the read was unusable about an invoice that was read
+        // perfectly and merely carries a betaalspoor. Same fact, same name, both doors.
+        : decision.suggestPaid && !settlePlan.settle
+          ? "paid_mark_not_settled"
+          : "not_eligible";
+  const autoAdv = shouldAutoAdvanceInvoice({
+          ownerReviewsEverything: !magAutoBoeken,
+          candidacy,
           is_invoice: v.is_invoice,
           is_statement: v.is_statement,
           is_reminder: v.is_reminder,
@@ -1413,8 +1427,7 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
             invoice_type: v.is_credit_note === true ? "creditnota" : "factuur",
             field_confidence: fieldConfidence,
           },
-        })
-      : { advance: false, reason: multiInvoice ? "multiple_invoices_in_file" : "not_eligible" };
+        });
   // [OVERALL-BEWAARD] De overall zekerheid van de lezer, op de rij — bij ELKE inkomende factuur,
   // niet alleen bij een weigering. Hij bestond tot nu toe alleen in het geheugen tijdens de import:
   // gate-yield.ts zegt in zijn slotalinea letterlijk dat twee poorten daardoor niet te beoordelen
