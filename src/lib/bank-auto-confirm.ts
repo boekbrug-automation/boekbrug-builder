@@ -587,9 +587,13 @@ export async function runBankAutoConfirm(args: {
     });
     if (!linksRecorded) {
       // [KOPPELRIJ-OF-NIETS] The paragraph above states the consequence exactly — «geld dat binnen
-      // is, als schuld» — and this branch used to REPORT it and then fall through to
-      // confirmed.push(). So the one outcome the comment calls unacceptable was counted as a
+      // is, als schuld» — and this branch used to REPORT it and then fall through to the success
+      // push below. So the one outcome that paragraph calls unacceptable was counted as a
       // successful booking, told to the owner as one, and written to the logbook as one.
+      //
+      // (The name of that push is deliberately NOT written here. A check that reads this file raw
+      // rather than through code() would cut its window on this comment and measure the wrong
+      // thing — which is exactly what happened to the first re-measurement of this very fix.)
       //
       // Step (b) already rolls back when ITS write fails. This is the same fault one step later,
       // and it gets the same answer: undo both writes and leave the line for a human. Two writes
