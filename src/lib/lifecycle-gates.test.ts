@@ -44,7 +44,7 @@ import { workKey } from "../modules/accountant/work-grouping";
 // [MANDAAT-SOORT] Het oordeel als WAARDE — een decide() die altijd toestaat haalt elke broncontrole.
 import { decide as decideAutonomy } from "./autonomy-scope";
 import { RULE_REGISTER, RULE_IDS, ENFORCED_ELSEWHERE } from "./rules/register";
-import { deriveDoors, sourceOf, firstMatchIndex, withoutImports } from "./rules/doors";
+import { deriveDoors, sourceOf, firstMatchIndex, withoutImports, NOT_DOORS } from "./rules/doors";
 // [WERK-GEDAAN] De weigering als WAARDE — een estimateMinutes die 42 teruggeeft haalt elke broncontrole.
 import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutesFor } from "./work-done";
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
@@ -35391,6 +35391,15 @@ test("[REGEL-DEUR] the register keeps no rule of its own, and states what it can
   // The two protections that only bite in COMBINATION with a broken door — a mutation that
   // removes either alone leaves a correct repository still passing, so they are asserted here
   // directly rather than left to a mutation that cannot reach them.
+  // The rules directory is not a door. The register names the writes it protects, so its own
+  // text contains them — it matched itself as a door on the first re-measurement, and passed
+  // because it also contains the needle inside the regex that DEFINES the needle.
+  assert.ok(NOT_DOORS.includes("src/lib/rules/"),
+    "the register can match itself as a door again — it passes for the wrong reason, and a " +
+    "rewording would fail it as a door that books nothing");
+  assert.ok(!deriveDoors({ kind: "calls", needle: /apply_manual_payment/ }).some((d) => d.startsWith("src/lib/rules/")),
+    "a file in the rules layer is being derived as a door");
+
   // withoutImports is asserted by RUNNING it, not by reading it. A source-text check proves the
   // call is spelled correctly and nothing about what it does: neutering the body to `return src`
   // walked through every textual assertion here, because the doors genuinely call their rules and

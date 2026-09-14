@@ -43,14 +43,26 @@ export function withoutImports(src: string): string {
   return src.replace(/^\s*import\s[\s\S]*?from\s*["'][^"']+["'];?/gm, "");
 }
 
-/** Every product source file. Tests are not doors; they are where doors are proved. */
+/**
+ * Every product source file.
+ *
+ * Tests are not doors; they are where doors are proved. And neither is this directory: the
+ * register NAMES the writes it protects, so its own text contains them, and it matched itself as
+ * a door for manual-pay-key on the first re-measurement. It passed — because the register also
+ * contains the needle, inside the regex that defines the needle — which is passing for the wrong
+ * reason twice over. Worse, the day somebody reworded the register it would have gone red as a
+ * DOOR, and the failure would have named a file that books nothing.
+ */
+export const NOT_DOORS = ["src/lib/rules/"];
+
 export function productFiles(root = "src"): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir)) {
       const full = `${dir}/${entry}`;
       if (statSync(full).isDirectory()) walk(full);
-      else if (/\.tsx?$/.test(full) && !full.includes(".test.")) out.push(full);
+      else if (/\.tsx?$/.test(full) && !full.includes(".test.") &&
+               !NOT_DOORS.some((d) => full.startsWith(d))) out.push(full);
     }
   };
   walk(root);
