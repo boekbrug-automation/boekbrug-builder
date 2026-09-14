@@ -43,6 +43,8 @@ import { yearStanding } from "./year-standing";
 import { workKey } from "../modules/accountant/work-grouping";
 // [MANDAAT-SOORT] Het oordeel als WAARDE — een decide() die altijd toestaat haalt elke broncontrole.
 import { decide as decideAutonomy } from "./autonomy-scope";
+import { RULE_REGISTER, RULE_IDS, ENFORCED_ELSEWHERE } from "./rules/register";
+import { deriveDoors, sourceOf, firstMatchIndex, withoutImports } from "./rules/doors";
 // [WERK-GEDAAN] De weigering als WAARDE — een estimateMinutes die 42 teruggeeft haalt elke broncontrole.
 import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutesFor } from "./work-done";
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
@@ -35268,4 +35270,153 @@ test("[R0-GELD] a booking whose reversal index was not written is undone, never 
   // It may not be indistinguishable from a clean rollback in the alert.
   assert.match(branch, /rollback failed/,
     "a failed rollback reports the same message as a successful one");
+});
+
+// ─── [REGEL-DEUR] A rule with no caller, and a door that does not ask ──────────────────────────
+//
+// The gate class the survey found missing. Every existing gate proves a rule is CORRECT; none
+// proves anybody CALLS it. factuurstaat.ts and autonomy-scope.ts are the evidence: both pure,
+// both argued, both gated, both imported by nothing in the product — and their gates are green,
+// because a gate that reads the module can never notice that the module has no callers.
+//
+// The door set is DERIVED here, on every run, from the repository. There is no list of door
+// paths anywhere in this test or in the register: a list is how "a door name spelled wrong"
+// replaces "a rule with no caller", and the misspelling reads exactly like coverage.
+test("[REGEL-DEUR] every registered rule is owned by a real module", () => {
+  for (const id of RULE_IDS) {
+    const rule = RULE_REGISTER[id];
+    assert.ok(existsSync(rule.owner), `${id}: owner ${rule.owner} does not exist`);
+    // A rule whose question is a label rather than a question is a row nobody can act on — the
+    // same emptiness [BESLISMATRIX] refuses in its seventh column.
+    assert.ok(rule.question.length > 25 && rule.question.includes("?"),
+      `${id}: the question is not stated as one`);
+  }
+  // And the register may not quietly become the only place rules are held. [EEN-SCHRIJFPAD]
+  // enforces the paid-state rule with the same derivation, and this file says so out loud so
+  // nobody registers it a second time and lets the two drift.
+  for (const [what, where] of Object.entries(ENFORCED_ELSEWHERE)) {
+    assert.ok(where.length > 40, `${what}: names no gate`);
+    const tag = where.match(/\[([A-Z0-9-]+)\]/);
+    assert.ok(tag, `${what}: does not name a gate tag`);
+    assert.ok(readFileSync("src/lib/lifecycle-gates.test.ts", "utf8").includes(`test("[${tag[1]}]`),
+      `${what}: points at [${tag[1]}], which is not a test in this file`);
+  }
+});
+
+test("[REGEL-DEUR] every door the repository yields either asks its rule or is excused, with a reason", () => {
+  for (const id of RULE_IDS) {
+    const rule = RULE_REGISTER[id];
+    const doors = deriveDoors(rule.protects);
+
+    // A query that finds nothing is not a rule with perfect compliance — it is a query that has
+    // stopped matching the code, and it would report success forever.
+    assert.ok(doors.length >= 2, `${id}: the door query yielded ${doors.length} doors — it no longer matches the repository`);
+
+    const silent: string[] = [];
+    const late: string[] = [];
+    for (const door of doors) {
+      if (door in rule.excused) continue;
+      // Imports OUT before the needle goes in. The needle names the owner's export, and so does
+      // the import line — so without this the gate is answered by `import { rule } from …` and a
+      // door that imports the rule and calls something else reads as compliant. Proved: the
+      // mutation that reverts the upload door's call survived until this line existed.
+      const src = withoutImports(sourceOf(door));
+      if (!rule.mustCall.test(src)) { silent.push(door); continue; }
+      // Calling it somewhere is not enough when the rule IS an order. The call must come BEFORE
+      // the thing it guards, or the door asks a question it has already answered by acting.
+      if (rule.mustPrecede) {
+        const asked = src.search(rule.mustCall);
+        const acted = firstMatchIndex(src, rule.protects);
+        if (!(asked >= 0 && acted >= 0 && asked < acted)) late.push(door);
+      }
+    }
+    assert.deepStrictEqual(silent, [],
+      `${id} — these doors do the thing the rule guards and never ask it. Call ${rule.owner}, ` +
+      "or add the file to this rule's `excused` with the reason it cannot.");
+    assert.deepStrictEqual(late, [],
+      `${id} — these doors ask the rule AFTER acting. For an order rule that is the same as not ` +
+      "asking: the answer is derived from a state this door has already changed.");
+
+    // The excused list is checked in both directions. An excuse for a file the query no longer
+    // finds is a reason nobody will re-read, standing next to reasons that still hold.
+    const stale = Object.keys(rule.excused).filter((f) => !doors.includes(f)).sort();
+    assert.deepStrictEqual(stale, [],
+      `${id} — excused from a rule they no longer touch. Remove them, or the list rots into a ` +
+      "record of what used to be true.");
+    for (const [file, why] of Object.entries(rule.excused)) {
+      assert.ok(existsSync(file), `${id}: excused file ${file} does not exist`);
+      assert.ok(why.length > 80, `${id}: ${file} is excused without a reason anyone can weigh`);
+    }
+  }
+});
+
+test("[REGEL-DEUR] the register keeps no rule of its own, and states what it cannot prove", () => {
+  const reg = code("src/lib/rules/register.ts");
+  // It is a map from rules to doors. A threshold, a rate or an amount here would make it the
+  // ninth place a decision is made, which is the shape this whole layer exists to end.
+  assert.doesNotMatch(reg, /\b(0\.\d+|21|9)\s*[;,)]/, "a number that reads like a threshold entered the register");
+  assert.doesNotMatch(reg, /supabase|createClient|fetch\(|await /, "the register does I/O");
+  // The door set may never become a list — not in the register, and not in this gate.
+  assert.doesNotMatch(reg, /doorsThatMustAsk|doors:\s*\[/, "a hand-written door list entered the register");
+  assert.match(reg, /export type DoorQuery =/, "the door set stopped being a query");
+
+  // And the limit is declared. A register that overclaims its own coverage is worse than none:
+  // the next reader trusts it for the one case it cannot see.
+  //
+  // Read RAW, not through code(). The claim lives in a COMMENT, and code() strips comments — so
+  // asserting it against the stripped source is a check that can only ever fail. This is the
+  // third time in this batch that a window or a needle landed on a comment: it caught R0's
+  // re-measurement, it caught the first cut of the key gate, and it caught this line. The rule
+  // is simple enough to state once: assert about prose on the raw file, about code on code().
+  const regRaw = readFileSync("src/lib/rules/register.ts", "utf8");
+  assert.match(regRaw, /NOT fully provable without a parser/,
+    "the register no longer states which of the five failure conditions it cannot prove");
+  assert.match(regRaw, /never a list|never listed/,
+    "the register stopped saying that a door set is a query");
+
+  // The scanner strips comments before it looks. Without this, a door explaining in prose why it
+  // does NOT call a rule reads as a door that calls it.
+  const doorsRaw = readFileSync("src/lib/rules/doors.ts", "utf8");
+  assert.match(doorsRaw, /COMMENTS ARE STRIPPED FIRST/, "the scanner stopped saying why it strips");
+  // Pinned to the BODY of sourceOf, not to the file. `[\\s\\S]*?` also occurs inside
+  // withoutImports' own regex, so a file-wide includes() is answered by an unrelated line —
+  // and the mutation that neuters the block-comment stripper walked through it.
+  const doorsCode = code("src/lib/rules/doors.ts");
+  const from = doorsCode.indexOf("export function sourceOf(");
+  assert.ok(from > 0, "sourceOf was renamed — this gate measures nothing");
+  const sourceOfBody = doorsCode.slice(from, doorsCode.indexOf("\n}", from));
+  assert.ok(sourceOfBody.includes("[\\s\\S]*?"), "sourceOf no longer strips block comments before scanning");
+  assert.ok(sourceOfBody.includes('[^:])\\/\\/[^\\n]*'), "sourceOf no longer strips line comments before scanning");
+
+  // The two protections that only bite in COMBINATION with a broken door — a mutation that
+  // removes either alone leaves a correct repository still passing, so they are asserted here
+  // directly rather than left to a mutation that cannot reach them.
+  // withoutImports is asserted by RUNNING it, not by reading it. A source-text check proves the
+  // call is spelled correctly and nothing about what it does: neutering the body to `return src`
+  // walked through every textual assertion here, because the doors genuinely call their rules and
+  // the needle matches with or without the import line. The protection only bites in combination
+  // with a broken door, so it is tested directly instead.
+  const sample = [
+    'import { resolveSupplierAtIntake } from "@/lib/intake-supplier";',
+    'import type { Foo } from "./foo";',
+    'const x = resolveSupplierForImport(a, b);',
+  ].join("\n");
+  const stripped = withoutImports(sample);
+  assert.doesNotMatch(stripped, /resolveSupplierAtIntake/,
+    "withoutImports no longer removes the import line — the adoption needle is then answered by " +
+    "`import { rule } from …`, and a door that imports the rule and calls something else passes");
+  assert.match(stripped, /resolveSupplierForImport\(a, b\)/,
+    "withoutImports removed more than the imports — it must not touch the code it is protecting");
+
+  const gateSrc = readFileSync("src/lib/lifecycle-gates.test.ts", "utf8");
+  assert.match(gateSrc, /const src = withoutImports\(sourceOf\(door\)\);/,
+    "the adoption gate reads the door WITH its imports again — the needle is then answered by " +
+    "`import { rule } from …` and every door passes forever");
+  assert.match(regRaw, /mustPrecede\?:/, "the register lost the ordering option");
+  assert.match(regRaw, /mustPrecede: \/direction/,
+    "iban-change lost its ordering requirement — the rule IS an order, and without it a door " +
+    "that asks after resolving passes while answering a question it already changed");
+  assert.match(regRaw, /mustCall: \/p_client_key:\\s\*\(\?!null\)\//,
+    "manual-pay-key stopped refusing an explicit null — which is exactly the value that turns " +
+    "apply_manual_payment's replay branch off");
 });
