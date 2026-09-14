@@ -34946,3 +34946,135 @@ test("[EEN-POORT-DEUR] a confirming mandate and an invoicing mandate stay two di
   assert.match(bevestig, /can\('expense\.approve'/,
     "the confirming route stopped asking the catalogue");
 });
+
+// ── [SAMENHANG] The relationship layer knows what is connected, and owns none of it ───────────
+//
+// The danger with a Context engine is not that it fails. It is that it succeeds slightly, and
+// becomes a second place where the product's facts live — a customer name here, a paid flag there,
+// each one written once "just for display" and then read by something that decides money.
+//
+// V1 is a PROJECTION, and that is the whole defence: it stores nothing, so it cannot duplicate a
+// fact, because it has nowhere to keep one. These gates hold that property in place, because the
+// pressure to add "just a small cache" arrives the first time a screen feels slow.
+
+test("[SAMENHANG] the relationship layer stores nothing at all", () => {
+  // No table of its own. 130 foreign keys already carry these relationships with real referential
+  // integrity; a generic relationships table would be a SECOND assertion of facts the database
+  // already enforces, and keeping two assertions equal is the duplication this engine was asked to
+  // remove rather than add.
+  const migrations = readdirSync("supabase/migrations").filter((f) => f.endsWith(".sql"));
+  for (const f of migrations) {
+    const sql = readFileSync(`supabase/migrations/${f}`, "utf8");
+    assert.doesNotMatch(sql, /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?(public\.)?"?relationships"?/i,
+      `${f} creates a generic relationships table. V1 is a projection; if this is genuinely needed, ` +
+        "it is a decision that belongs in vocabulary.ts with the relationship that justifies it.");
+    assert.doesNotMatch(sql, /CREATE\s+TABLE[^;]{0,80}(context_cache|entity_context|relationship_cache)/i,
+      `${f} creates a context cache — a read model that nobody can rebuild is a second source of truth`);
+  }
+  // And no module in the layer writes anything, anywhere.
+  for (const f of ["query.ts", "vocabulary.ts", "integrity.ts"]) {
+    const src = code(`src/lib/context/${f}`);
+    for (const write of [".insert(", ".update(", ".upsert(", ".delete(", ".rpc("]) {
+      assert.ok(!src.includes(write),
+        `src/lib/context/${f} calls ${write}. The relationship layer reads; the domain writes.`);
+    }
+  }
+});
+
+test("[SAMENHANG] a context query is handed an actor and never fetches one", () => {
+  // A module that could resolve its own acting context is a module that can be called without one,
+  // and getInvoiceContext(invoiceId) answering to whoever asks is the door the specification names
+  // first. The flow starts OUTSIDE this file: resolveActingContext → authorize → context query.
+  const q = code("src/lib/context/query.ts");
+  for (const forbidden of ["resolveActingContext", "getActingFor", "getSessionUser", "createPipelineClient", "createServerSupabaseClient"]) {
+    assert.ok(!q.includes(forbidden),
+      `query.ts calls ${forbidden}. It must be HANDED the actor and the reader, so that a caller ` +
+        "cannot skip the door — and so that every refusal below is reachable from a unit test.");
+  }
+  assert.match(q, /context: ActingContext/, "the queries stopped taking an acting context");
+  // Every public query authorizes the CENTRE at resource level before it reads a neighbourhood.
+  assert.match(q, /authorize\(context, "invoice\.read", \{ ownerId: owner, createdBy: row\.created_by \}\)/,
+    "the invoice context stopped proving the centre is this actor's");
+  assert.match(q, /authorize\(context, "payment\.read", \{ ownerId: pay\.user_id \}\)/,
+    "the payment context stopped proving the centre is this actor's");
+});
+
+test("[SAMENHANG] an edge is visible when its far end is, and nothing here knows what a role is", () => {
+  const q = code("src/lib/context/query.ts");
+  const v = code("src/lib/context/vocabulary.ts");
+  // The whole authorization design is one rule, and it lives in readPermissionFor. If query.ts ever
+  // names a role, the rule has been replaced by a list.
+  for (const role of ['"eigenaar"', '"verkoop"', '"boekhouder"']) {
+    assert.ok(!q.includes(role), `query.ts branches on ${role} — then the permission catalogue is no longer the policy`);
+    assert.ok(!v.includes(role), `vocabulary.ts branches on ${role}`);
+  }
+  assert.match(q, /readPermissionFor\(to, from\)/, "the far-end rule is gone from mayReach");
+});
+
+test("[SAMENHANG] a refusal is counted and never described", () => {
+  // [NO-SILENT-EMPTY] one layer up: an actor who may not see an edge must not learn what it was,
+  // and must still be told that something is there. Zero relations with withheld = 3 is a different
+  // answer from zero with withheld = 0, and a screen showing "niets gevonden" for the first is lying.
+  const q = code("src/lib/context/query.ts");
+  // Pinned to the REFUSAL, not to the file: an earlier version asserted only that `withheld++`
+  // appeared somewhere, and survived a mutation that dropped the counting from the edge helper
+  // while leaving the other call site intact. A gate that a partial removal passes is a gate that
+  // measures the wrong thing.
+  assert.match(q, /if \(!mayReach\([\s\S]{0,200}?\)\s*\{\s*withheld\+\+; return;/,
+    "the edge helper drops a refused edge without counting it");
+  assert.match(q, /if \(node\.type === "document" && resource\.ownerId !== owner\) \{ withheld\+\+; return; \}/,
+    "a document from another administration is dropped without being counted");
+  assert.ok((q.match(/withheld\+\+/g) ?? []).length >= 4,
+    "fewer refusal sites count than there are refusal sites");
+  assert.match(q, /withheld: number/, "the answer stopped carrying the count");
+  // The count may never carry a reason, an id or a type — those describe what was refused.
+  assert.doesNotMatch(q, /withheld[A-Za-z]*\s*[:.]\s*(\[|\{)/,
+    "the withheld count grew a structure — a list of what somebody may not see is the leak itself");
+  assert.match(q, /truncated: relations\.length >= limit/, "a cut answer stopped saying it was cut");
+});
+
+test("[SAMENHANG] the layer holds no domain truth, and the shape is what stops it", () => {
+  const q = code("src/lib/context/query.ts");
+  // ContextNode has room for an id, a kind and a label, and nowhere to put an amount. That is the
+  // mechanical half of One Fact -> One Owner: not a promise, a missing field.
+  const node = q.slice(q.indexOf("export interface ContextNode"), q.indexOf("export interface ContextNode") + 400);
+  assert.ok(node.includes("type:") && node.includes("id:") && node.includes("label:"), "ContextNode changed shape");
+  for (const field of ["amount", "total", "status", "saldo", "paid", "btw"]) {
+    assert.ok(!new RegExp(`\\n\\s*${field}[A-Za-z_]*\\??:`, "i").test(node),
+      `ContextNode grew a ${field} field. The domain engines own those; a second place for a ` +
+        "number is a second place for it to be wrong.");
+  }
+  // And the queries must not even SELECT the money columns — a field that is not read cannot leak.
+  assert.ok(!/select\([^)]*amount_applied/.test(q),
+    "a context query reads amount_applied. The allocation's amount belongs to the Payment engine.");
+  assert.ok(!/select\([^)]*total_inc_btw|select\([^)]*amount_paid/.test(q),
+    "a context query reads an invoice money column");
+});
+
+test("[SAMENHANG] every relation emitted matches a declared edge, and no query is unbounded", () => {
+  const q = code("src/lib/context/query.ts");
+  // carrierOf throws on an undeclared edge, which is what makes the vocabulary binding rather than
+  // documentation. The direction bug that produced "payment ALLOCATED_TO payment" was caught by it.
+  assert.match(q, /throw new Error\(`\[SAMENHANG\] no declared edge for/,
+    "an undeclared relationship can now be emitted silently");
+  assert.match(q, /carrier: carrierOf\(/, "relations stopped carrying the carrier they were read from");
+  // §23: every query is bounded and the bound is visible.
+  assert.match(q, /MAX_LIMIT/, "the ceiling on a context answer is gone");
+  assert.match(q, /Math\.min\(MAX_LIMIT/, "a caller can argue the ceiling away again");
+  assert.match(q, /MAX_LINEAGE_DEPTH/, "the lineage walk lost its depth cap");
+  assert.match(q, /if \(seen\.has\(currentId\)\) break/, "the lineage walk can spin on a cycle again");
+  assert.ok(!/\.select\("\*"\)/.test(q), "a context query selects every column");
+});
+
+test("[SAMENHANG] the integrity checker is generated from one catalogue and can only read", () => {
+  const gen = code("scripts/context-integrity.mts");
+  assert.match(gen, /from "@\/lib\/context\/integrity"/,
+    "the generator stopped reading the catalogue — then the SQL is a second hand-maintained list");
+  assert.doesNotMatch(gen, /createClient|SERVICE_ROLE|DATABASE_URL/,
+    "the generator grew credentials. A generator that cannot connect cannot write to production by " +
+      "accident, and that is why it is a generator.");
+  // check_id, not check: `check` is reserved in Postgres and the ORDER BY fails with 42601 at the
+  // very end, after every CTE has already run. Found by running the output, not by reading it.
+  assert.match(gen, /AS check_id/, "the output column is a reserved word again");
+  assert.doesNotMatch(gen, /ORDER BY kind DESC, check;/, "the ORDER BY names a reserved word again");
+});
