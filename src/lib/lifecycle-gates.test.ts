@@ -46,6 +46,7 @@ import { decide as decideAutonomy } from "./autonomy-scope";
 import { RULE_REGISTER, RULE_IDS, ENFORCED_ELSEWHERE } from "./rules/register";
 import { NON_GATE_REFUSALS } from "./auto-advance";
 import { deriveDoors, sourceOf, firstMatchIndex, withoutImports, NOT_DOORS, productFiles } from "./rules/doors";
+import { announcesAutoBooking } from "./bank-auto-announce";
 // [WERK-GEDAAN] De weigering als WAARDE — een estimateMinutes die 42 teruggeeft haalt elke broncontrole.
 import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutesFor } from "./work-done";
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
@@ -14034,14 +14035,17 @@ test("[AL-GEBOEKT-KLEMT] an already-booked payment is not pre-selected, not conf
   assert.match(scherm, /\(s\.outcome === 'auto' && !s\.quotedSettled \? s\.best : null\)/,
     "selectedCand falls back to the winner again, so the confirm has a target nobody chose");
 
-  // 3. The bulk action skips the row. Read from the predicate itself, not from the file, so a guard
-  //    that moved somewhere else cannot pass this by accident.
-  const blok = scherm.slice(scherm.indexOf("function isServerAutoBookable"));
-  const lijf = blok.slice(0, blok.indexOf("\n}"));
-  assert.match(lijf, /if \(s\.quotedSettled\) return false/,
-    "isServerAutoBookable counts an already-booked payment again — the bulk books it without the " +
-    "card ever being opened");
-  assert.ok(lijf.length < 2000, `the predicate scan ran past its function (${lijf.length} chars)`);
+  // 3. The bulk action skips the row.
+  //
+  // [REGEL-DEUR] moved this guard. The predicate the screen calls is now three lines that ask the
+  // server for the auto-confirm tier, and the two quoted-invoice refusals moved with it into
+  // bank-auto-announce.ts — deliberately, as SCREEN policy rather than a copy of a server rule.
+  // So the check runs there rather than being read out of the component's text, which is the
+  // stronger form anyway: a string in a source file can be true while the function returns true.
+  assert.equal(announcesAutoBooking({ tier: "certain", quotedSettled: { invoiceNumber: "2026-014" } }), false,
+    "an already-booked payment is announced again — the bulk books it without the card ever being opened");
+  assert.equal(announcesAutoBooking({ tier: "certain" }), true,
+    "nothing is announced any more — the guard above is passing because the predicate refuses everything");
 });
 
 test("[RLS-AAN] een migratie die een tabel maakt, zet er row level security op", () => {
@@ -27262,9 +27266,15 @@ test("[SOM-KLOPT] a payment is looked up against open invoices too, not only set
     "the screen gates a control on coversPayment. The sum adding up does not mean the work is " +
       "done — an open named invoice still has to be linked, and fullySettled is the flag that " +
       "knows the difference");
-  assert.match(scherm, /if \(s\.quotedSet\?\.fullySettled\) return false/,
+  // [REGEL-DEUR] The refusal moved to bank-auto-announce.ts with the rest of the announcement, and
+  // is asserted by running it: the set adding up is not the same as the work being done, so a
+  // payment whose named invoices are ALL settled must not be announced as about to be booked.
+  assert.equal(announcesAutoBooking({ tier: "certain", quotedSet: { fullySettled: true } }), false,
     "a bulk 'confirm' can once more book a payment whose named invoices are all already settled — " +
       "every candidate it would book is a DIFFERENT, still-open bill");
+  assert.equal(announcesAutoBooking({ tier: "certain", quotedSet: { fullySettled: false } }), true,
+    "a payment with a named invoice still OPEN is no longer announced — the refusal has stopped " +
+      "distinguishing the two buckets and now swallows the rows that DO have work to do");
 });
 
 // ── [XML-PDF] An e-factuur must open as its invoice, not as its envelope ──────────────────────
@@ -35457,6 +35467,95 @@ test("[REGEL-DEUR] the register keeps no rule of its own, and states what it can
   assert.match(regRaw, /mustCall: \/p_client_key:\\s\*\(\?!null\)\//,
     "manual-pay-key stopped refusing an explicit null — which is exactly the value that turns " +
     "apply_manual_payment's replay branch off");
+});
+
+// ─── [REGEL-DEUR] The browser holds no copy of a rule ──────────────────────────────────────────
+//
+// R3 measured one: /dashboard/bank answered "will the server book this line?" with twenty lines
+// of its own, a partial copy of autoConfirmTier's branch tree. It was wrong in both directions —
+// it did not know the supplier_iban and prepared tiers at all, and it skipped the contradiction
+// vetoes and the name bar the tiers apply — and the direction that cost something was the first,
+// because the same predicate gates whether the auto-confirm pass is FIRED. A statement whose only
+// bookable payments were those two tiers was never offered to the pass and waited for the cron.
+//
+// Two ways that comes back, and a gate for each: the copy is rewritten, or somebody "fixes" the
+// copy by importing the real rule into the browser bundle. The second is the tempting one and it
+// is worse — the rule's answer is not the booking decision (applyConfidenceVeto, decideKasAutoBook
+// and the database guards all follow it, and all can only refuse), so a browser running the rule
+// would be confidently wrong rather than honestly approximate.
+test("[REGEL-DEUR] no client component computes the auto-confirm tier", () => {
+  // Derived on every run. Not a list of screens: the browser set is whatever declares itself one.
+  const clientFiles = productFiles("src").filter((f) => /^\s*["']use client["']/m.test(readFileSync(f, "utf8")));
+  assert.ok(clientFiles.length > 100,
+    `the 'use client' query yielded ${clientFiles.length} files — it has stopped matching the repository`);
+
+  const owned = /autoConfirmTier|isSafeAutoConfirm|HIGH_NAME_SIM/;
+  for (const f of clientFiles) {
+    assert.ok(!owned.test(code(f)),
+      `${f} computes the auto-confirm tier in the browser. The tier is decided on the server and ` +
+      `carried to the screen as \`tier\` on the /api/bank/match suggestion — ask for it, do not run it.`);
+  }
+});
+
+test("[REGEL-DEUR] the bank screen asks for the tier instead of deriving it", () => {
+  const client = code("src/app/dashboard/bank/BankClient.tsx");
+
+  // Cut on REAL code, and prove both bounds were found — a slice whose second argument may be -1
+  // runs to the end of the file and measures something far larger than it claims (AGENTS.md).
+  const from = client.indexOf("function isServerAutoBookable");
+  assert.ok(from > 0, "isServerAutoBookable is gone — the announcement predicate has been renamed or removed");
+  const to = client.indexOf("function ", from + 10);
+  assert.ok(to > from, "no function follows isServerAutoBookable — the window has no end");
+  const body = client.slice(from, to);
+
+  assert.match(body, /announcesAutoBooking\(/,
+    "the screen no longer asks bank-auto-announce for the answer");
+  // The copy's own fingerprint: it read the matcher's evidence list to reach a booking conclusion.
+  // Reading signals to LABEL a candidate is fine and happens three times further down this file;
+  // reading them here, in the predicate that fires the pass, is the defect.
+  for (const forbidden of [".signals", "sig.includes", "'certain'", "'amount_only'"]) {
+    assert.ok(!body.includes(forbidden),
+      `the announcement predicate inspects ${forbidden} again — it is re-deriving the tier`);
+  }
+
+  // Both uses must be the SAME predicate. They were not, once: the on-load gate was corrected to
+  // accept an IBAN match and the counter that drives the card was not, so a statement matched on
+  // supplier IBAN + exact sum booked silently while the screen said there was nothing to handle.
+  assert.match(client, /\.some\(isServerAutoBookable\)/, "the on-load gate no longer uses the shared predicate");
+  assert.match(client, /isServerAutoBookable\(s\)/, "the announced rows no longer use the shared predicate");
+
+  // A local refusal changes the candidate set the server's tier was an answer ABOUT. Keeping the
+  // old tier announces a row whose winner the owner has just removed — the stale-answer trap that
+  // comes free with asking somebody else instead of recomputing. Dropping it is not re-deciding.
+  assert.match(client, /best: bestGone \? null : s\.best,[\s\S]{0,200}?tier: null/,
+    "a refusal keeps the server's tier, which answered a question about candidates that are gone");
+});
+
+test("[REGEL-DEUR] the tier the screen asks for is actually sent, and a missing one is not a yes", () => {
+  // Without this the gate above is vacuous: `tier` would be undefined on every row forever.
+  const route = code("src/app/api/bank/match/route.ts");
+  assert.match(route, /tier:\s*autoConfirmTier\(m\)/,
+    "/api/bank/match no longer computes the tier — the screen is asking a question nobody answers");
+  assert.match(code("src/app/dashboard/bank/BankClient.tsx"), /tier\?:\s*AutoConfirmTier \| null/,
+    "the Suggestion type no longer carries the tier");
+
+  // Behaviour, not text. `tier !== null` is the obvious test and it is TRUE for undefined, so a
+  // response from before this field would announce every line on the page — including the ones
+  // with no candidate at all — and fire the pass on every load. Run it rather than read it.
+  assert.equal(announcesAutoBooking({}), false, "a missing tier is being read as bookable");
+  assert.equal(announcesAutoBooking({ tier: undefined }), false, "an undefined tier is being read as bookable");
+  assert.equal(announcesAutoBooking({ tier: null }), false, "a null tier is being read as bookable");
+  assert.equal(announcesAutoBooking({ tier: "certain" }), true, "a 'certain' tier is no longer announced");
+  assert.equal(announcesAutoBooking({ tier: "amount_only" }), true, "an 'amount_only' tier is no longer announced");
+
+  // And it must keep saying what it is. A field documented as the booking decision is how the
+  // next reader deletes applyConfidenceVeto's veto as "already handled upstream".
+  const announce = readFileSync("src/lib/bank-auto-announce.ts", "utf8");
+  for (const word of ["applyConfidenceVeto", "decideKasAutoBook"]) {
+    assert.ok(announce.includes(word),
+      `bank-auto-announce.ts no longer names ${word} — it has stopped saying that the tier is a ` +
+      `prediction and that the booking decision continues past it`);
+  }
 });
 
 // ─── [REGEL-BESLIST] One rule decides, two doors execute ───────────────────────────────────────

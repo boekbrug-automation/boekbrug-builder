@@ -15,6 +15,7 @@ import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import {
   matchTransactions,
+  autoConfirmTier,
   isFullyCovered,
   bankLineFullyApplied,
   coveredNumbersRecovered,
@@ -600,6 +601,30 @@ export async function GET() {
       outcome: m.outcome,
       best: m.best,
       candidates: m.candidates,
+      // [REGEL-DEUR] The auto-confirm tier, decided by its owner and carried to the screen.
+      //
+      // A PREDICTION, and deliberately not the booking decision. The pass that actually books
+      // re-matches over a narrower pool (transactions not partly consumed, invoices not already
+      // booked), then puts every pairing the tiers allow through applyConfidenceVeto and — for
+      // 'amount_only' — decideKasAutoBook, before the database guards have their say. Every one
+      // of those links can only REMOVE, so a row named here may still be refused.
+      //
+      // The POOL is the one place that is not one-directional, and it is written down rather than
+      // claimed away: the pass runs its multi-invoice batch pass FIRST and then matches 1:1 over
+      // what is left, so an invoice the batch booked is gone from the second pool — and losing a
+      // competitor can turn a 'choice' into an 'auto' and book a line this field called null.
+      // That needs a batch and a shared candidate on the same statement, the screen already fires
+      // the pass whenever an unresolved batch exists ([BANK-BATCH-ONLOAD]), and the predicate this
+      // replaced had exactly the same blind spot — so it is a residual, not a regression. What it
+      // is not is a guarantee, and a field documented as one is how the next reader deletes a
+      // check downstream as "already handled".
+      //
+      // The direction is still the whole reason it exists. The screen used to answer this question
+      // with a copy of the tier tree, and the copy was wrong BOTH ways — it never knew the
+      // supplier_iban and prepared tiers (so the pass was not even fired for a statement whose
+      // only bookable lines were those, and they waited for the daily cron), and it skipped the
+      // contradiction vetoes and the name bar (so it named rows the server refuses).
+      tier: autoConfirmTier(m),
       // [BANK-MULTI-LINK-PERSIST] Persisted (reload-safe) link state. partiallyLinked
       // = this pending tx already has an invoice paid against it; allCovered = every
       // reference number is now paid. The UI keeps a partiallyLinked && !allCovered tx

@@ -21,7 +21,9 @@ import { namedInvoiceNumbers, missingNamedInvoices, missingInvoiceNoticeText } f
 import { slotNumbers as slotNumbersOf } from '@/lib/bank-slot-numbers'
 import { parsePaymentPeriod } from '@/lib/payment-period'
 import { quartersPresent, quarterLabelOf, matchesQuarter, lastCompletedQuarter } from '@/lib/quarter'
-import { isPartialPaymentHint, parseReferenceNumbers, isReferenceNumberToken } from '@/lib/bank-matching'
+import { parseReferenceNumbers, isReferenceNumberToken } from '@/lib/bank-matching'
+import { announcesAutoBooking } from '@/lib/bank-auto-announce'
+import type { AutoConfirmTier } from '@/lib/bank-matching'
 // [WAAROM-WACHT-BANK] Eén zin per regel die zichzelf niet koppelde. De component draagt zelf
 // geen taal — dezelfde woordenlijst als de verificatiewachtrij, zie why-waiting.ts.
 import { explainWaiting } from '@/lib/why-waiting'
@@ -85,39 +87,13 @@ function isReadableBankFile(name: string): boolean {
   return READABLE_BANK_EXTS.some((ext) => lower.endsWith(ext))
 }
 
-// [BANK-IBAN] Would the SERVER book this match without a tap? One predicate, because this page
-// asked the question in two places and the two answers had already drifted: the on-load gate was
-// corrected to accept an IBAN match and the counter that drives the "N zekere betalingen" card
-// was not, so a statement matched purely on supplier IBAN + exact sum was booked silently while
-// the screen still said there was nothing to handle.
+// [BANK-IBAN] Would the SERVER book this match without a tap? The question is the server's and
+// the answer is the server's: `tier` comes from /api/bank/match, which calls autoConfirmTier.
 //
-// Mirrors bank-matching.autoConfirmTier: outcome 'auto' with a best candidate, the amount matches
-// to the cent, ONE referenced invoice number, not an instalment — and then either 'certain'
-// (invoice number printed OR the supplier IBAN matches) or 'amount_only' (counterpart name, no
-// reference/IBAN). The server stays authoritative on what it actually books; this only decides
-// whether it is worth asking, and what to tell the owner is waiting.
+// This page used to answer it with a copy of that tier tree. The copy is what [REGEL-DEUR] came
+// for — see bank-auto-announce.ts for what it got wrong, in both directions, and what it cost.
 function isServerAutoBookable(s: Suggestion): boolean {
-  if (s.outcome !== 'auto' || !s.best) return false
-  // [AL-GEBOEKT-KLEMT] The payment names an invoice that is already booked. That is the one
-  // sentence a bulk action may never talk over: "zekere betaling" means the bank agrees, and here
-  // the bank is pointing at a bill that is settled — so every candidate this would book is a
-  // DIFFERENT, still-open invoice. Measured: one of the three lines that named an already-paid
-  // invoice reached this screen with a suggestion the server called 'auto'.
-  if (s.quotedSettled) return false
-  // [SOM-KLOPT] Same rule over the whole named set. A payment whose named invoices add up to it is
-  // accounted for; anything this would book is a different, still-open bill.
-  if (s.quotedSet?.fullySettled) return false
-  const sig = s.best.signals
-  if (!sig.includes('amount')) return false // the amount is the money-truth — required by both tiers
-  const certain = sig.includes('reference') || sig.includes('iban')
-  const amountOnly = sig.includes('counterpart')
-  if (!certain && !amountOnly) return false
-  // [BANK-REF-ONE-SOURCE] The server's own count — a raw comma split counted free-text fragments
-  // and any part under four characters as invoice numbers, so this gate fired on rows the server
-  // considers single-invoice. A multi-invoice batch is the engine's separate path.
-  if (parseReferenceNumbers(s.reference).length > 1) return false
-  if (isPartialPaymentHint(`${s.reference ?? ''} ${s.description ?? ''}`)) return false
-  return true
+  return announcesAutoBooking(s)
 }
 
 // [BANK-STATEMENTS] Format an upload timestamp for the statements table.
@@ -176,6 +152,11 @@ interface Suggestion {
   outcome: Outcome
   best: Candidate | null
   candidates: Candidate[]
+  // [REGEL-DEUR] The server's auto-confirm tier for this line (bank-matching.autoConfirmTier),
+  // or null when nothing would book it. A conservative PREDICTION — the pass applies the
+  // confidence veto, the kasstelsel rule and the database guards on top, all of which can only
+  // refuse. Optional: a response from before this field must not read as "everything books".
+  tier?: AutoConfirmTier | null
   // [BANK-MULTI-LINK-PERSIST] Reload-safe link state from the match route.
   // partiallyLinked: this pending tx already has an invoice paid against it.
   // allCovered: every reference number is now paid (→ it's effectively done).
@@ -1672,6 +1653,14 @@ export default function BankClient() {
             candidates: kept,
             best: bestGone ? null : s.best,
             outcome: kept.length === 0 ? 'none' : bestGone ? 'choice' : s.outcome,
+            // [REGEL-DEUR] The server's tier was an answer ABOUT this candidate set. The owner
+            // has just changed the set, so the answer no longer has a subject — dropping it is
+            // not re-deciding, it is declining to reuse a reply to a different question. This
+            // matches what the page did before the tier existed: the predicate recomputed from
+            // the new `best`, and a refusal that emptied or demoted it stopped announcing the
+            // row. The undo below deliberately restores it as a CHOICE and never as 'auto', so
+            // there is nothing to put back here either.
+            tier: null,
           }
         }),
       }
