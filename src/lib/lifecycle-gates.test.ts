@@ -1195,9 +1195,14 @@ test("[FACTUURVRAAG] the counters that were reading zero now have a writer", () 
   // The DB trigger explicitly permits an accountant to move accountant_status — the permission was
   // granted and the write path never built, so the single most common bookkeeper question had no
   // home in the app and its counters read zero forever.
+  //
+  // [BOEKHOUDER-DEUR] The write moved. accountant_status now has ONE path — the server door — and
+  // the database refuses this column from any session client, so the route's own UPDATE could no
+  // longer work. What this gate cares about is unchanged and is asserted the same way: that the
+  // route still SETS the status those three surfaces count, rather than only storing the text.
   const route = code("src/app/api/accountant/invoice-question/route.ts");
   assert.match(
-    route, /\.from\('invoices'\)\s*\.update\(\{ accountant_status: VRAAG_STATUS \}\)/,
+    route, /setAccountantStatus\(\{[\s\S]{0,300}?status: VRAAG_STATUS,/,
     "the route must actually set the status the three surfaces count",
   );
   // And the TEXT, without which a 'vraag' is the problem this feature exists to replace: the client
@@ -1205,8 +1210,17 @@ test("[FACTUURVRAAG] the counters that were reading zero now have a writer", () 
   assert.match(route, /subject_type: 'invoice'/, "the question is stored against the invoice");
   assert.match(route, /vraag_text: question/, "with the accountant's actual words");
   // Text first, status second — a status with no text is worse than no status.
+  //
+  // The order is measured against the DOOR CALL, because the literal `accountant_status:` is no
+  // longer in this file: the column is written inside src/lib/accountant-status-door.ts. Both
+  // positions are asserted found first — an indexOf that returns -1 would make this comparison
+  // true for the wrong reason, which is exactly how a gate passes on the day it matters.
+  const textAt = route.indexOf("vraag_text: question");
+  const statusAt = route.indexOf("setAccountantStatus({");
+  assert.ok(textAt >= 0, "the question text write must be findable");
+  assert.ok(statusAt >= 0, "the status write must go through the door, and be findable");
   assert.ok(
-    route.indexOf("vraag_text: question") < route.indexOf("accountant_status: VRAAG_STATUS"),
+    textAt < statusAt,
     "the text must be written BEFORE the status, so a half-failure never leaves a question the " +
       "client can see the existence of but not the content of",
   );
@@ -33863,5 +33877,101 @@ test("[VERWERKT-WOORDENLIJST] the accountant_status vocabulary says the same thi
     "the migration no longer installs the constraint under the name production uses");
   assert.match(mig, /DROP CONSTRAINT IF EXISTS invoices_accountant_status_check/,
     "without the idempotent drop this migration fails on every database that already has it");
+});
+// ─── [BOEKHOUDER-DEUR] One write path for the lock, and its actor ─────────────────────────────
+//
+// The database half of this is proved against a real PostgreSQL in
+// tests/sql/accountant_status_door.test.sql: no session may write accountant_status or
+// accountant_id, the server door may, and the deliberate undo still works while the freeze stands.
+// That is the enforcement. What this gate adds is the thing a database cannot see — that no SECOND
+// writer has appeared in the application, quietly trying a write the database will refuse.
+//
+// Derived, never listed: it walks src/ for the write itself, the same shape [EEN-SCHRIJFPAD] uses.
+// A new door is in this set the moment it is written, whether or not anybody remembered this file.
+test("[BOEKHOUDER-DEUR] only the door writes accountant_status or its actor", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = `${dir}/${entry}`;
+      if (statSync(full).isDirectory()) out.push(...walk(full));
+      else if (/\.tsx?$/.test(full) && !full.includes(".test.")) out.push(full);
+    }
+    return out;
+  };
+
+  // One entry, and it is the door. The generated types are NOT here: they declare the columns and
+  // perform no write, so the nearest-preceding-.from rule never reaches them — and the stale half
+  // of this gate said so when they were listed anyway.
+  const EXCUSED: Readonly<Record<string, string>> = {
+    "src/lib/accountant-status-door.ts":
+      "the door — the one place that writes these two columns, and the only client the database " +
+      "accepts them from",
+  };
+
+  const writers: string[] = [];
+  for (const file of walk("src")) {
+    const c = code(file);
+    for (const m of c.matchAll(/\.(?:update|insert|upsert)\(\s*\{/g)) {
+      // The table is the NEAREST PRECEDING .from(). accountant_id is a real column of
+      // accountant_subject_status, accountant_clients and invitations too — without this, seven
+      // files that write their OWN accountant_id were reported as writers of the invoice's.
+      const before = [...c.slice(0, m.index ?? 0).matchAll(/\.from\(\s*["']([a-z_]+)["']\s*\)/g)];
+      if (before[before.length - 1]?.[1] !== "invoices") continue;
+      const open = c.indexOf("{", m.index ?? 0);
+      let depth = 0, body = c.slice(open, open + 4000);
+      for (let i = 0; i < body.length; i++) {
+        if (body[i] === "{") depth++;
+        else if (body[i] === "}" && --depth === 0) { body = body.slice(0, i + 1); break; }
+      }
+      if (/\baccountant_(?:status|id)\s*:/.test(body)) { writers.push(file); break; }
+    }
+  }
+
+  const extra = writers.filter((f) => !(f in EXCUSED)).sort();
+  assert.deepStrictEqual(extra, [],
+    "a second writer of accountant_status appeared. That column is the app's hardest money " +
+    "refusal and carries who asserted it; it has one write path (setAccountantStatus) and the " +
+    "database refuses every session client, so this write cannot work — go through the door.");
+
+  // And the excuse list may not rot: an entry for a file that no longer writes it is a reason
+  // nobody will re-read, standing next to reasons that still hold.
+  const stale = Object.keys(EXCUSED).filter((f) => !writers.includes(f)).sort();
+  assert.deepStrictEqual(stale, [],
+    "these files are excused from a rule they no longer break — remove them from EXCUSED");
+
+  // The two callers that had their own write now go through the door. Named, because a door with
+  // no callers is the failure [REGEL-DEUR] exists to catch.
+  for (const caller of [
+    "src/app/api/accountant/invoice-status/route.ts",
+    "src/app/api/accountant/invoice-question/route.ts",
+  ]) {
+    assert.match(code(caller), /setAccountantStatus\(/, `${caller} no longer goes through the door`);
+  }
+  // The quarter screen asks the route rather than the table.
+  const scherm = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+  assert.match(scherm, /fetch\('\/api\/accountant\/invoice-status'/,
+    "the accountant's quarter screen no longer calls the door's route");
+});
+
+test("[BOEKHOUDER-DEUR] a batch refused for the accountant's lock does not report 'already paid'", () => {
+  // book_bank_batch counts four disjoint conditions into one number and raises one string — none of
+  // whose four possible messages contains the word the callers triage on. So the 'verwerkt' test on
+  // this path was dead, and the lock reached the owner as "already paid": the wrong sentence, and
+  // the dialog that exists for it never opened.
+  const route = code("src/app/api/bank/confirm/route.ts");
+  const from = route.indexOf('msg.includes("no longer payable")');
+  assert.ok(from > 0, "the batch refusal branch is gone — this gate is measuring nothing");
+  const to = route.indexOf('error: "invoice_already_paid"', from);
+  assert.ok(to > from, "the branch no longer ends in the fallback it is allowed to reach LAST");
+  const branch = route.slice(from, to);
+
+  assert.match(branch, /accountant_status/,
+    "the branch stopped looking at the accountant lock, so it answers 'already paid' for it again");
+  assert.match(branch, /error: "verwerkt"/,
+    "the branch can no longer answer 'verwerkt' — the owner is told the wrong thing and the " +
+    "dedicated dialog stays shut");
+  // The re-read must be able to fail without turning a refusal into a success.
+  assert.match(branch, /catch/,
+    "a failed re-read is not handled; being unable to explain a refusal may never drop it");
 });
 
