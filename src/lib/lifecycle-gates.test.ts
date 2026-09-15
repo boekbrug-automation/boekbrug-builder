@@ -35469,6 +35469,91 @@ test("[REGEL-DEUR] the register keeps no rule of its own, and states what it can
     "apply_manual_payment's replay branch off");
 });
 
+// ─── [VERWERKT-WOORDENLIJST] The lock's vocabulary, reproducible from this repository ─────────
+//
+// invoices.accountant_status = 'verwerkt' is the hardest money refusal this app has. Which STRINGS
+// the column may hold therefore decides which strings release it — every guard compares by
+// equality, so a value the vocabulary does not know is a value that never locks.
+//
+// That vocabulary lived in production and in NOTHING here: the CHECK constraint appeared in no
+// migration, and database.sql declared the column bare. A database rebuilt from this repository
+// accepted any string at all in the column eleven SQL guards and eighteen TypeScript sites read.
+//
+// So the vocabulary is now declared in three places, and this gate's job is that they cannot drift
+// apart: the migration that installs the constraint, the repo schema that claims to BE the
+// database, and the TypeScript union that renders the four values on screen. The set is DERIVED
+// from each of the three and compared — not restated here, which would make this file a fourth
+// declaration able to disagree with all of them.
+test("[VERWERKT-WOORDENLIJST] the accountant_status vocabulary says the same thing in all three places", () => {
+  // SQL comments are not stripped by code() — it only knows JS. A vocabulary listed in a comment
+  // must not be able to satisfy a gate about the vocabulary in force.
+  const liveSql = (path: string) =>
+    readFileSync(path, "utf8").split("\n").map((l) => l.replace(/--.*$/, "")).join("\n");
+
+  /** The quoted values inside the CHECK that follows the constraint's name. Cut on real SQL. */
+  const vocabularyOf = (sql: string, where: string): string[] => {
+    const at = sql.indexOf("accountant_status");
+    assert.ok(at > 0, `${where}: the column is not declared here at all`);
+    const check = sql.indexOf("CHECK", at);
+    assert.ok(check > at, `${where}: the column carries no CHECK — the vocabulary is unconstrained`);
+    // Balance from the CHECK's own opening paren, so a later constraint cannot be swept in.
+    const open = sql.indexOf("(", check);
+    let depth = 0, end = -1;
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "(") depth++;
+      else if (sql[i] === ")" && --depth === 0) { end = i; break; }
+    }
+    assert.ok(end > open, `${where}: the CHECK never closes`);
+    return [...sql.slice(open, end).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  };
+
+  const fromMigration = vocabularyOf(
+    liveSql("supabase/migrations/invoice_accountant_status_vocabulary.sql"), "the migration");
+  const fromSchema = vocabularyOf(liveSql("database.sql"), "database.sql");
+
+  // The TypeScript side: the union that types the column for every screen that renders it.
+  const tree = code("src/lib/bridge-tree.ts");
+  const union = /accountant_status:\s*((?:'[a-z_]+'\s*\|\s*)+null)/.exec(tree);
+  assert.ok(union, "bridge-tree.ts no longer types accountant_status as a union of literals");
+  const fromTypes = [...union[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+
+  assert.deepStrictEqual(fromMigration, fromSchema,
+    "the migration and database.sql declare different accountant_status vocabularies — a database " +
+    "rebuilt from this repo would not be the database the migration installs");
+  assert.deepStrictEqual(fromMigration, fromTypes,
+    "the SQL vocabulary and the TypeScript union disagree. One of them is rendering or accepting a " +
+    "value the other has never heard of, on the column that decides whether money may move");
+
+  // Four values, and the one that matters. Renaming 'verwerkt' would silently stop every guard in
+  // the app from locking anything — they all test this literal, none tests "is not null".
+  // The FOURTH declaration, and the reason it belongs in this comparison: accountant_subject_status
+  // is the per-accountant store of the same assertion — same four words, its own table, and an RLS
+  // policy that pins accountant_id to auth.uid(). The two stores hold one vocabulary between them,
+  // so a word added to one and not the other is a word that means something in one place and
+  // nothing in the other, on the same fact.
+  const subjectTable = liveSql("database.sql").slice(liveSql("database.sql").indexOf("accountant_subject_status"));
+  const subjStatus = /status text NOT NULL DEFAULT[\s\S]{0,80}?CHECK \(status = ANY \(ARRAY\[([^\]]+)\]/.exec(subjectTable);
+  assert.ok(subjStatus, "accountant_subject_status.status no longer carries its vocabulary CHECK");
+  const fromSubjectStore = [...subjStatus[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  assert.deepStrictEqual(fromSubjectStore, fromMigration,
+    "the invoice column and accountant_subject_status hold different vocabularies for the same " +
+    "assertion — the store that records WHO asserted it and the store that LOCKS money would then " +
+    "be describing different things");
+
+  assert.equal(fromMigration.length, 4, `the vocabulary changed size: ${fromMigration.join(", ")}`);
+  assert.ok(fromMigration.includes("verwerkt"),
+    "'verwerkt' left the vocabulary — every money guard compares against that literal, so nothing " +
+    "would lock and no test anywhere else would notice");
+
+  // The constraint must be installed by NAME, or the migration reproduces nothing on a live
+  // database that already carries the old one.
+  const mig = liveSql("supabase/migrations/invoice_accountant_status_vocabulary.sql");
+  assert.match(mig, /ADD CONSTRAINT invoices_accountant_status_check/,
+    "the migration no longer installs the constraint under the name production uses");
+  assert.match(mig, /DROP CONSTRAINT IF EXISTS invoices_accountant_status_check/,
+    "without the idempotent drop this migration fails on every database that already has it");
+});
+
 // ─── [REGEL-DEUR] The browser holds no copy of a rule ──────────────────────────────────────────
 //
 // R3 measured one: /dashboard/bank answered "will the server book this line?" with twenty lines
