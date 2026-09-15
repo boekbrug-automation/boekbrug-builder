@@ -34073,4 +34073,26 @@ test("[NOOIT-BETAALBAAR] all three bank doors refuse the same never-payable stat
     "the owning migration declares a different number of functions than the three doors");
   assert.doesNotMatch(owning, /book_bank_batch/,
     "the owning migration touches book_bank_batch — that drift is a separate item, not this one");
+
+  // 7 — and there are EXACTLY two copies of each door: the owner and the file that declared it
+  //     first. Everything above proves the two known copies cannot diverge; on its own that is a
+  //     fact about the pair this test happens to name, not about the repository. A THIRD
+  //     declaration appearing later would be invisible to it — two copies could agree while the
+  //     third quietly won, because nothing here orders migrations and apply order decides which
+  //     definition is real. That is not hypothetical: it is exactly the shape book_bank_batch is
+  //     already in (two files, one of them behind production). So the set of declaring files is
+  //     DISCOVERED by walking the directory, and compared to the two this contract allows.
+  const MIGRATION_DIR = "supabase/migrations";
+  for (const { fn, origin } of BANK_DOORS) {
+    const declaring = readdirSync(MIGRATION_DIR)
+      .filter((f) => f.endsWith(".sql"))
+      // Comments stripped first: a commented-out CREATE would otherwise read as a declaration.
+      .filter((f) => sqlNoComments(join(MIGRATION_DIR, f)).includes(`CREATE OR REPLACE FUNCTION public.${fn}(`))
+      .map((f) => `${MIGRATION_DIR}/${f}`)
+      .sort();
+    assert.deepStrictEqual(declaring, [OWNING_MIGRATION, origin].sort(),
+      `${fn} is declared in ${declaring.length} migration(s) — ${declaring.join(", ")}. This contract ` +
+        `allows exactly two, the owner and its original; a third can silently become the effective ` +
+        `definition depending on apply order, which is the drift book_bank_batch already has`);
+  }
 });
