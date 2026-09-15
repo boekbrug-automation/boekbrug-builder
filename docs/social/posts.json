@@ -1,0 +1,147 @@
+[
+ {
+  "id": "dag-01-ig",
+  "platform": "instagram",
+  "format": "carousel 1080x1350, 6 slides",
+  "slides": [
+   "Je hoeft geen boekhouding te doen.",
+   "Je hoeft alleen niets kwijt te raken.",
+   "Een bon in je jas. Een factuur in je mail. Een afschrift ergens op je laptop.",
+   "En aan het eind van het kwartaal: heb ik alles?",
+   "Facturen maak je hier. De rest fotografeer je, of laat je binnenkomen via je mail.",
+   "De brug tussen jou en je boekhouder."
+  ],
+  "caption": "Je bent ondernemer geworden voor je vak. Niet om 's avonds bonnen over te typen, en niet om in maart te zoeken naar die ene factuur van augustus.\n\nBoekBrug houdt je facturen, je bonnen, je bank en je btw bij elkaar. Aan het eind van het kwartaal staat alles klaar voor je boekhouder — geordend, compleet, met één knop op te halen.\n\nJe eerste 90 dagen met alles erop · daarna gratis verder · nooit automatisch afgeschreven.",
+  "cta": "Link in bio.",
+  "uiTerms": [],
+  "asset": "Typografisch. Geen schermafbeelding nodig — produceerbaar zonder ingelogde demo-administratie."
+ },
+ {
+  "id": "dag-01-li",
+  "platform": "linkedin",
+  "format": "tekst + 1200x1200 beeld",
+  "slides": [
+   "Je hoeft geen boekhouding te doen. Je hoeft alleen niets kwijt te raken."
+  ],
+  "caption": "De meeste zzp'ers hebben geen administratieprobleem omdat ze niet kunnen boekhouden.\n\nZe hebben er een omdat hun informatie overal staat. Een bon in de auto. Een factuur in de mail. Een afschrift op de laptop. Aan het eind van het kwartaal moet dat ineens bij elkaar komen, en dan pas blijkt wat er ontbreekt.\n\nDaar is BoekBrug voor. Niet om van een ondernemer een boekhouder te maken, maar om te zorgen dat er tussen ondernemer en boekhouder niets verdwijnt.",
+  "cta": "Je hoeft geen boekhouding te doen. Je hoeft alleen niets kwijt te raken.",
+  "uiTerms": [],
+  "asset": "Typografisch beeld met de twee beloftezinnen."
+ },
+ {
+  "id": "dag-02-ig",
+  "platform": "instagram",
+  "format": "carousel 1080x1350, 5 slides",
+  "slides": [
+   "Wat doet BoekBrug eigenlijk?",
+   "1 · Fotografeer of stuur door. Wij lezen bedrag, btw en leverancier eruit.",
+   "2 · Je bank erbij. Betalingen worden aan de juiste factuur gekoppeld.",
+   "3 · Het kwartaal staat klaar. Je ziet precies wat er nog mist.",
+   "Drie stappen. De rest hoef je niet te doen."
+  ],
+  "caption": "Geen lijst met functies — drie stappen.\n\nJe maakt een foto van een bon, of laat je inkoopfacturen binnenkomen via je mailbox. Je uploadt je bankafschrift. En aan het eind van het kwartaal druk je op Ben ik klaar? en zie je wat er staat en wat er nog mist.\n\nWat de app zeker weet, boekt hij zelf. Twijfelt hij, dan legt hij het aan je voor. Dat scheelt precies het werk waar niemand voor ondernemer is geworden.",
+  "cta": "Probeer het gratis — link in bio.",
+  "uiTerms": [
+   "Ben ik klaar?"
+  ],
+  "asset": "Drie schermen: Start, Inkomend en Ben ik klaar?. VEREIST ingelogde demo-administratie."
+ },
+ {
+  "id": "dag-03-ig",
+  "platform": "instagram",
+  "format": "carousel 1080x1350, 6 slides",
+  "slides": [
+   "Hoeveel bonnen ben jij dit jaar kwijtgeraakt?",
+   "Eén in je jas. Eén in de auto. Eén waarvan je denkt: die heb ik ergens.",
+   "Dat lijkt klein. Tot je aan je btw denkt.",
+   "Een bon die je niet meer hebt, is een kostenpost die je niet meer kunt opvoeren.",
+   "Maak daarom meteen een foto.",
+   "Foto maken → BoekBrug leest hem → klaar."
+  ],
+  "caption": "Het beste moment om een bon te bewaren is niet vrijdagavond, en niet als je boekhouder erom vraagt. Het is het moment dat je hem krijgt.\n\nMaak een foto met Bon of factuur toevoegen. BoekBrug leest de leverancier, het bedrag, de btw en de datum eruit en zet hem op de juiste plek. Weet de app het zeker, dan boekt hij hem zelf; twijfelt hij, dan vraagt hij het je.\n\nZo hoef je later niet te zoeken naar dat ene papiertje.",
+  "cta": "Bewaar deze post voor je volgende bon.",
+  "uiTerms": [
+   "Bon of factuur toevoegen"
+  ],
+  "asset": "Telefoon die een bon fotografeert + het scherm erna. VEREIST ingelogde demo-administratie."
+ },
+ {
+  "id": "dag-04-ig",
+  "platform": "instagram",
+  "format": "reel 1080x1920, ±30 sec",
+  "slides": [
+   "Nog steeds bedragen overtypen?",
+   "Upload een factuur of bon.",
+   "BoekBrug leest hem uit.",
+   "Leverancier · factuurnummer · datum · subtotaal · btw · totaal",
+   "Even controleren.",
+   "En overnemen in een factuur.",
+   "Zonder account. Drie per dag."
+  ],
+  "caption": "Je hoeft geen account te maken om te zien of dit werkt.\n\nOp boekbrug.nl/factuur-scannen upload je een pdf of een foto, en je krijgt de uitgelezen velden terug: leverancier, factuurnummer, datum, subtotaal, btw per tarief en het totaal. Er wordt niets opgeslagen en er wordt niet om je e-mailadres gevraagd.\n\nDrie scans per dag, gratis. Bevalt het, dan neem je het resultaat mee naar een factuur.",
+  "cta": "Probeer het zelf: boekbrug.nl/factuur-scannen",
+  "uiTerms": [],
+  "asset": "Schermopname van de publieke scanpagina. LET OP: de snelheidsbegrenzer is fail-closed en heeft Supabase nodig — niet opneembaar in een omgeving zonder toegang daartoe."
+ },
+ {
+  "id": "dag-05-ig",
+  "platform": "instagram",
+  "format": "carousel 1080x1350, 7 slides",
+  "slides": [
+   "Je eerste factuur maken hoeft niet ingewikkeld te zijn.",
+   "1 · Kies je klant.",
+   "2 · Vul de datums in: Factuurdatum, Vervaldatum, Leverdatum.",
+   "3 · Voeg je regels toe: Omschrijving, Aantal, Prijs excl. (€).",
+   "4 · Controleer het totaal.",
+   "5 · Opslaan en versturen — je krijgt eerst nog een controlescherm.",
+   "Het nummer vult BoekBrug zelf in: doorlopend, per jaar."
+  ],
+  "caption": "Vijf stappen, en één die de meeste mensen vergeten: de datums.\n\nFactuurdatum, Vervaldatum en Leverdatum zijn verplicht — niet omdat wij dat leuk vinden, maar omdat een factuur zonder die gegevens niet klopt. Vul je ze niet in, dan kom je niet verder.\n\nDaarna vul je je regels in en druk je op Opslaan en versturen. Je krijgt dan nog een controlescherm met de klant, het e-mailadres en het bedrag; pas na Ja, verstuur gaat de factuur echt de deur uit, als pdf — en waar het kan met de e-factuur ernaast.\n\nLiever eerst even bewaren? Dan blijft hij staan als Concept.",
+  "cta": "Maak je eerste factuur.",
+  "uiTerms": [
+   "Factuurdatum",
+   "Vervaldatum",
+   "Leverdatum",
+   "Omschrijving",
+   "Aantal",
+   "Prijs excl. (€)",
+   "Opslaan en versturen",
+   "Ja, verstuur",
+   "Concept"
+  ],
+  "asset": "Het factuurscherm in drie kaders. VEREIST ingelogde demo-administratie."
+ },
+ {
+  "id": "dag-06-li",
+  "platform": "linkedin",
+  "format": "tekst",
+  "slides": [
+   "Een factuur is niet alleen een bedrag."
+  ],
+  "caption": "Een factuur is niet: ik heb voor duizend euro gewerkt, dus stuur duizend euro.\n\nEr staan gegevens op die moeten kloppen. De datum waarop je hem stuurt. Een nummer dat doorloopt, zonder gaten. Jouw gegevens en die van je klant. Wat je geleverd hebt, en wanneer. En de btw.\n\nDat is geen administratieve pietluttigheid. Het is wat een factuur tot een factuur maakt, en het is wat een controleur naloopt.\n\nDaarom vraagt BoekBrug die velden voordat je kunt versturen, en vult het nummer zelf in — doorlopend, per jaar, per administratie. Niet omdat het mooi staat, maar omdat een gat in je nummerreeks een vraag is die je later moet beantwoorden.",
+  "cta": "",
+  "uiTerms": [],
+  "asset": "Geen schermafbeelding nodig."
+ },
+ {
+  "id": "dag-07-ig",
+  "platform": "instagram",
+  "format": "carousel 1080x1350, 6 slides",
+  "slides": [
+   "Vijf ritten voor dezelfde opdrachtgever.",
+   "Of drie klussen voor dezelfde huisbaas.",
+   "Schrijf je werk op bij Werk — of je uren bij Uren.",
+   "Selecteer wat klaar is en druk op Maak factuur.",
+   "Eén factuur, met een kop per klus en de regels eronder.",
+   "Het tarief van die klant staat er al in."
+  ],
+  "caption": "Je factureert niet elke rit los. Je klant wil er één, met alles eronder.\n\nSchrijf je werk op terwijl je het doet. Aan het eind van de week selecteer je wat klaar is en druk je op Maak factuur: BoekBrug maakt er één verzamelfactuur van, met een kop per stuk werk en de regels eronder. Het tarief dat je met die klant hebt afgesproken staat er al in.\n\nDe factuur staat dan klaar als concept. Jij kijkt hem na en verstuurt hem.",
+  "cta": "Zo factureer je een week in één keer.",
+  "uiTerms": [
+   "Werk",
+   "Uren",
+   "Maak factuur"
+  ],
+  "asset": "Het werkscherm met selectie + de concept-factuur erna. VEREIST ingelogde demo-administratie."
+ }
+]
