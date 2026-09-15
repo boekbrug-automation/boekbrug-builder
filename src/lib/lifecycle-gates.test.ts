@@ -24,6 +24,9 @@ import { LOCALE_BOOT_SCRIPT } from "./i18n/locale-boot";
 import { MESSAGES } from "./i18n/messages";
 import { AR_SETTLED, AR_DELIBERATE_SPLITS, AR_RETIRED, AR_RETIRED_EVERYWHERE, NL_RETIRED, EN_VAT_KEEPS_BTW } from "./i18n/ar-decisions";
 import { DOCUMENT_REFERRERS } from "./document-references";
+// [RECONCILE-VOLGORDE] The reconcile pass list as DATA — the gates below ask it rather than
+// restating it, so the declaration and the two orchestrators cannot drift apart again.
+import { RECONCILE_PASSES, passesFor, type ReconcilePassId } from "./reconcile-sequence";
 // [PAY-KEY-SCOPE] The triage this gate checks against is a function now, so the gate asks it
 // instead of parsing it out of source — see the test.
 import { isExpectedBookingRefusal } from "./incasso-settle";
@@ -34095,4 +34098,218 @@ test("[NOOIT-BETAALBAAR] all three bank doors refuse the same never-payable stat
         `allows exactly two, the owner and its original; a third can silently become the effective ` +
         `definition depending on apply order, which is the drift book_bank_batch already has`);
   }
+});
+
+// ─── [RECONCILE-VOLGORDE] The reconcile circle has one owner, and the two orchestrators obey it ──
+//
+// Measured before this existed: /api/cron/reconcile ran five passes and POST /api/reconcile/run ran
+// three, while the second one's own header said it ran "exactly the same three passes the cron
+// runs, in the same order". That was true when written. The cron then grew settleIncassoForUser and
+// proposeIncassoMandates; the word "incasso" appeared nowhere in the button's route; and nothing
+// could see the difference, because the list was kept by hand in two files and no gate compared
+// them. Production drift, in a money path, behind a comment claiming the opposite.
+//
+// src/lib/reconcile-sequence.ts now owns three things and nothing else: WHICH passes, in what
+// ORDER, and under whose AUTHORITY. These gates hold the callers to it. What they deliberately do
+// NOT hold is failure handling — the cron isolates per user and Sentry's per phase, the button
+// collects a `failed[]` the browser reads back, and those postures were measured as different on
+// purpose.
+
+const RECONCILE_CRON = "src/app/api/cron/reconcile/route.ts";
+const RECONCILE_MANUAL = "src/app/api/reconcile/run/route.ts";
+
+/** The helpers a pass wraps. A reconcile ORCHESTRATOR calling one of these directly is the bypass. */
+const RECONCILE_PASS_HELPERS = [
+  "runBankAutoConfirm",
+  "reconcileCashSettlements",
+  "applyLearnedBankCategories",
+  "settleIncassoForUser",
+  "proposeIncassoMandates",
+] as const;
+
+test("[RECONCILE-VOLGORDE] both orchestrators read their passes from the sequence, and name none of their own", () => {
+  // M1 / M2: the cron gaining a pass the sequence does not declare, or the button dropping the
+  // sequence and going back to its own list, both land here.
+  assert.match(code(RECONCILE_CRON), /for \(const pass of passesFor\("cron"\)\)/,
+    "the hourly reconcile must walk passesFor(\"cron\") — a cron that lists its own passes is the drift this file ended");
+  assert.match(code(RECONCILE_MANUAL), /for \(const pass of passesFor\("manual"\)\)/,
+    "the Matchen-button route must walk passesFor(\"manual\") — the same reason, from the side that fell behind");
+});
+
+test("[RECONCILE-VOLGORDE] neither orchestrator calls a pass helper behind the sequence's back", () => {
+  // M5: a direct invocation inside either orchestrator. Compared against code(), so the cron's
+  // [JET-GAP0] comment naming runBankAutoConfirm is not a false positive — it is a comment.
+  for (const file of [RECONCILE_CRON, RECONCILE_MANUAL]) {
+    const src = code(file);
+    for (const helper of RECONCILE_PASS_HELPERS) {
+      assert.doesNotMatch(src, new RegExp(`\\b${helper}\\b`),
+        `${file} names ${helper} in its own code. An orchestrator that can call a pass directly can ` +
+          `also run one the other orchestrator does not — which is exactly how the five-versus-three ` +
+          `drift happened. Add it to RECONCILE_PASSES with its authority and its runsIn instead`);
+    }
+  }
+});
+
+test("[RECONCILE-VOLGORDE] the bypass gate binds the two ORCHESTRATORS, never every caller", () => {
+  // The positive control, and it is the point: runBankAutoConfirm has eleven production call sites
+  // and only two of them are reconcile orchestrators. A gate that forbade the other nine would be
+  // this slice overreaching into domain invocations it measured as legitimate — the intake door
+  // closing the circle on one freshly-booked invoice is not a reconcile run.
+  for (const legitimate of [
+    "src/app/api/bank/auto-confirm/route.ts",
+    "src/app/api/intake/route.ts",
+    "src/app/api/bank/rematch/route.ts",
+  ]) {
+    assert.match(code(legitimate), /runBankAutoConfirm\(/,
+      `${legitimate} no longer calls runBankAutoConfirm directly. If that was deliberate, fine — but ` +
+        `this assertion exists so the gate above can never quietly grow into "nobody may book a bank ` +
+        `payment except the reconcile sequence"`);
+  }
+});
+
+test("[RECONCILE-VOLGORDE] the cron's pass loop awaits passes and its own follow-through, nothing else", () => {
+  // M1, the strong half. The gate above catches a KNOWN helper called directly; this one catches a
+  // sixth pass bolted into the cron under a name the gate has never heard of, because it reads what
+  // the loop actually awaits instead of looking for names it was told about.
+  const src = code(RECONCILE_CRON);
+  const start = src.indexOf('for (const pass of passesFor("cron"))');
+  const end = src.indexOf("usersProcessed += 1;");
+  // Both anchors are real code, not comments — code() strips comments, so a marker living in one is
+  // not in the string being cut, indexOf returns -1, and the window silently runs to end of file.
+  assert.ok(start >= 0, "the cron's pass loop must be findable");
+  assert.ok(end > start, "the end of the cron's pass loop must be findable, and must come after its start");
+  const loop = src.slice(start, end);
+
+  const awaited = new Set([...loop.matchAll(/await\s+([A-Za-z_$][\w$.]*)\s*\(/g)].map((m) => m[1]));
+  const allowed = new Set([
+    "pass.run",              // the sequence, which is the whole point
+    "createNotification",    // the cron's own bell — notifications are NOT the sequence's to own
+    "markIncassoSuggested",  // its follow-through on that bell: asked once per supplier, so stamped once
+  ]);
+  const strangers = [...awaited].filter((a) => !allowed.has(a));
+  assert.deepEqual(strangers, [],
+    `the cron's pass loop awaits ${strangers.join(", ")}. A reconcile pass belongs in RECONCILE_PASSES, ` +
+      `where its order and its authority are declared and the button can see it; work that is not a ` +
+      `pass belongs outside the loop`);
+});
+
+test("[RECONCILE-VOLGORDE] a pass writes with the client its declared authority allows", () => {
+  // M4, at the sequence. 'service-role' means it must not be able to reach the actor's client at
+  // all; 'actor-pay' means it must actually use it, rather than declaring one authority and
+  // quietly booking with the other.
+  const src = code("src/lib/reconcile-sequence.ts");
+  const anchors = RECONCILE_PASSES.map((p) => {
+    const m = new RegExp(`id:\\s*"${p.id}",\\s*authority:`).exec(src);
+    assert.ok(m, `the declaration of pass '${p.id}' must be findable in the sequence's own source`);
+    return { id: p.id, authority: p.authority, at: m.index };
+  }).sort((a, b) => a.at - b.at);
+
+  const listEnd = src.indexOf("] as const;");
+  assert.ok(listEnd > anchors[anchors.length - 1].at, "the end of RECONCILE_PASSES must be findable, after the last pass");
+
+  for (let i = 0; i < anchors.length; i++) {
+    const block = src.slice(anchors[i].at, i + 1 < anchors.length ? anchors[i + 1].at : listEnd);
+    assert.ok(block.includes("ctx."), `the block cut for '${anchors[i].id}' contains no pass body at all — the window is wrong`);
+    if (anchors[i].authority === "service-role") {
+      assert.ok(!block.includes("ctx.actorPay"),
+        `'${anchors[i].id}' is declared service-role but reaches for ctx.actorPay. Either it books as the ` +
+          `acting owner — then say so and take the consequences at both orchestrators — or it does not`);
+    } else {
+      assert.ok(block.includes("ctx.actorPay"),
+        `'${anchors[i].id}' is declared actor-pay but never uses ctx.actorPay. A pass that books with the ` +
+          `service client while claiming the actor's authority is the misleading name this file was built to end`);
+    }
+  }
+});
+
+test("[RECONCILE-VOLGORDE] each orchestrator binds the actor role to its own actor", () => {
+  // M4, at the callers. The cron has no session in existence, so its actor client is the pipeline;
+  // the button has one, and handing it over is what makes the invoice→'paid' write carry a real
+  // auth.uid() so the accountant-'verwerkt' trigger fires. Swapping either is a change of who books.
+  const cron = code(RECONCILE_CRON);
+  const manual = code(RECONCILE_MANUAL);
+
+  assert.match(cron, /actorPay:\s*pipeline\b/,
+    "the unattended cron must bind actorPay to the service-role pipeline — there is no session to bind");
+  assert.doesNotMatch(cron, /actorPay:\s*supabase\b/,
+    "the cron cannot bind actorPay to a session client; it runs for every user with nobody signed in");
+
+  assert.match(manual, /actorPay:\s*supabase\b/,
+    "the Matchen button must bind actorPay to the SESSION client, or the accountant-'verwerkt' trigger " +
+      "stops seeing a real auth.uid() on the one pass that writes invoice→'paid'");
+  assert.doesNotMatch(manual, /actorPay:\s*pipeline\b/,
+    "the button must not escalate a human tap to service-role");
+
+  // …and neither may quietly hand the service role something that is not the pipeline.
+  for (const [file, src] of [[RECONCILE_CRON, cron], [RECONCILE_MANUAL, manual]] as const) {
+    assert.match(src, /service:\s*pipeline\b/,
+      `${file} must bind the service role to the service-role pipeline, in both orchestrators, as it is today`);
+  }
+});
+
+test("[RECONCILE-VOLGORDE] no orchestrator claims a pass count of its own", () => {
+  // M6. The stale claim is the reason this slice exists: "exactly the same three passes the cron
+  // runs, in the same order", in a file that ran three while the cron ran five. Read RAW — code()
+  // strips comments, and a comment is exactly where this lie lived.
+  for (const file of [RECONCILE_CRON, RECONCILE_MANUAL]) {
+    const raw = readFileSync(file, "utf8");
+    assert.doesNotMatch(raw, /same three passes/i,
+      `${file} still carries the claim that broke. The contract is derived from RECONCILE_PASSES now; ` +
+        `a sentence counting passes can only go stale again`);
+    assert.doesNotMatch(raw, /\b(three|four|five|3|4|5)\s+passes\b/i,
+      `${file} counts its passes in prose. It does not know how many it runs — passesFor() does, and ` +
+        `that is the entire repair`);
+  }
+});
+
+test("[RECONCILE-VOLGORDE] every declared pass has a caller that handles it", () => {
+  // The other direction, and the one a declaration-only contract gets wrong: a pass can be declared,
+  // ordered and authorised and still be handled by nobody, running its money write with its result
+  // dropped on the floor. Each orchestrator's switch must name every pass it is declared to run.
+  const handled: Record<"cron" | "manual", string> = {
+    cron: code(RECONCILE_CRON),
+    manual: code(RECONCILE_MANUAL),
+  };
+  for (const caller of ["cron", "manual"] as const) {
+    for (const pass of passesFor(caller)) {
+      assert.match(handled[caller], new RegExp(`case "${pass.id}":`),
+        `${caller === "cron" ? RECONCILE_CRON : RECONCILE_MANUAL} runs pass '${pass.id}' but has no branch ` +
+          `for its result. It would book, and report nothing`);
+    }
+    // …and the reverse: a branch for a pass this orchestrator does not run is a reader being told
+    // work happens here that never does.
+    const mine = new Set<ReconcilePassId>(passesFor(caller).map((p) => p.id));
+    for (const pass of RECONCILE_PASSES) {
+      if (mine.has(pass.id)) continue;
+      assert.doesNotMatch(handled[caller], new RegExp(`case "${pass.id}":`),
+        `${caller} has a branch for '${pass.id}', which it is not declared to run`);
+    }
+  }
+});
+
+test("[RECONCILE-VOLGORDE] the words the button reports back are the words its screen switches on", () => {
+  // The route's `failed[]` is read by the BROWSER: IncomingManageClient asks whether 'map' is in it
+  // before applying a fresh badge map, and applying one the run never built wiped every "In
+  // bankafschrift" badge on the page. So these strings are a cross-file contract, not internal
+  // names — which is exactly why the route reports its OWN words for a pass rather than the pass
+  // ids. Renaming a pass id must never silently rename a value a screen branches on.
+  const route = code(RECONCILE_MANUAL);
+  const screen = readFileSync("src/app/dashboard/incoming/manage/IncomingManageClient.tsx", "utf8");
+
+  const doc = /Names the passes that failed \(([^)]*)\)/.exec(screen);
+  assert.ok(doc, "the screen must still document which phase names it can be handed");
+  const expected = [...doc[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]).sort();
+
+  // 'map' is the route's own closing step — the post-run reconciliation map — and not a reconcile
+  // pass, so it is named here rather than derived from the sequence.
+  const emitted = new Set<string>(["map"]);
+  for (const pass of passesFor("manual")) {
+    const m = new RegExp(`"${pass.id}":\\s*"([a-z-]+)"`).exec(route);
+    assert.ok(m, `the button must give pass '${pass.id}' a word to report back`);
+    emitted.add(m[1]);
+  }
+
+  assert.deepEqual([...emitted].sort(), expected,
+    "the button can report a phase the screen does not know, or the screen expects one the button " +
+      "can never send. Either way a failed run reads on screen as a clean one that found nothing");
 });

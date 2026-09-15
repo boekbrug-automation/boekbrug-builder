@@ -3,13 +3,19 @@
 // matching circle for the signed-in owner, on a tap, instead of waiting for the hourly cron
 // (/api/cron/reconcile) or for a browser to happen to sit on /dashboard/bank or /kas.
 //
-// It runs exactly the same three passes the cron runs, in the same order, on the same shared
-// helpers — NOT a second matching engine:
-//   1. runBankAutoConfirm      → books the near-certain bank↔factuur matches (invoice → 'paid',
-//                                bank line → 'matched'), audited + one-tap reversible.
-//   2. reconcileCashSettlements → syncs the kasboek against the cash-paid invoices (create /
-//                                heal / remove the linked 'betaling' entry).
-//   3. applyLearnedBankCategories → codes fresh bank lines from the owner's learned memory.
+// [RECONCILE-VOLGORDE] WHICH passes run here, in what ORDER, and under whose AUTHORITY is not
+// decided in this file — it is read from src/lib/reconcile-sequence.ts, the one owner of that
+// list, which the hourly cron reads too. This header used to COUNT its passes and claim they were
+// exactly the cron's, in the cron's order. That was true when it was written, and then the cron
+// grew two more (incasso settle + mandate proposal) while this route did not. Nothing could see
+// the difference, because the two lists were kept by hand in two files and no gate compared them.
+// A route that names or counts its own passes is a route that can silently fall behind, so this
+// one does neither: it walks passesFor("manual") and handles whatever comes back.
+//
+// What stays HERE, and deliberately: the failure semantics. Each pass is isolated, `failed` names
+// the ones that broke, and `ok` is false whenever anything failed — the browser reads that array
+// back. The cron answers failure a different way (per-user isolation, Sentry per phase), and
+// flattening the two into one policy would be a retry framework nobody asked for.
 // Then it returns the FRESH per-invoice reconciliation map (buildInvoiceReconciliationMap, the
 // same builder the badges use) so the caller can update its rows and honestly report what is
 // left for the human — without a second round trip that could disagree with itself.
@@ -27,14 +33,15 @@ import { NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
-import { runBankAutoConfirm, type AutoConfirmed } from "@/lib/bank-auto-confirm";
-import { reconcileCashSettlements, type CashSettleSummary } from "@/lib/cash-settle";
-import { applyLearnedBankCategories } from "@/lib/bank-auto-categorize";
+import { passesFor, type ReconcilePassId, type AutoConfirmed, type CashSettleSummary } from "@/lib/reconcile-sequence";
 import { buildInvoiceReconciliationMap } from "@/lib/bank-recon-map";
+import { amsterdamToday } from "@/lib/format-nl";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
-// The three passes are read-heavy on a busy account (paginated statements × open invoices).
+// The passes are read-heavy on a busy account (paginated statements × open invoices). This line
+// used to count them, which is the same hand-kept number the header above got wrong — found by the
+// [RECONCILE-VOLGORDE] gate, a few lines away from the claim it was written for.
 export const maxDuration = 120;
 
 export async function POST() {
@@ -65,33 +72,60 @@ export async function POST() {
     });
   };
 
-  // 1) Bank ↔ facturen. The owner's session client does the invoice→'paid' write (so the
-  //    accountant-'verwerkt' trigger fires with a real auth.uid()); the bank-line link uses the
-  //    user-pinned pipeline. The bell notification is sent from inside the helper.
+  // [RECONCILE-VOLGORDE] The phase names this route reports back. They are a PUBLIC contract —
+  // IncomingManageClient reads `failed` and asks it whether 'map' is in there — so they are the
+  // route's own words for a pass, not the pass ids, and they stay exactly as they were.
+  //
+  // A word for EVERY pass, including the two this route does not run. That is the tripwire, not an
+  // oversight: a Record over every ReconcilePassId stops this file compiling the moment a sixth pass
+  // is declared, so nobody can add one and leave the button with nothing to say about it.
+  const PHASE: Record<ReconcilePassId, string> = {
+    "bank-auto-confirm": "bank",
+    "cash-settle": "kas",
+    "auto-categorize": "categorize",
+    "incasso-settle": "incasso",
+    "incasso-propose": "incasso-voorstel",
+  };
+
+  // [RECONCILE-VOLGORDE] Clients named by the ROLE they play. `actorPay` is the SESSION client
+  // here — that is what makes the invoice→'paid' write carry a real auth.uid(), so the
+  // accountant-'verwerkt' trigger fires — while everything that is not the actor's own money
+  // decision reads and writes through the service-role pipeline.
+  const ctx = { actorPay: supabase, service: pipeline, userId: user.id, today: amsterdamToday() };
+
   let booked: AutoConfirmed[] = [];
-  try {
-    booked = await runBankAutoConfirm({ payClient: supabase, pipeline, userId: user.id });
-  } catch (e) {
-    fail("bank", e);
-  }
-
-  // 2) Kas ↔ facturen. Self-healing and idempotent; reports what it actually changed so the
-  //    button never claims drawer work it did not do.
   let cash: CashSettleSummary = { ok: false, created: 0, updated: 0, deleted: 0 };
-  try {
-    cash = await reconcileCashSettlements(supabase, user.id);
-    if (!cash.ok) failed.push("kas");
-  } catch (e) {
-    fail("kas", e);
-  }
-
-  // 3) Learned categorization of the remaining uncategorized bank lines. An automatic category
-  //    lands in the P&L immediately, so it stays reviewable — see /dashboard/bank/categoriseren.
   let categorized = 0;
-  try {
-    categorized = (await applyLearnedBankCategories({ pipeline, userId: user.id })).length;
-  } catch (e) {
-    fail("categorize", e);
+
+  for (const pass of passesFor("manual")) {
+    try {
+      const r = await pass.run(ctx);
+      switch (r.id) {
+        case "bank-auto-confirm":
+          // The bell notification is sent from inside the helper.
+          booked = r.booked;
+          break;
+        case "cash-settle":
+          // Self-healing and idempotent; reports what it actually changed so the button never
+          // claims drawer work it did not do. A bail is a failure even though it never threw.
+          cash = r.cash;
+          if (!cash.ok) failed.push(PHASE["cash-settle"]);
+          break;
+        case "auto-categorize":
+          // An automatic category lands in the P&L immediately, so it stays reviewable — see
+          // /dashboard/bank/categoriseren.
+          categorized = r.categorized.length;
+          break;
+        default:
+          // A pass declared to run here that this route does not handle would otherwise succeed
+          // silently and report nothing. It is named in `failed` instead. The compiler already
+          // refuses a NEW pass id outright — PHASE is a Record over every ReconcilePassId, so a
+          // sixth pass stops this file type-checking until someone gives it a word to report.
+          fail(PHASE[r.id], new Error(`reconcile pass '${r.id}' ran here but this route does not handle it`));
+      }
+    } catch (e) {
+      fail(PHASE[pass.id], e);
+    }
   }
 
   // 4) The state AFTER the engine ran: which invoices are now in the statement, and which
