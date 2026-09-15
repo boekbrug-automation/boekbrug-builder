@@ -5885,8 +5885,9 @@ test("[KOR-FACTUUR] the screen offers no rate that would be refused, and the doo
 // a promise".
 //
 // The expected outcomes must STAY silent, or the alarm becomes noise nobody reads: the RPC's own
-// 55000 refusal is a race with a human and happens on any busy account, and for the single-invoice
-// write the two ordinary cases arrive as zero rows, not as an error.
+// 55000 refusal is a race with a human and happens on any busy account. [EEN-GELDMUTATIE] Since
+// the single-invoice write became a door call too, its ordinary cases arrive the same way — as a
+// 55000 refusal or an empty result, never as a fault — and are triaged on the contracted wording.
 test("[BATCH-STIL] a bank booking that fails for an unexpected reason reaches someone", () => {
   const src = code("src/lib/bank-auto-confirm.ts");
 
@@ -11220,14 +11221,31 @@ test("[PARTIAL-PAY] a path that marks an invoice paid also advances amount_paid"
   // together, every one of them genuinely paid and every one of them reported as a discrepancy.
   //
   // A false alarm on the panel that exists to buy trust is worse than no panel.
+  // [EEN-GELDMUTATIE] The property is unchanged; the place that holds it moved. This pass no longer
+  // writes any of the three halves itself — it calls confirm_bank_payment, which sets amount_paid
+  // and writes the link with the SAME v_applied inside one transaction, so the two cannot drift by
+  // construction rather than by two expressions agreeing. The rollback assertion is gone because
+  // the rollback is gone: a transaction does not need a compensator.
   const auto = code("src/lib/bank-auto-confirm.ts");
-  assert.match(auto, /\.update\(\{ status: "paid", amount_paid: Math\.abs\(Number\(inv\.total_inc_btw \?\? 0\)\)/,
-    "the pay write must advance amount_paid with the same amount it puts on the link");
-  // …and the rollback puts it back, or a successful undo leaves an invoice that is not paid and
-  // still carries an amount — the mirror of the same defect.
-  assert.match(auto, /\.update\(\{ status: inv\.status, amount_paid: inv\.amount_paid \?\? 0,/);
-  // The two amounts come from one expression, so they cannot drift apart.
-  assert.match(auto, /\[invoiceId\]: Math\.abs\(Number\(inv\.total_inc_btw \?\? 0\)\),/);
+  assert.doesNotMatch(auto, /status: "paid"/,
+    "the auto pass must not write an invoice paid itself — that write belongs to the payment door");
+  assert.match(auto, /rpc\("confirm_bank_payment"/,
+    "…and it must book through the door that advances amount_paid and the link together");
+
+  // sqlNoComments, not code(): code() strips JS comments and leaves SQL `--` lines intact, so every
+  // assertion below would also match the prose ABOVE the statement it is meant to check. Measured:
+  // four mutations of this door survived that way before the cutter was swapped.
+  const body = functionBody(sqlNoComments(PAY_DOOR_MIGRATION), PAY_DOOR);
+  assert.match(body, /amount_paid\s*=\s*v_total/,
+    "on completion the door clamps amount_paid to the invoice total");
+  assert.match(body, /amount_paid\s*=\s*v_now_paid/,
+    "…and short of completion it advances it by exactly what it applied");
+  // The VALUES clause itself, not "v_applied appears somewhere near the INSERT" — the ON CONFLICT
+  // line below it also names v_applied, so a loose match passes on a link written with a zero.
+  assert.match(body, /VALUES \(p_user_id, p_tx_id, p_invoice_id, v_applied\)/,
+    "the link carries the applied amount itself, from the same variable, in the same transaction");
+  assert.match(body, /amount_applied = coalesce\(public\.bank_tx_invoices\.amount_applied, 0\) \+ v_applied/,
+    "…and a second booking on the same pair ACCUMULATES rather than replacing");
 });
 
 test("[EDIT-LINES-SAFE] a delete-then-insert may not insert on a delete that failed", () => {
@@ -34312,4 +34330,123 @@ test("[RECONCILE-VOLGORDE] the words the button reports back are the words its s
   assert.deepEqual([...emitted].sort(), expected,
     "the button can report a phase the screen does not know, or the screen expects one the button " +
       "can never send. Either way a failed run reads on screen as a clean one that found nothing");
+});
+
+// ─── [EEN-GELDMUTATIE] The automatic booking is one financial mutation, like its four siblings ──
+//
+// Measured before this existed: five writers put money on an invoice. Four of them —
+// apply_bank_payment, confirm_bank_payment, allocate_bank_payment and book_bank_batch — lock the
+// bank line AND the invoice, decide, write all three halves (invoice payment state, bank line
+// state, allocation row) and commit or roll back as one. The fifth, the 1:1 pass in
+// bank-auto-confirm.ts, wrote the three halves as separate statements with a hand-written
+// compensating update, wrote the allocation row LAST with no compensation at all, and re-read the
+// line's remaining budget nowhere.
+//
+// It was also the largest: 160 bookings in the production audit trail against 30 batch and 13
+// human. The two lines in production that violate `Σ amount_applied ≤ |line|` are the invariant
+// that had no enforcement on this path.
+//
+// These gates hold the pass to the door. They do NOT touch what gets booked: the matcher, the
+// tier, the confidence veto, the kas gate and the hidden-competitor scan are out of scope here and
+// deliberately unasserted by this block.
+
+const AUTO_CONFIRM = "src/lib/bank-auto-confirm.ts";
+/** The door this pass books through, and the migration that owns its definition. */
+const PAY_DOOR = "confirm_bank_payment";
+const PAY_DOOR_MIGRATION = "supabase/migrations/bank_rpc_never_payable_states.sql";
+
+test("[EEN-GELDMUTATIE] the automatic pass books through the payment door, not by hand", () => {
+  const src = code(AUTO_CONFIRM);
+  assert.match(src, new RegExp(`payClient\\.rpc\\("${PAY_DOOR}"`),
+    `the 1:1 pass must book through ${PAY_DOOR} — and on payClient, so the accountant-'verwerkt' ` +
+      "trigger fires with a real auth.uid() wherever a session exists");
+  assert.match(src, /rpc\("book_bank_batch"/, "the batch pass keeps its own door, unchanged");
+});
+
+test("[EEN-GELDMUTATIE] the pass writes no half of a booking itself", () => {
+  const src = code(AUTO_CONFIRM);
+  // The three halves, each as the shape this file used to write.
+  assert.doesNotMatch(src, /status: "paid"/,
+    "an invoice is marked paid by the door, inside the transaction, or not at all");
+  // Reading the candidate invoices is this pass's job and stays. WRITING one is the door's.
+  assert.doesNotMatch(src, /\.from\("invoices"\)[\s\S]{0,400}?\.(update|insert|upsert)\(/,
+    "this file must not write the invoices table — it selects candidates, the door mutates them");
+  assert.doesNotMatch(src, /recordPaymentLinks/,
+    "the allocation row is written INSIDE the transaction by the door. recordPaymentLinks upserts " +
+      "(replacing amount_applied) while the door accumulates — two writers, two arithmetics, one row");
+  assert.doesNotMatch(src, /status: "matched"/,
+    "the bank line is flipped by the door, in the same transaction as the money");
+});
+
+test("[EEN-GELDMUTATIE] no compensating rollback survives, because a transaction needs none", () => {
+  const src = code(AUTO_CONFIRM);
+  assert.doesNotMatch(src, /status: inv\.status, amount_paid: inv\.amount_paid/,
+    "the hand-written undo of a half-booking is gone. It could itself fail — [ROLLBACK-LOUD] said " +
+      "so — and a failed compensator is a broken invariant with a log line, not a rolled-back write");
+  assert.doesNotMatch(src, /pay rollback FAILED/,
+    "…and so is the alarm that existed only because the compensator could fail");
+});
+
+test("[EEN-GELDMUTATIE] the only bank_transactions write left is the non-financial badge", () => {
+  const src = code(AUTO_CONFIRM);
+  // Cut each .from("bank_transactions") … .update({ … }) and assert what it sets. The reason column
+  // is a UI hint ('controleer' on an amount-only match); it carries no money and is written after
+  // the transaction has committed, on purpose.
+  const updates = [...src.matchAll(/\.from\("bank_transactions"\)[\s\S]{0,200}?\.update\(([\s\S]{0,160}?)\)/g)];
+  // A `for` over an empty list passes, and a gate that passes for the wrong reason on the day it
+  // matters is the one failure mode this file keeps re-learning. The badge write must BE there:
+  // without it an amount-only match reaches the bank screen looking exactly as certain as a
+  // reference match. [ALARM] holds the other half — that its failure is reported, not logged.
+  assert.equal(updates.length, 1,
+    `expected exactly the one non-financial badge write, found ${updates.length}`);
+  for (const u of updates) {
+    assert.match(u[1], /auto_match_reason/,
+      `a bank_transactions update in this file sets ${u[1].trim().slice(0, 80)} — the line's status ` +
+        "and its invoice_id are the door's to write, inside the money transaction");
+  }
+});
+
+test("[EEN-GELDMUTATIE] an expected refusal is a skip; anything else reaches someone", () => {
+  const src = code(AUTO_CONFIRM);
+  // [VERWERKT-WOORDENLIJST] The door's refusals are ordinary outcomes for an unattended pass. Each
+  // substring here is one the payment RPCs are contractually held to; a pass that treated them as
+  // faults would alarm on every busy account, and one that treated EVERY error as expected would
+  // hide a database refusing a money write.
+  for (const phrase of ["already fully paid", "already covered", "fully applied", "verwerkt", "no longer payable", "[NOOIT-BETAALBAAR]"]) {
+    assert.ok(src.includes(phrase),
+      `the refusal triage must name '${phrase}' — it is one of the wordings the payment doors raise`);
+  }
+  assert.match(src, /if \(!expected\)[\s\S]{0,200}reportHandledFailure/,
+    "an UNEXPECTED refusal must still reach someone — a database refusing a money write is never routine");
+  assert.doesNotMatch(src, /if \(bookErr\) continue;/,
+    "…and the triage must not decay into a bare swallow, which is how the batch refusal hid for months");
+});
+
+test("[EEN-GELDMUTATIE] the door it books through really is one transaction with both locks", () => {
+  // Read the door itself, not a comment about it. This is the property the whole slice buys: if
+  // confirm_bank_payment ever stopped locking or stopped checking the line's budget, the auto pass
+  // would inherit that silently, because it no longer has guards of its own.
+  // SQL comments stripped first — this file explains each guard in prose directly above it, so a
+  // gate reading the raw text cannot tell a live RAISE from the paragraph describing it.
+  const body = functionBody(sqlNoComments(PAY_DOOR_MIGRATION), PAY_DOOR);
+
+  const locks = [...body.matchAll(/FOR UPDATE/g)].length;
+  assert.ok(locks >= 2, `the door must lock BOTH the bank line and the invoice; found ${locks} FOR UPDATE`);
+  assert.match(body, /FROM public\.bank_transactions[\s\S]{0,200}FOR UPDATE/,
+    "the bank line is locked first — every path that spends this line takes that lock");
+  assert.match(body, /FROM public\.invoices[\s\S]{0,300}FOR UPDATE/, "and the invoice under it");
+
+  // allocation ≤ line: the signed sum of what this line already gave elsewhere, read under the lock.
+  assert.match(body, /v_elsewhere/, "the door must read what the line already gave to other invoices");
+  assert.match(body, /v_available\s*:=\s*v_tx_amount\s*-\s*v_elsewhere/,
+    "…and derive what is still available from it");
+  assert.match(body, /v_applied\s*:=\s*LEAST\(v_available, v_open\)/,
+    "the applied amount is capped by the LINE's remaining budget as well as the invoice's — this is " +
+      "the invariant with two live violations in production, and the reason this pass moved here");
+
+  // The three guards the pass used to carry itself.
+  assert.match(body, /RAISE EXCEPTION '\[BANK-CONFIRM\] invoice already fully paid'/,
+    "paid guard — and by its exact refusal wording, which fourteen callers triage on");
+  assert.match(body, /IF v_acc_status = 'verwerkt' THEN/, "accountant-lock guard, as a live condition");
+  assert.match(body, /RAISE EXCEPTION '\[NOOIT-BETAALBAAR\] invoice state/, "payable-state guard");
 });
