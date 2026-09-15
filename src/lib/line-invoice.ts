@@ -64,7 +64,17 @@ export function isLineRate(v: unknown): v is LineRate {
 
 export function buildLineInvoice(input: LineInvoiceInput): LineInvoiceVerdict {
   const amount = Number(input.amount);
-  if (!Number.isFinite(amount) || Math.abs(amount) < 0.005) {
+  // [HANDGESCHREVEN-BOEKING] One cent, not half a cent. The payment door this route now books
+  // through (confirm_bank_payment) refuses a line whose remaining value is <= EUR 0.01: its v_eps
+  // is a ROUNDING tolerance — "covered within a cent counts as paid" — and the same constant
+  // decides whether a line still has anything worth giving. Measured in production: the only line
+  // at or under a cent is a EUR 0.01 Mollie account-verification deposit, no invoice anywhere is
+  // that small, and no allocation has ever been written from such a line.
+  //
+  // The floor is repeated HERE rather than left to the door for one reason: for a line that was
+  // never worth a cent the door's wording is "payment fully applied", and nothing was applied.
+  // The owner must read a sentence that is true.
+  if (!Number.isFinite(amount) || Math.abs(amount) <= 0.01) {
     return { ok: false, code: "zero_amount", reason: "Deze regel heeft geen bedrag." };
   }
   if (!ISO.test(input.date)) return { ok: false, code: "bad_date", reason: "Deze regel heeft geen bruikbare datum." };
