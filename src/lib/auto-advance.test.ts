@@ -295,6 +295,23 @@ console.log("\n— [E-FACTUUR-BESLECHT] de leverancier stuurde zijn eigen cijfer
   }));
   check("nul btw zonder expliciet 0%-tarief wacht nog steeds", nulBtw.advance === false && nulBtw.reason === "zero_btw_not_explicit_zero_rate");
 
+  // [NUL-BTW-STIL] Een VERLEGDE factuur draagt geen BTW en geen tarief omdat dat correct is; die
+  // werd hier vastgehouden onder een leesfout die niet bestond. Rubriek 2a doet er een laag verder
+  // wel iets mee — het document zelf is compleet.
+  const verlegd = shouldAutoAdvanceInvoice(clean({
+    btwRate: null,
+    health: {
+      ...clean().health,
+      btw_amount: 0,
+      field_confidence: {
+        vendor: 0.98, invoice_number: 0.97, invoice_date: 0.99, amount: 0.96,
+        _einvoice: efact({ btwAmount: 0 }),
+        _btw_verlegd: { grondslag: 100 },
+      },
+    },
+  }));
+  check("een verlegde factuur wordt niet vastgehouden op een nul-BTW", verlegd.reason !== "zero_btw_not_explicit_zero_rate");
+
   // Rommel in _einvoice is geen e-factuur. eInvoiceOf valideert; een half object leest als niets,
   // en "niets" mag nooit als "beslecht" gelden — anders is dit een poort die je kunt omzeilen door
   // onzin op te slaan.
@@ -324,6 +341,36 @@ console.log("\n— [ONGEGROND-AFGELEID] a gross the app derived never books unat
     shouldAutoAdvanceInvoice(clean({
       health: { ...clean().health, field_confidence: { ...clean().health.field_confidence, _total_derived: "excl" as const } },
     })).reason !== "total_derived_never_grounded");
+}
+
+// [VREEMDE-VALUTA] Een factuur in een andere munt boekt nooit vanzelf, en een factuur die niets
+// over een munt zei verandert niet van gedrag — dat laatste is 100 % van alles wat er nu ligt.
+{
+  const fc = () => ({ ...clean().health.field_confidence });
+  const dollar = shouldAutoAdvanceInvoice(clean({
+    health: { ...clean().health, field_confidence: { ...fc(), _valuta: { code: "USD" } } },
+  }));
+  check("een dollarfactuur wordt vastgehouden", dollar.advance === false && dollar.reason === "foreign_currency");
+
+  const euro = shouldAutoAdvanceInvoice(clean({
+    health: { ...clean().health, field_confidence: { ...fc(), _valuta: { code: "EUR" } } },
+  }));
+  check("een expliciete euro houdt niets tegen", euro.reason !== "foreign_currency");
+
+  // De belangrijkste: geen munt gelezen is geen reden. Zou dit vastgehouden worden, dan stond de
+  // hele verwerkingsstraat stil op documenten die nooit iets over een munt hebben gezegd.
+  check("geen munt gelezen → geen vreemde-valutablokkade",
+    shouldAutoAdvanceInvoice(clean()).reason !== "foreign_currency");
+}
+
+// [ZELFFACTUUR] Het woord op het papier houdt het document tegen; het beslist niets.
+{
+  const fc = () => ({ ...clean().health.field_confidence });
+  const zelf = shouldAutoAdvanceInvoice(clean({
+    health: { ...clean().health, field_confidence: { ...fc(), _zelffactuur: true } },
+  }));
+  check("een zelffactuur boekt nooit vanzelf", zelf.advance === false && zelf.reason === "self_billed");
+  check("zonder dat woord verandert er niets", shouldAutoAdvanceInvoice(clean()).reason !== "self_billed");
 }
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

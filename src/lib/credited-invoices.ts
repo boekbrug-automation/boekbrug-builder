@@ -281,3 +281,88 @@ export async function creditedOnInvoice(
     ).get(invoiceId) ?? 0
   );
 }
+
+// ── [CREDIT-TERUG] The creditnota the owner still has to REFUND ─────────────────────────────
+//
+// A creditnota is money the owner OWES ([CREDIT-SIGN]), and no screen said so: Vandaag listed
+// what to pay and what to chase, and a credit note sat in neither. Whether money has to go back
+// depends on the invoice it corrects: a credit against an UNPAID invoice cancels the claim and
+// nothing moves; a credit against a PAID invoice is money to send back; a credit against a partly
+// paid invoice first uses up what was still open, and only the rest goes back. Several credits
+// against one invoice use that open remainder in order, oldest first. A standalone creditnota (an
+// invoice issued outside BoekBrug, [CREDITNOTA-EXTERN]) has no invoice to look at here, so its
+// whole amount is listed and flagged for the owner to judge. Recording the refund is marking the
+// creditnota 'paid' on the sales list ("Voldaan!"), which takes it off this list.
+
+/** A creditnota row, as the refund rule reads it. */
+export interface RefundCreditnotaRow {
+  id: string;
+  invoice_number?: string | null;
+  invoice_date?: string | null;
+  client_name?: string | null;
+  status?: string | null;
+  total_inc_btw?: number | null;
+  original_invoice_id?: string | null;
+}
+
+/** The corrected invoice, as much of it as the rule needs. */
+export interface RefundOriginalRow {
+  total_inc_btw?: number | null;
+  amount_paid?: number | null;
+}
+
+export interface RefundableCredit {
+  id: string;
+  invoiceNumber: string | null;
+  invoiceDate: string | null;
+  clientName: string | null;
+  /** What still has to go back to the customer, as a positive amount. */
+  amount: number;
+  /** No invoice to compare with (outside BoekBrug, or not readable): the whole credit is listed. */
+  standalone: boolean;
+}
+
+/** A creditnota that has not been settled: 'paid' on a creditnota is the refund, recorded. */
+const OPEN_CREDIT_STATUSES: ReadonlySet<string> = new Set(["sent", "overdue"]);
+
+/**
+ * The creditnotas that still owe the customer money, oldest first, with the amount each one owes.
+ *
+ * @param creditnotas the owner's outgoing creditnotas (any status; settled ones are skipped here)
+ * @param originals   the corrected invoices by id — total and what the customer had paid
+ */
+export function refundableCreditnotas(
+  creditnotas: readonly RefundCreditnotaRow[] | null | undefined,
+  originals: ReadonlyMap<string, RefundOriginalRow>
+): RefundableCredit[] {
+  const open = (creditnotas ?? [])
+    .filter((c) => OPEN_CREDIT_STATUSES.has(c.status ?? "") && magnitude(c.total_inc_btw) > EPSILON)
+    .slice()
+    .sort((a, b) => (a.invoice_date ?? "").localeCompare(b.invoice_date ?? "") || a.id.localeCompare(b.id));
+
+  // What was still open on each corrected invoice BEFORE its credits: total minus paid. Every
+  // credit against that invoice draws on this first; what a credit cannot draw goes back.
+  const remainingOpen = new Map<string, number>();
+  const out: RefundableCredit[] = [];
+  for (const c of open) {
+    const amount = magnitude(c.total_inc_btw);
+    const originalId = c.original_invoice_id ?? null;
+    const original = originalId ? originals.get(originalId) : undefined;
+    if (!originalId || !original) {
+      out.push({
+        id: c.id, invoiceNumber: c.invoice_number ?? null, invoiceDate: c.invoice_date ?? null,
+        clientName: c.client_name ?? null, amount: round2(amount), standalone: true,
+      });
+      continue;
+    }
+    const rest = remainingOpen.get(originalId) ?? openAfterCredit(original.total_inc_btw, original.amount_paid, 0);
+    const refund = amount - rest;
+    remainingOpen.set(originalId, Math.max(0, rest - amount));
+    if (refund <= EPSILON) continue;
+    out.push({
+      id: c.id, invoiceNumber: c.invoice_number ?? null, invoiceDate: c.invoice_date ?? null,
+      clientName: c.client_name ?? null, amount: round2(refund), standalone: false,
+    });
+  }
+  return out;
+}

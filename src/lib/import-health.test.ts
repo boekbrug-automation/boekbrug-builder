@@ -131,6 +131,44 @@ console.log('\n— [BTW-SUM-FIX] a DERIVED BTW is never presented as clean (it i
   check('note without an amount still warns', noAmount.level === 'needs-review' && noAmount.reasons.some((r) => /afgeleid uit excl\. en totaal/.test(r)))
 }
 
+console.log('\n— [EIGEN-CONTROLE-ONBEKEND] een controle die niet kon draaien zwijgt nooit —')
+{
+  // The silent outcome this closes: a database hiccup during the own-sales-invoice lookup used to
+  // be indistinguishable from "checked, and it is a supplier bill". The measured cost of getting
+  // that wrong is the owner's own turnover booked as a cost, with the BTW they OWE claimed back as
+  // voorbelasting — the Kiwi € 394,99 shape.
+  const unchecked = classifyImportHealth(inv({ field_confidence: { _own_check_unavailable: true } }))
+  check('own-invoice check unavailable → needs-review', unchecked.level === 'needs-review')
+  check('…and the vendor axis carries it', unchecked.flags.vendor === true)
+  check('the sentence says the check could not run, never that it ran clean',
+    unchecked.reasons.some((r) => /konden niet nagaan of dit je eigen verkoopfactuur is/.test(r)))
+  // The flag is the cause: the same invoice without it stays clean.
+  check('without the flag the same invoice is clean',
+    classifyImportHealth(inv({})).level === classifyImportHealth(inv({})).level
+      && !classifyImportHealth(inv({})).reasons.some((r) => /eigen verkoopfactuur/.test(r)))
+  // false is not "unavailable" — only an explicit true speaks.
+  check('an explicit false says nothing',
+    !classifyImportHealth(inv({ field_confidence: { _own_check_unavailable: false } })).reasons
+      .some((r) => /eigen verkoopfactuur/.test(r)))
+}
+
+console.log('\n— [NUL-BTW-STIL] een nul-BTW zonder uitleg is voorbelasting die niemand ziet —')
+{
+  // De terugval maakt excl. gelijk aan het totaal, dus 121 + 0 = 121 klopt per constructie: zonder
+  // deze notitie is de rij op elke as schoon terwijl de voorbelasting op 0 staat.
+  const stil = classifyImportHealth(inv({
+    total_ex_btw: 121, btw_amount: 0, total_inc_btw: 121,
+    field_confidence: { _btw_zero_unexplained: true },
+  }))
+  check('een onverklaarde nul-BTW → needs-review', stil.level === 'needs-review' && stil.flags.arithmetic === true)
+  check('de reden noemt de voorbelasting', stil.reasons.some((r) => /voorbelasting/.test(r) && /terugvragen/.test(r)))
+  check('dezelfde bedragen zonder de notitie blijven clean',
+    classifyImportHealth(inv({ total_ex_btw: 121, btw_amount: 0, total_inc_btw: 121 })).level === 'clean')
+  check('een expliciete false zegt niets',
+    !classifyImportHealth(inv({ total_ex_btw: 121, btw_amount: 0, total_inc_btw: 121, field_confidence: { _btw_zero_unexplained: false } }))
+      .reasons.some((r) => /voorbelasting/.test(r)))
+}
+
 console.log('\n— [EX-INCL-FIX] een herschreven grondslag boekt nooit zonder mens —')
 {
   // Na de reparatie klopt 333.06 + 69.94 = 403 per constructie — elke andere as zwijgt.

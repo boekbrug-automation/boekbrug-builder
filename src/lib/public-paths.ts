@@ -86,6 +86,10 @@ export const PUBLIC_PATHS = [
   // maakt. Veilig tegen de prefix-regel — het portaal zelf heet /dashboard/accountant en begint
   // dus niet met deze string.
   "/voor-boekhouders",
+  // [KANTOORGIDS] De gids van kantoren die met BoekBrug werken. Publiek omdat hij voor
+  // ondernemers ZONDER account is — dat is de hele reden dat hij bestaat. Geen conflict met de
+  // prefixregel: /voor-boekhouders begint niet met /boekhouders.
+  "/boekhouders",
   // [SEGMENT-VOORDEUR] Dezelfde reden, drie keer: dit zijn voordeuren voor iemand die nog geen
   // account heeft. Ze stonden in sitemap.xml en stuurden élke bezoeker én élke crawler naar
   // /login — de rooktest ving dat met drie keer "→ 307", en dat is precies waarvoor hij bestaat.
@@ -117,6 +121,15 @@ export const PUBLIC_PATHS = [
   // "/eerlijk-gebruik" begint (gecontroleerd op src/app).
   "/eerlijk-gebruik",
   "/steun",
+  // [DPA-BEREIKBAAR] De verwerkersovereenkomst. Openbaar om precies dezelfde reden als
+  // /beveiliging: hij is bedoeld voor wie nog GEEN account heeft. Een boekhouder mag de
+  // administratie van zijn klanten hier pas naartoe brengen nadat hij deze overeenkomst heeft
+  // gelezen en getekend — dus achter de inlog is hij onbereikbaar voor iedereen die hem nodig
+  // heeft, en de vraag "mag ik dit gebruiken?" blijft onbeantwoord tot ná de beslissing.
+  //
+  // Gevonden door tests/public-surface.spec.ts op de dag dat de pagina er kwam: hij stond in de
+  // footer en gaf 307. Dat is de smoke test die precies dit soort belofte-zonder-deur vangt.
+  "/verwerkersovereenkomst",
 ] as const;
 
 /**
@@ -134,7 +147,12 @@ export const PUBLIC_PATHS = [
  * test's three sweeps read PUBLIC_PATHS (which did not have it), sitemap.xml (which did not have
  * it either — fixed in sitemap.ts) and the footer (the link sits in a section above it).
  */
-export const EXACT_PUBLIC_PATHS = ["/", "/en"] as const;
+// [LANDING-AR] "/ar" joins them for exactly the reason "/en" is here, and the shape of the bug
+// was identical: /ar/blog and /ar/prijzen were both in the prefix list while the Arabic homepage
+// itself matched neither, so the one page an Arabic visitor lands on would have gone to /login.
+// It cannot go in PUBLIC_PATHS either — startsWith("/ar") would also open "/artikelen", which is
+// a dashboard screen.
+export const EXACT_PUBLIC_PATHS = ["/", "/en", "/ar"] as const;
 
 /**
  * Is this path reachable without a session?

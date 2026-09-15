@@ -11,11 +11,13 @@ import { effectiveTaxKind, type TaxKind } from './tax-letter'
 // [OBSERVABILITY] De waarde die de lezer telt — één plek, zie skipped-import.ts.
 import { DOC_TYPE_COULD_NOT_READ, DOC_TYPE_REMINDER } from '@/lib/skipped-import'
 // [MAILTEKST] De factuur die nooit een bijlage had: het filter en de tekstconversie.
-import { htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName } from '@/lib/email-body-invoice'
+import { htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName, countRefusal, type BodyScanTally } from '@/lib/email-body-invoice'
 import { textToPdf } from '@/lib/text-to-pdf'
 // [DOORGESTUURD] Read the attachments out of an e-mail that arrived as an attachment.
 import { extractMimeAttachments, mimeHeader, uniqueAttachmentName, type EmbeddedAttachment } from '@/lib/mime-attachments'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
+// [THROTTLE] One polite wait-and-retry, shared by both providers. See mail-throttle.ts.
+import { throttledFetch, beginThrottleBudget } from '@/lib/mail-throttle'
 import { ownedStoragePath } from '@/lib/storage-path'
 // [BRIDGE-EXTRACT] byte-hash dedup — één bestand → één hash → één record
 import { expandArchives } from "@/lib/archive-expand";
@@ -115,6 +117,8 @@ import { amsterdamToday } from '@/lib/format-nl'
 // [ALARM] Opgevangen fouten die tóch iemand moeten bereiken — zie report-handled.ts.
 import { reportHandledFailure } from '@/lib/report-handled'
 import { supplierBtwForInvoice } from "./vendor-identity"
+// [NUL-GRONDSLAG] What may be stored when the split was not read — see read-amounts.ts.
+import { amountsToStore, markUnexplainedZeroBtw } from './read-amounts'
 type InvoiceFieldConfidence =
   Database['public']['Tables']['invoices']['Insert']['field_confidence']
 
@@ -358,11 +362,54 @@ export async function saveEmailTokens(params: {
  * so "Ontkoppel + reconnect" is the supported way to force a FULL re-import
  * (e.g. after wiping test data). Dedup makes the re-import harmless.
  */
+/**
+ * [OAUTH-INTREKKEN] Tell Google the grant is over, before we forget the token that proves it.
+ *
+ * Deleting our copy is not the same as withdrawing consent. Until this call existed, an owner who
+ * pressed Ontkoppelen saw "disconnected" while the grant stayed live in their Google account: it
+ * still listed BoekBrug under third-party access, and any surviving copy of the refresh token —
+ * a backup, a log, a Vault export — still opened their mailbox. The privacy statement keeps these
+ * tokens only "tot je de koppeling verbreekt", and art. 7(3) AVG gives the owner the right to
+ * withdraw consent as easily as they gave it.
+ *
+ * Best-effort by design: a provider outage must never leave the owner unable to disconnect. The
+ * local deletion is what the owner asked for and it proceeds either way; this is the part we
+ * cannot retry later, because after the Vault secret is gone the token is unrecoverable.
+ *
+ * Microsoft is NOT here, and that is not an oversight: the identity platform implements no
+ * RFC 7009 revocation endpoint for a third-party app, so there is no call to make. An Outlook
+ * owner removes the grant at myaccount.microsoft.com, and the interface should say so.
+ */
+export async function revokeGoogleGrant(refreshToken: string): Promise<boolean> {
+  if (!refreshToken) return false
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: refreshToken }).toString(),
+    })
+    // 200 = revoked. 400 = already invalid, which is the same end state and not a failure.
+    if (res.ok || res.status === 400) return true
+    console.warn('[OAUTH-INTREKKEN] Google refused the revoke', { status: res.status })
+    return false
+  } catch (err) {
+    console.warn('[OAUTH-INTREKKEN] Could not reach Google to revoke', { err: String(err) })
+    return false
+  }
+}
+
 export async function deleteEmailConnection(
   userId: string,
   provider: 'gmail' | 'outlook' = 'gmail'
 ): Promise<{ success: boolean }> {
   const supabase = createPipelineClient()
+
+  // Read the token BEFORE the Vault secret is destroyed — afterwards there is nothing left to
+  // revoke with, and the grant would outlive the disconnect for good.
+  if (provider === 'gmail') {
+    const tokens = await getEmailTokens(userId, 'gmail')
+    if (tokens?.refreshToken) await revokeGoogleGrant(tokens.refreshToken)
+  }
 
   const { data: conn } = await supabase
     .from('email_connections')
@@ -498,7 +545,7 @@ async function refreshAccessToken(userId: string): Promise<string | null> {
         userId,
         provider: tokens.provider,
         status: response.status,
-        body: errBody,
+        ...safeOAuthLog(errBody),
       })
       // [EMAIL-HEALTH] 400/401 = the grant is definitively dead (invalid_grant / revoked /
       // expired refresh_token) — flag it so the owner is told, not silently stuck. A 429/5xx is
@@ -516,7 +563,7 @@ async function refreshAccessToken(userId: string): Promise<string | null> {
   }
 
   if (!refreshData.access_token) {
-    console.error('[BOEK-011] Refresh returned no access_token', { userId, refreshData })
+    console.error('[BOEK-011] Refresh returned no access_token', { userId, ...safeOAuthLog(refreshData) })
     // A 200 with no access_token means the provider rejected the grant without an HTTP error —
     // treat it as definitively dead so the connection doesn't rot green.
     await markEmailNeedsReauth(userId, tokens.provider, 'refresh_no_access_token')
@@ -825,9 +872,7 @@ export async function fetchGmailAttachments(
         `&maxResults=${GMAIL_PAGE_SIZE}` +
         (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '')
 
-      const listRes: Response = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
+      const listRes: Response = await gmailFetch(url, accessToken)
 
       if (!listRes.ok) {
         const body = await listRes.text()
@@ -926,9 +971,9 @@ async function fetchMessageAttachments(
   messageId: string,
   accessToken: string
 ): Promise<{ items: GmailAttachment[]; ok: boolean; statements: BankStatementRef[]; unread: SkippedAttachmentRef[] }> {
-  const res = await fetch(
+  const res = await gmailFetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
+    accessToken,
   )
 
   // [BOEK-011 throttle×watermark] ok:false = this email wasn't fully read; the
@@ -1095,9 +1140,9 @@ async function fetchMessageAttachments(
       if (att.attachmentId) {
         // Needs a second fetch to get the actual bytes
         try {
-          const attRes = await fetch(
+          const attRes = await gmailFetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${att.attachmentId}`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
+            accessToken,
           )
           if (!attRes.ok) {
             // [ONBEREIKBAAR] Weather or permanence — and the difference is the whole mailbox.
@@ -1209,30 +1254,28 @@ export async function getOutlookUserEmail(accessToken: string): Promise<string> 
   return data.mail || data.userPrincipalName || ''
 }
 
+// [THROTTLE] Gmail's half of the shared retry. messages.get costs 5 quota units against a 250-unit
+// per-user-second budget and this path issues ten of them at once, so 429 is the ordinary weather
+// here — not an exception. See mail-throttle.ts for what a throttle used to cost: not a lost
+// invoice (the watermark holds, correctly), but a run that stops and then repeats the identical
+// burst from the identical watermark on the next cron.
+function gmailFetch(url: string, accessToken: string): Promise<Response> {
+  return throttledFetch(url, accessToken, 'Gmail')
+}
+
 // ─── Outlook attachment fetching (Microsoft Graph) ──────────────────────────
 
-// [BOEK-011 throttle] One retry that respects Retry-After. Microsoft Graph
-// throttles per-mailbox (MailboxConcurrency ≈ 4 concurrent; plus rate windows)
-// and answers 429/"ApplicationThrottled" with a Retry-After header. Seen in
-// production at pagination page 6. One polite wait-and-retry absorbs the
-// common case; a second failure returns the response so the caller can mark
-// the fetch INCOMPLETE (which holds the watermark — see fetchOutlookAttachments).
-async function graphFetch(url: string, accessToken: string): Promise<Response> {
-  const doFetch = () =>
-    fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
-
-  let res = await doFetch()
-  if (res.status === 429 || res.status === 503) {
-    const retryAfter = Number(res.headers.get('retry-after'))
-    const waitMs =
-      Number.isFinite(retryAfter) && retryAfter > 0
-        ? Math.min(retryAfter * 1000, 15000)
-        : 4000
-    console.warn(`[BOEK-011] Graph throttled (${res.status}) — waiting ${waitMs}ms`)
-    await new Promise((r) => setTimeout(r, waitMs))
-    res = await doFetch()
-  }
-  return res
+// [THROTTLE] Was the only retry either provider had, and it is now the shared one — see
+// mail-throttle.ts for why Gmail never having one was an omission rather than a decision. Kept as a
+// named wrapper because three call sites read better as graphFetch(url, token) than as a call that
+// repeats the provider label at every use.
+//
+// Production history that produced it: Microsoft Graph throttles per mailbox (MailboxConcurrency
+// ≈ 4, plus rate windows) and answered 429 with a Retry-After at pagination page 6. One polite wait
+// absorbs the common case; a second failure returns the response so the caller can mark the fetch
+// INCOMPLETE, which holds the watermark (see fetchOutlookAttachments).
+function graphFetch(url: string, accessToken: string): Promise<Response> {
+  return throttledFetch(url, accessToken, 'Graph')
 }
 
 /**
@@ -2043,6 +2086,37 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 // manual upload path (email/upload/route.ts caps at 10 MB). Without it, anyone who
 // emails the owner a large PDF causes an unbounded Storage write + a Claude call —
 // storage-growth / AI-spend DoS from untrusted mail.
+/**
+ * [OAUTH-GEEN-TOKEN-IN-LOG] What may be said out loud about a failed token call.
+ *
+ * The refresh path logged the provider's whole response — `{ userId, refreshData }` on a 200 with
+ * no access_token, and the raw body on an HTTP error. A token endpoint answers with credentials:
+ * Microsoft returns a NEW refresh_token on every refresh, Google returns one when it rotates, and
+ * both can return an id_token. A response that merely lacks `access_token` can still carry those,
+ * so the "nothing useful came back" branch was the one most likely to write a live credential into
+ * the logs — where it is retained, searchable, and readable by anyone with log access.
+ *
+ * OAuth errors are a documented, non-secret shape (RFC 6749 §5.2: error, error_description,
+ * error_uri). Those are what a reader needs to tell invalid_grant from a rate limit. Everything
+ * else is reported as the KEY NAMES only, which answers "what did it send back?" without printing
+ * the values.
+ */
+export function safeOAuthLog(body: unknown): Record<string, unknown> {
+  if (typeof body === "string") {
+    // An HTTP error body. Parse it if it is the documented JSON shape; otherwise say nothing more
+    // than its size — an unparseable body is exactly where a surprise payload would hide.
+    try { return safeOAuthLog(JSON.parse(body)) } catch { return { bodyBytes: body.length } }
+  }
+  if (!body || typeof body !== "object") return { body: typeof body }
+  const o = body as Record<string, unknown>
+  const uit: Record<string, unknown> = {}
+  for (const veld of ["error", "error_description", "error_uri", "error_codes", "correlation_id"]) {
+    if (typeof o[veld] === "string" || typeof o[veld] === "number") uit[veld] = o[veld]
+  }
+  uit.keys = Object.keys(o).sort()
+  return uit
+}
+
 const MAX_EMAIL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 /**
@@ -2357,6 +2431,14 @@ export async function syncUserEmails(
   // voortgang": een bijlage die blijft hangen (opnieuw proberen helpt) en een MAANDgrens (opnieuw
   // proberen kan per definitie niets opleveren).
   heldByFairUse: number
+  // [LEZER-STIL] Did the READER refuse this run for a reason that is app-wide — an empty balance,
+  // a wrong key or model, our own spend fuse, or a capacity outage that took the whole batch?
+  //
+  // The cron needs this because a hold is INVISIBLE otherwise: an outage-hold throws nothing, so
+  // every per-user sync "succeeds", the run is written ok:true, and the heartbeat watchman —
+  // which only ever looks at whether a job RAN — reports a healthy morning while not one document
+  // is being read. That is the same silence [BEHEER-GEZOND] was built for, one layer in.
+  readerOutage: boolean
   skipped: number
   // [COULD-NOT-READ] Attachments kept in bestanden because we couldn't read them
   // (never asserted "not an invoice"). Surfaced so the owner can go check them.
@@ -2390,6 +2472,11 @@ export async function syncUserEmails(
   // (which has no session). The only read below is this user's OWN profile, explicitly
   // scoped by id — service-role here is safe and removes the request-session coupling.
   const supabase = createPipelineClient()
+
+  // [THROTTLE-BUDGET] Open this run's wait budget before the first provider call. Once, here, and
+  // nowhere else: the budget is per RUN, and resetting it deeper in would let a long sync keep
+  // buying itself more sleep against a route that is killed at 300 seconds.
+  beginThrottleBudget()
 
   // [BOEK-011 + BOEK-SECURITY] Load tokens via Vault. We still need a few
   // fields from email_connections directly (provider) — getEmailTokens
@@ -2494,7 +2581,7 @@ export async function syncUserEmails(
   const accessToken = await refreshAccessToken(userId)
   if (!accessToken) {
     console.error('[BOEK-011] Could not obtain a fresh access_token', { userId })
-    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
+    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, readerOutage: false, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
   }
 
   // [H3] The per-message "already done" skip set was removed — it was prefix-matched on
@@ -2545,7 +2632,7 @@ export async function syncUserEmails(
     }
   } catch (error) {
     console.error('[BOEK-011] Fetch failed:', error)
-    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
+    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, readerOutage: false, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
   }
 
   // [MAILTEKST] The invoices that never had an attachment. A separate, bounded pass appended to
@@ -2564,10 +2651,20 @@ export async function syncUserEmails(
     const body = await fetchBodyOnlyInvoices(tokens.provider, accessToken, syncAfterMs, tokens.email ?? null)
     bodyScanned = body.scanned
     bodyCapped = body.capped
-    if (body.items.length > 0) {
-      console.log('[MAILTEKST] body-only invoice candidates', {
+    // [MAILTEKST-TELLING] Logged whenever the pass LOOKED, not only when it found something.
+    //
+    // The old condition was `body.items.length > 0`, which made this pass silent in exactly the
+    // state worth investigating: sixty messages scanned, none admitted, and nothing written
+    // anywhere — indistinguishable from a mailbox that held no body invoice at all. The refusal
+    // tally says which of the two it was, and it is the only instrument that can, because
+    // bodyLooksLikeInvoice's reason was previously discarded one line after being computed.
+    if (body.scanned > 0) {
+      console.log('[MAILTEKST] body-only invoice scan', {
         scanned: body.scanned, candidates: body.items.length, capped: body.capped,
+        refused: body.refused,
       })
+    }
+    if (body.items.length > 0) {
       attachments = [...attachments, ...body.items]
     }
   }
@@ -2750,6 +2847,11 @@ export async function syncUserEmails(
     // transientError adds the capacity-outage case, so no case main handled is lost.)
     configOutage?: boolean
     transientError?: boolean
+    // [GEEN-KREDIET] creditOutage = the PROVIDER's balance is empty (HTTP 400 "credit balance is
+    // too low", or 402). App-wide, never this file's fault, and it heals the moment someone tops
+    // up — so it holds exactly like the two below. It is listed separately from configOutage
+    // because it is not a setting anyone here got wrong.
+    creditOutage?: boolean
     // [COST-GUARD] budgetOutage = the GLOBAL daily spend fuse refused the call. App-wide by
     // construction (one ceiling for every user and every path), so it is an outage-hold exactly
     // like configOutage — never this file's fault, and never a verdict about this file.
@@ -3314,6 +3416,13 @@ export async function syncUserEmails(
         // poison-pilling — a held invoice is read tomorrow, a buried one never is.
         const { isAiBudgetError } = await import('@/lib/ai-budget')
         const budgetOutage = isAiBudgetError(err)
+        // [GEEN-KREDIET] (d) the PROVIDER's own balance is empty. Fourth member of the same family
+        // and the one that was missing when it happened: Anthropic answers an exhausted account
+        // with HTTP 400 invalid_request_error, which every predicate above reads as this file's
+        // fault — so a real invoice arriving during the outage was buried as could_not_read and
+        // the watermark walked past it. See isAiCreditError for why none of the others match.
+        const { isAiCreditError } = await import('@/lib/ai-model')
+        const creditOutage = isAiCreditError(err)
         return {
           attachment,
           classification: { isInvoice: false } as Awaited<ReturnType<typeof classifyAttachment>>,
@@ -3321,6 +3430,7 @@ export async function syncUserEmails(
           configOutage,
           transientError,
           budgetOutage,
+          creditOutage,
         }
       }
     }
@@ -3374,6 +3484,8 @@ export async function syncUserEmails(
   // run an outage — the same reasoning as a config outage, and deliberately not the batch-wide
   // "everyone failed" proof a transient error needs.
   const budgetOutageAny = classified.some((c) => c.budgetOutage)
+  // [GEEN-KREDIET] An empty balance is app-wide by definition too — one occurrence is the whole run.
+  const creditOutageAny = classified.some((c) => c.creditOutage)
 
   // [EERLIJK-GEBRUIK] Teruggeven wat niet gelezen ís. Dit maakt de zin op /eerlijk-gebruik
   // waar: "Een bestand dat wij niet konden lezen telt ook niet mee — mislukte pogingen komen
@@ -3396,15 +3508,15 @@ export async function syncUserEmails(
     })
   }
   const transientOutage = classifiedTotal >= 2 && classifiedFailed === classifiedTotal
-  const outageActive = configOutageAny || budgetOutageAny || transientOutage
+  const outageActive = configOutageAny || budgetOutageAny || creditOutageAny || transientOutage
 
   // PHASE 2 — save loop, sequential by design (dedup correctness)
-  for (const { attachment, classification, classifyFailed, configOutage, transientError, budgetOutage } of classified) {
+  for (const { attachment, classification, classifyFailed, configOutage, transientError, budgetOutage, creditOutage } of classified) {
     const wmKey = `${attachment.messageId}:${attachment.filename}`
     // An outage-hold when: a config outage (always), the spend fuse (always), or a transient error
     // DURING a batch-wide outage.
     // A lone transient failure (some files succeeded) is NOT an outage → it takes the poison-pill path.
-    const outageHold = configOutage || budgetOutage || (transientError && outageActive)
+    const outageHold = configOutage || budgetOutage || creditOutage || (transientError && outageActive)
     try {
       // [MODEL-OUTAGE] An app-wide model/config failure (invalid CLAUDE_MODEL → 404, auth) is not
       // this file's fault. NEVER count it toward the poison-pill give-up and NEVER register it as
@@ -4486,6 +4598,20 @@ export async function syncUserEmails(
       // creates a cost that never existed, with a voorbelasting claim on it.
       // [ZELF-EERST] The owner's permission comes before every quality signal, with its own reason
       // string so "waiting because you asked to see everything" never reads as "the read was weak".
+      // [NUL-GRONDSLAG] What may be STORED, decided once. `?? 0` here made an amount that was
+      // never read indistinguishable from a real zero, and a zero base on a purchase invoice is a
+      // claim that the bill cost nothing — the engine reads kosten off that field. Deciding it
+      // once is also what keeps the health verdict below about the figures the row will carry.
+      const storedAmounts = amountsToStore({
+        totalExBtw: classification.totalExBtw, btwAmount: classification.btwAmount,
+        totalIncBtw: classification.totalIncBtw, amount: classification.amount,
+      })
+      // [NUL-GRONDSLAG] …and the fallback's zero BTW says so, on the same object the insert carries.
+      fieldConfidenceValue = markUnexplainedZeroBtw(fieldConfidenceValue, storedAmounts, {
+        btwRate: classification.btwRate,
+        shifted: (fieldConfidenceValue as { _btw_verlegd?: unknown } | null)?._btw_verlegd != null,
+      })
+
       const autoAdv = !magAutoBoeken
         ? { advance: false, reason: 'owner_reviews_everything' }
         : attachment.fromBody === true
@@ -4529,9 +4655,11 @@ export async function syncUserEmails(
             // [E-FACTUUR] And the supplier's own structured figures, when the PDF carries them.
             eInvoiceContradicts: eInvoiceContradictsRead(classification.fieldConfidence),
             health: {
-              total_ex_btw: classification.totalExBtw ?? 0,
-              btw_amount: classification.btwAmount ?? 0,
-              total_inc_btw: classification.totalIncBtw ?? classification.amount ?? 0,
+              // [NUL-GRONDSLAG] The health verdict must be about the figures that will be STORED,
+              // or the queue judges one row and the books carry another.
+              total_ex_btw: storedAmounts.total_ex_btw,
+              btw_amount: storedAmounts.btw_amount,
+              total_inc_btw: storedAmounts.total_inc_btw,
               invoice_date: invoiceDate,
               invoice_number: classification.invoiceNumber ?? null,
               invoice_type: classification.isCreditNote === true ? 'creditnota' : 'factuur',
@@ -4623,9 +4751,15 @@ export async function syncUserEmails(
           // creditnota route [BOEK-031] (one sign convention in the table).
           invoice_type: classification.isCreditNote === true ? 'creditnota' : 'factuur',
           tax_kind: classification.taxKind ?? null, // [AANSLAG]
-          total_ex_btw: classification.totalExBtw ?? 0,
-          btw_amount: classification.btwAmount ?? 0,
-          total_inc_btw: classification.totalIncBtw ?? classification.amount ?? 0,
+          // [NUL-GRONDSLAG] The base was `?? 0`, which stored an amount that was NOT READ as a real
+          // zero — and a zero base on a purchase invoice is a claim that the bill cost nothing. The
+          // engine books kosten from this field. amountsToStore keeps a read split exactly as read and,
+          // when there was none, falls back to the gross as net with no BTW claimed — the same
+          // conservative rule the bank-attach door already used, so the cost is counted rather than
+          // dropped and nothing is deducted off a document we could not read.
+          total_ex_btw: storedAmounts.total_ex_btw,
+          btw_amount: storedAmounts.btw_amount,
+          total_inc_btw: storedAmounts.total_inc_btw,
           pdf_url: pdfUrl,
           document_id: documentId,
           source_message_id: dedupKey,
@@ -5161,6 +5295,9 @@ export async function syncUserEmails(
     // the no-progress guard still stops it if a round genuinely advances nothing.
     remaining: windowNarrowed ? Math.max(remainingAfterBatch, 1) : remainingAfterBatch,
     heldByFairUse: hold?.held ?? 0,
+    // [LEZER-STIL] Exactly the four app-wide refusals the save loop already holds on. Not the same
+    // thing as `errors`: those are per-mailbox failures, and a held run has none of them.
+    readerOutage: configOutageAny || budgetOutageAny || creditOutageAny || transientOutage,
     // [BOEK-011] Attachments registered as non-invoice this run — the client
     // counts (saved + skipped) as progress, so a pure-logo batch doesn't trip
     // the no-progress guard.
@@ -5248,7 +5385,7 @@ export async function fetchBodyOnlyInvoices(
   accessToken: string,
   syncAfterMs: number,
   ownEmail: string | null,
-): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean }> {
+): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean; refused: BodyScanTally }> {
   try {
     return provider === 'gmail'
       ? await fetchGmailBodyInvoices(accessToken, syncAfterMs)
@@ -5257,7 +5394,7 @@ export async function fetchBodyOnlyInvoices(
     console.error('[MAILTEKST] body scan failed (non-fatal — the attachment import is unaffected)', {
       provider, error: e instanceof Error ? e.message : String(e),
     })
-    return { items: [], scanned: 0, capped: false }
+    return { items: [], scanned: 0, capped: false, refused: { scan_failed: 1 } }
   }
 }
 
@@ -5282,7 +5419,7 @@ function gmailBodyText(payload: unknown): string {
 async function fetchGmailBodyInvoices(
   accessToken: string,
   syncAfterMs: number,
-): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean }> {
+): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean; refused: BodyScanTally }> {
   const afterDate = new Date(syncAfterMs).toISOString().slice(0, 10).replace(/-/g, '/')
   // Gmail's own index does the first pass, at no cost to us: only mail WITHOUT an attachment that
   // mentions an invoice word anywhere in it. Everything expensive happens after this.
@@ -5292,24 +5429,25 @@ async function fetchGmailBodyInvoices(
   const q =
     `-has:attachment after:${afterDate} in:anywhere -in:sent -in:drafts -in:chats ${GMAIL_NOT_OWN_MAIL} ` +
     `{${BODY_SEARCH_WORDS.join(' ')}}`
-  const listRes = await fetch(
+  const listRes = await gmailFetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${MAX_BODY_SCAN}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    accessToken,
   )
   if (!listRes.ok) {
     console.error('[MAILTEKST] Gmail body listing failed', { status: listRes.status })
-    return { items: [], scanned: 0, capped: false }
+    return { items: [], scanned: 0, capped: false, refused: {} }
   }
   const listed = (await listRes.json()) as { messages?: Array<{ id: string }>; nextPageToken?: string }
   const ids = (listed.messages ?? []).slice(0, MAX_BODY_SCAN)
 
   const items: GmailAttachment[] = []
+  const refused: BodyScanTally = {}
   for (const { id } of ids) {
-    const res = await fetch(
+    const res = await gmailFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
+      accessToken,
     )
-    if (!res.ok) continue
+    if (!res.ok) { countRefusal(refused, 'fetch_failed'); continue }
     const msg = (await res.json()) as {
       payload?: { headers?: Array<{ name: string; value: string }> }
       internalDate?: string
@@ -5322,16 +5460,17 @@ async function fetchGmailBodyInvoices(
       messageId: id, subject, from: header('from'), text,
       date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString(),
     })
-    if (built) items.push(built)
+    if ('refused' in built) countRefusal(refused, built.refused)
+    else items.push(built)
   }
-  return { items, scanned: ids.length, capped: !!listed.nextPageToken }
+  return { items, scanned: ids.length, capped: !!listed.nextPageToken, refused }
 }
 
 async function fetchOutlookBodyInvoices(
   accessToken: string,
   syncAfterMs: number,
   ownEmail: string | null,
-): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean }> {
+): Promise<{ items: GmailAttachment[]; scanned: number; capped: boolean; refused: BodyScanTally }> {
   // Graph cannot full-text search and filter by date in one call, so the first pass is on the
   // SUBJECT. That is a real limitation and it is written down rather than hidden: a body-only
   // invoice titled "Your monthly statement" is not reached by this pass. It is still a great deal
@@ -5345,7 +5484,7 @@ async function fetchOutlookBodyInvoices(
   const res = await graphFetch(url, accessToken)
   if (!res.ok) {
     console.error('[MAILTEKST] Outlook body listing failed', { status: res.status })
-    return { items: [], scanned: 0, capped: false }
+    return { items: [], scanned: 0, capped: false, refused: {} }
   }
   const data = (await res.json()) as {
     value?: Array<{
@@ -5357,13 +5496,16 @@ async function fetchOutlookBodyInvoices(
   }
   const messages = data.value ?? []
   const items: GmailAttachment[] = []
+  const refused: BodyScanTally = {}
   for (const m of messages) {
     const addr = m.from?.emailAddress?.address ?? ''
     // [EIGEN-POST] Eerst, en vóór er ook maar één regel van deze tekst wordt gelezen: post van
     // onszelf is geen inkoopfactuur, en het is niet nodig om hem te openen om dat vast te stellen.
-    if (isOwnAppMail(addr)) continue
+    if (isOwnAppMail(addr)) { countRefusal(refused, 'own_app_mail'); continue }
     // Mail the owner sent themselves is not a purchase invoice.
-    if (ownEmail && addr && addr.toLowerCase() === ownEmail.toLowerCase()) continue
+    if (ownEmail && addr && addr.toLowerCase() === ownEmail.toLowerCase()) {
+      countRefusal(refused, 'own_mailbox'); continue
+    }
     const name = m.from?.emailAddress?.name ?? ''
     const built = await buildBodyAttachment({
       messageId: m.id,
@@ -5372,9 +5514,10 @@ async function fetchOutlookBodyInvoices(
       text: htmlToReadableText(m.body?.content ?? ''),
       date: m.receivedDateTime || new Date().toISOString(),
     })
-    if (built) items.push(built)
+    if ('refused' in built) countRefusal(refused, built.refused)
+    else items.push(built)
   }
-  return { items, scanned: messages.length, capped: !!data['@odata.nextLink'] }
+  return { items, scanned: messages.length, capped: !!data['@odata.nextLink'], refused }
 }
 
 /**
@@ -5386,11 +5529,17 @@ async function fetchOutlookBodyInvoices(
  */
 async function buildBodyAttachment(m: {
   messageId: string; subject: string; from: string; text: string; date: string
-}): Promise<GmailAttachment | null> {
+}): Promise<GmailAttachment | { refused: string }> {
   const verdict = bodyLooksLikeInvoice(m.text, m.subject)
-  if (!verdict.candidate) return null
+  // [MAILTEKST-TELLING] The refusal is REPORTED rather than swallowed. It used to become `null`
+  // here, one line after being computed, which made the whole pass unmeasurable: a scan that
+  // admitted nothing looked exactly like a mailbox with nothing to admit.
+  if (!verdict.candidate) return { refused: verdict.reason }
   const pdf = await textToPdf(m.text, { subject: m.subject, from: m.from, date: m.date.slice(0, 10) })
-  if (!pdf) return null
+  // A failed render is not a filter verdict and must never be counted as one — it is the pass
+  // being broken on a message it WANTED. Collapsing the two is how a rendering bug hides inside a
+  // tally that reads like ordinary strictness.
+  if (!pdf) return { refused: 'pdf_render_failed' }
   return {
     messageId: m.messageId,
     filename: bodyDocumentName(m.subject),

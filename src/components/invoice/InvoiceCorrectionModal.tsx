@@ -20,7 +20,7 @@
 // at each supplier, and a screen that posts every field on every save would teach it that
 // everything is always wrong — which points at every field and therefore at none.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { formatEuroNL } from '@/lib/format-nl'
 import { setExcl, setBtw, setIncl, splitByRate, rateOfTriplet, amountFieldText, AMOUNT_PLACEHOLDER, NL_BTW_RATES } from '@/lib/amount-triplet'
 // [KOMMA-INVOER] One tolerant reader for an amount a Dutch owner TYPES — see parse-nl.ts.
@@ -43,6 +43,10 @@ import { useBodyScrollLock } from '@/lib/use-body-scroll-lock'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
 import { failureText } from '@/lib/server-message'
+// [CORRECTIE-TIJDVAK] Correcting an invoice is one thing; correcting a FILED aangifte is another,
+// and the owner should know which one they are about to do BEFORE they press the button. The
+// question is answered in a pure module so each of its four outcomes has a test of its own.
+import { tijdvakMelding, type TijdvakLezing } from '@/lib/correctie-tijdvak'
 
 const FONT = "'Roboto', -apple-system, sans-serif"
 
@@ -190,6 +194,49 @@ export default function InvoiceCorrectionModal({
   )
   const [credit, setCredit] = useState(false)
   const [saving, setSaving] = useState(false)
+
+  // [CORRECTIE-TIJDVAK] Which quarters this owner has already filed — for the year of the date
+  // STANDING IN THE FORM, so moving an invoice into a closed quarter says so while it is being
+  // moved, not after it is saved.
+  //
+  // Read here rather than passed in as a prop: this editor opens from more than one screen, and a
+  // prop only one of them supplies is a notice that silently disappears on the other. A screen
+  // that forgets to pass it would look exactly like a quarter that is open.
+  const jaarVanDatum = /^(\d{4})-\d{2}-\d{2}/.exec(date)?.[1]
+  const jaar = jaarVanDatum ? Number(jaarVanDatum) : null
+  // Only what the READ produced is held in state; the other three outcomes are derived below. The
+  // effect therefore never calls setState on its way in, and the answer is stamped with the year it
+  // belongs to — so while a changed date is being looked up, the old year's answer cannot stand in
+  // for the new one's.
+  type Gelezen =
+    | { year: number; filings: { year: number; quarter: number; filed_at: string | null }[] }
+    | { year: number; failed: true }
+  const [gelezen, setGelezen] = useState<Gelezen | null>(null)
+  useEffect(() => {
+    if (jaar == null) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/btw/filed?year=${jaar}`)
+        if (!res.ok) throw new Error(String(res.status))
+        const json = (await res.json()) as { gediend?: { quarter: number; filedAt: string | null }[] }
+        // [NO-SILENT-EMPTY] A body without `gediend` is a shape we do not recognise, not an empty
+        // year. Reading it as "nothing is filed" is the one answer that would be dangerous here.
+        if (!Array.isArray(json.gediend)) throw new Error('shape')
+        const filings = json.gediend.map((r) => ({ year: jaar, quarter: r.quarter, filed_at: r.filedAt }))
+        if (!cancelled) setGelezen({ year: jaar, filings })
+      } catch {
+        if (!cancelled) setGelezen({ year: jaar, failed: true })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [jaar])
+  const lezing: TijdvakLezing =
+    jaar == null ? { soort: 'geenDatum' }
+      : gelezen == null || gelezen.year !== jaar ? { soort: 'bezig' }
+        : 'failed' in gelezen ? { soort: 'mislukt' }
+          : { soort: 'gelezen', filings: gelezen.filings }
+  const tijdvak = tijdvakMelding(date || null, lezing)
 
   const amountsTouched =
     amounts.ex !== (invoice.total_ex_btw ?? 0) ||
@@ -530,6 +577,23 @@ export default function InvoiceCorrectionModal({
         <p style={{ fontSize: 12, color: '#5F6368', lineHeight: 1.45, margin: '12px 0 16px' }}>
           {t('corr.statiegeld')}
         </p>
+
+        {/* [CORRECTIE-TIJDVAK] It names the consequence, it never blocks — a correction to a filed
+            quarter is legal and often required, and the Belastingdienst's own answer to it is the
+            suppletie. [TAAL] The sentence itself stays Dutch for the same reason CorrectionResult
+            .suppletie does: it is about a document that went to the Belastingdienst, and kwartaal,
+            aangifte and suppletie are the words the owner has to recognise on that form. The line
+            about our own read failing is about the app, so that one follows the interface. */}
+        {tijdvak.soort === 'mislukt' && (
+          <p role="status" style={{ fontSize: 12.5, color: '#7C5800', lineHeight: 1.45, margin: '0 0 12px', padding: '10px 12px', background: '#FEF7E0', borderRadius: R.md }}>
+            {t('corr.tijdvakNietGelezen')}
+          </p>
+        )}
+        {tijdvak.soort === 'zin' && (
+          <p role="status" lang="nl" dir="ltr" style={{ fontSize: 12.5, color: '#7C5800', lineHeight: 1.45, margin: '0 0 12px', padding: '10px 12px', background: '#FEF7E0', borderRadius: R.md }}>
+            {tijdvak.zin}
+          </p>
+        )}
 
         <button
           onClick={save}

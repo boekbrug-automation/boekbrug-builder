@@ -46,6 +46,8 @@
 
 import { useRouter } from 'next/navigation'
 import { useEffect, useState, type ReactNode } from 'react'
+// [KLAAR-STAND] The component holds no language of its own: this returns a key and a colour.
+import { klaarRegel, type KlaarBron } from '@/lib/klaar-stand'
 import { createClient } from '@/lib/supabase'
 import { DashboardHeader, type HeaderProfile } from '../_shared'
 import IntakeButton from '@/components/intake/IntakeButton'
@@ -89,6 +91,8 @@ export function ZzpDashboard(
   const [pendingCount, setPendingCount]           = useState<number>(0)
   // [BRUG-RETOUR] Openstaande vragen van de boekhouder over eigen documenten.
   const [vragenCount, setVragenCount]             = useState<number>(0)
+  // [KLAAR-STAND] The readiness verdict, or null while unknown — see klaar-stand.ts.
+  const [klaarRapport, setKlaarRapport]           = useState<KlaarBron | null>(null)
 
   async function loadGlobal() {
     const [{ data: link }, { data: notifData, error: notifErr }, { count, error: berichtenErr }, { count: vragen, error: vragenErr }] = await Promise.all([
@@ -122,6 +126,21 @@ export function ZzpDashboard(
       console.error('[NO-SILENT-EMPTY] tellers op het startscherm niet te lezen', {
         berichten: berichtenErr?.message, vragen: vragenErr?.message,
       })
+    }
+
+    // [KLAAR-STAND] The verdict for the CURRENT quarter, so the button below can answer instead of
+    // ask. Same endpoint /dashboard/klaar opens with; a failure leaves the report null, and
+    // klaarRegel then keeps the question — never a green on a quarter nobody measured.
+    try {
+      const nu = new Date()
+      const kwartaal = Math.floor(nu.getMonth() / 3) + 1
+      const res = await fetch(`/api/readiness?year=${nu.getFullYear()}&quarter=${kwartaal}`)
+      if (res.ok) {
+        const json = await res.json()
+        setKlaarRapport(json?.report ?? null)
+      }
+    } catch {
+      // silent — the button keeps asking the question, which is the honest answer here
     }
 
     // [BOEK-029] BOEK-011: fetch pending incoming invoices count
@@ -161,6 +180,9 @@ export function ZzpDashboard(
   }
 
   const firstName = profile.full_name?.split(' ')[0] ?? 'daar'
+
+  // [KLAAR-STAND] Derived in render, never stored: one source of truth for the line.
+  const klaarStand = klaarRegel(klaarRapport)
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#F8F9FA', fontFamily: FONT, WebkitFontSmoothing: 'antialiased' }}>
@@ -229,7 +251,15 @@ export function ZzpDashboard(
           <span className="material-symbols-outlined" style={{ fontSize: 30, color: '#fff' }} aria-hidden>fact_check</span>
           <span style={{ flex: 1 }}>
             <span style={{ display: 'block', fontSize: 17, fontWeight: 700, color: '#fff', letterSpacing: -0.2 }}>{t('start.klaar')}</span>
-            <span style={{ display: 'block', fontSize: 12.5, color: 'rgba(255,255,255,0.85)', marginTop: 2 }}>{t('start.waarheid.sub')}</span>
+            {/* [KLAAR-STAND] The ANSWER, where the owner already is. The title stays the door's own
+                name ([KNOP-IN-ZIN]: sentences elsewhere point at "Ben ik klaar?"), and the verdict
+                goes here — with a dot, because a state is read before a sentence is. */}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'rgba(255,255,255,0.85)', marginTop: 2 }}>
+              {klaarStand.stand !== 'unknown' && (
+                <span aria-hidden style={{ width: 8, height: 8, borderRadius: 999, background: klaarStand.kleur, flexShrink: 0, boxShadow: '0 0 0 2px rgba(255,255,255,0.85)' }} />
+              )}
+              <span>{t(klaarStand.key, klaarStand.params)}</span>
+            </span>
           </span>
           <span className="material-symbols-outlined icon-dir" style={{ fontSize: 22, color: 'rgba(255,255,255,0.9)' }} aria-hidden>chevron_right</span>
         </button>
@@ -369,6 +399,13 @@ export function ZzpDashboard(
               <MiniCard {...doorLook('/dashboard/jaar')}
                 label={t('start.jaar')} sub={t('start.jaar.sub')}
                 onClick={() => router.push('/dashboard/jaar')} />
+              {/* [GROOTBOEK-KAART] Het grootboek bestond al — als journaalposten in het auditfile,
+                  gebouwd door dezelfde functie die dit scherm nu leest. Wat ontbrak was de deur.
+                  Hij staat hier omdat een boekhouder die op het woord zoekt en niets vindt, niet
+                  concludeert dat de deur ontbreekt maar dat het grootboek ontbreekt. */}
+              <MiniCard {...doorLook('/dashboard/grootboek')}
+                label={t('start.grootboek')} sub={t('start.grootboek.sub')}
+                onClick={() => router.push('/dashboard/grootboek')} />
             </div>
           </section>
 

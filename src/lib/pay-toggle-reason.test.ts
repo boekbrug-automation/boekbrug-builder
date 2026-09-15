@@ -123,11 +123,15 @@ test("[PAY-REDEN] the lines that promise an action say what it is", () => {
   // A reason the owner cannot act on is only half a message. These four have a way out, and the
   // sentence has to carry it in every language — a translation that drops the instruction leaves
   // the owner staring at a button that does nothing.
+  // The Arabic for "refresh the page" was reviewed from «حدِّث» to «أعد تحميل»; both promise the
+  // action, and what this test is for is that SOME way out survives translation. Either passes,
+  // and dropping the instruction altogether still fails.
+  const herlaad = /أعد تحميل|حدِّث|حدّث/;
   const actionable: Record<string, RegExp[]> = {
-    "pay.reden.statusVeranderd": [/ververs/i, /حدِّث/, /refresh/i],
+    "pay.reden.statusVeranderd": [/ververs/i, herlaad, /refresh/i],
     "pay.reden.sessieVerlopen": [/log opnieuw in/i, /سجّل الدخول/, /log in again/i],
-    "pay.reden.referentieBotst": [/ververs/i, /حدِّث/, /refresh/i],
-    "pay.reden.algemeen": [/ververs/i, /حدِّث/, /refresh/i],
+    "pay.reden.referentieBotst": [/ververs/i, herlaad, /refresh/i],
+    "pay.reden.algemeen": [/ververs/i, herlaad, /refresh/i],
   };
   for (const [key, [nl, ar, en]] of Object.entries(actionable)) {
     assert.match(translate("nl", key as never), nl, key);

@@ -175,6 +175,27 @@ export interface FieldConfidence {
   // amounts add up again, so every other axis goes quiet — which is exactly why this needs its
   // own reason: the figure is OUR arithmetic, and BTW is deductible money in the aangifte.
   _btw_derived?: { read?: number | null; used?: number | null }
+  // [EIGEN-CONTROLE-ONBEKEND] De eigen-verkoopfactuurcontrole kon niet draaien — zie ai.ts.
+  _own_check_unavailable?: boolean
+  // [VERLEGD-NAAR-MIJ] De leverancier heeft de BTW naar deze eigenaar verlegd: geen BTW en geen
+  // tarief op het document is dan juist. Alleen vastgelegd; de aangifte doet er iets mee
+  // (rubriek 2a, dezelfde euro's terug in 5b). Hier staat hij omdat een nul-BTW die door de
+  // verlegging verklaard wordt geen leesfout is — zie zero-btw.ts.
+  _btw_verlegd?: { grondslag?: number | null }
+  // [NUL-BTW-STIL] An ingestion door booked a zero BTW that the document does not explain — see
+  // zero-btw.ts. Written by the door, never by the reader: it describes what was STORED. The row
+  // needs its own reason because the gross-as-net fallback makes ex equal incl, so the arithmetic
+  // is silent by construction and the voorbelasting sits at 0 behind a clean-looking row.
+  _btw_zero_unexplained?: boolean
+  // [VREEMDE-VALUTA] The document named a currency that is not the euro. The stored amounts are
+  // the PRINTED ones — nothing converted them, because a conversion needs the rate on the invoice
+  // date and this app has none. So every figure on this row is in `code`, not in euros, and the
+  // owner is the only one who can supply what their bank actually took.
+  _valuta?: { code?: string | null }
+  // [ZELFFACTUUR] Het document zegt zelf dat de AFNEMER hem heeft opgemaakt (zelffacturering).
+  // Aan welke kant de eigenaar staat bepaalt of dit eigen omzet is of een echte inkoop, en dat
+  // staat nergens op het papier — dus één blik van een mens, nooit een gok.
+  _zelffactuur?: boolean
   // [ASSURANTIE] Present when the document printed assurantiebelasting (insurance premium tax) and
   // a non-zero amount had been read into btw_amount. The guard (stripAssurantiebelastingBtw in
   // @/lib/ai) removed it from the deductible column and folded it into the cost. Says so out loud:
@@ -192,6 +213,10 @@ export interface FieldConfidence {
   // all, because whoever produced the triplet can always satisfy it by moving the third figure.
   // See btw-split.ts for the invoice that proved it.
   _btw_rows?: { rate: number; base: number; btw: number }[]
+  // [REGELS] Een tariefverdeling die WIJ uit de factuurregels hebben opgebouwd, en alleen bewaard
+  // wanneer die beide gedrukte ankers reproduceerde — het excl. totaal én de btw. Ander bewijs dan
+  // _btw_rows: dat drukte de leverancier, dit volgt uit de goederen zelf.
+  _btw_rows_uit_regels?: { rate: number; base: number; btw: number }[]
   // [PRINTED-TOTAL] "Totaal te voldoen" exactly as printed, before any arithmetic of ours. Stored
   // separately from total_inc_btw precisely so the two can DISAGREE — the moment we let the reader
   // reconcile them, the disagreement (the whole signal) is gone.
@@ -598,6 +623,48 @@ export function classifyImportHealth(inv: HealthInput): ImportHealth {
       typeof used === 'number'
         ? `de BTW-uitsplitsing was niet leesbaar — de BTW is afgeleid uit excl. en totaal (${formatEuro(used)}); controleer dit bedrag`
         : 'de BTW-uitsplitsing was niet leesbaar — de BTW is afgeleid uit excl. en totaal; controleer dit bedrag'
+    )
+  }
+
+  // [EIGEN-CONTROLE-ONBEKEND] De controle die een EIGEN verkoopfactuur herkent kon niet draaien.
+  // Geen oordeel over dit document — het is waarschijnlijk gewoon een inkoopfactuur — maar de ene
+  // controle die de eigen factuur eruit haalt heeft niet geantwoord, en de stille afloop daarvan is
+  // eigen omzet die als kost wordt geboekt met de BTW die je moet AFDRAGEN als voorbelasting
+  // teruggevraagd. Zelfde register als [IBAN-CHECK-HONEST]: nooit beweren dat er iets gecontroleerd
+  // is wat niet gecontroleerd kon worden.
+  if (fc?._own_check_unavailable === true) {
+    flags.vendor = true
+    reasons.push(
+      'we konden niet nagaan of dit je eigen verkoopfactuur is — controleer de leverancier vóór je dit als kost boekt'
+    )
+  }
+
+  // [NUL-BTW-STIL] Er is € 0 BTW geboekt terwijl het document daar geen reden voor geeft: geen
+  // 0 %-tarief, geen verlegging. De rekenkundige controle hierboven zwijgt hier per definitie —
+  // het terugvalbedrag maakt excl. gelijk aan het totaal, dus de identiteit klopt — en zonder deze
+  // zin staat er nergens iets over. Het is voorbelasting die de eigenaar anders nooit terugziet.
+  // [VREEMDE-VALUTA] Niets aan de rekensom valt op: een dollarfactuur klopt intern perfect — in
+  // dollars. Alleen deze zin zegt dat de bedragen op deze regel geen euro's zijn.
+  // [ZELFFACTUUR] Geen enkel bedrag valt op: een zelffactuur telt precies zo op als elke andere.
+  // Alleen deze zin vraagt de vraag die telt — is dit jouw verkoop of jouw inkoop?
+  if (fc?._zelffactuur === true) {
+    flags.vendor = true
+    reasons.push(
+      'op dit document staat dat de afnemer hem heeft opgemaakt (zelffacturering) — controleer of dit jouw eigen verkoop is en geen inkoop'
+    )
+  }
+
+  if (typeof fc?._valuta?.code === 'string' && fc._valuta.code.length > 0) {
+    flags.arithmetic = true
+    reasons.push(
+      `de bedragen op dit document staan in ${fc._valuta.code}, niet in euro's — vul zelf het eurobedrag in dat je bank heeft afgeschreven`
+    )
+  }
+
+  if (fc?._btw_zero_unexplained === true) {
+    flags.arithmetic = true
+    reasons.push(
+      'we lazen geen BTW op dit document en boekten € 0 voorbelasting — controleer of je BTW mag terugvragen'
     )
   }
 

@@ -68,6 +68,8 @@ const GATES: Record<string, string> = {
   kind_creditnota: 'document_kind = creditnota',
   no_reliable_total: 'no real gross — only the amount fallback',
   zero_btw_not_explicit_zero_rate: '[BTW-GATE] zero btw without an explicit 0% rate',
+  foreign_currency: '[VREEMDE-VALUTA] the document is priced in another currency',
+  self_billed: '[ZELFFACTUUR] the document says the customer drew it up',
   total_derived_never_grounded: '[ONGEGROND-AFGELEID] a derived gross the grounding gate never saw',
   total_not_in_document_text: '[GEGROND] the total is not printed in the document',
   total_not_where_a_total_is_printed: '[DOCCHECK] printed, but not where a total is',

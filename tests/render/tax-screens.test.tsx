@@ -107,6 +107,82 @@ test("[RENDER-GATE] none of the three renders a raw message key", async () => {
   }
 });
 
+// ── [GELEERD-SINDSDIEN] The ignored invoices the reader has since learned to read ─────────────
+test("[GELEERD-SINDSDIEN] the panel is absent until it has something to offer", async () => {
+  const { default: GeleerdPanel } = await import("../../src/components/grootboek/GeleerdPanel");
+  // The ignored list is not a place to be nagged: a heading with nothing under it is a nag, and
+  // before the read answers it would also be a claim nobody has checked.
+  const html = renderToStaticMarkup(React.createElement(GeleerdPanel as never));
+  assert.equal(html, "", "nothing to offer is nothing to show");
+});
+
+test("[GELEERD-SINDSDIEN] and it RENDERS the offer, with what was learned beside each row", async () => {
+  const { GeleerdList } = await import("../../src/components/grootboek/GeleerdPanel");
+  const items = [
+    { id: "1", invoiceNumber: "26302362", invoiceDate: "2026-07-09", vendor: "ATAPACK Cash & Carry B.V.",
+      totalIncBtw: 4917.9, gained: ["btw_split", "statiegeld"] as const },
+    // No amount, no number, no vendor, and nothing learned — every optional at once, because that
+    // is the row that finds a crash the happy one never will.
+    { id: "2", invoiceNumber: null, invoiceDate: null, vendor: null,
+      totalIncBtw: null, gained: [] as const },
+  ];
+  const html = renderToStaticMarkup(
+    React.createElement(GeleerdList as never, { items, busy: null, onPutBack: () => {} }),
+  );
+  assert.ok(html.length > 0, "the list rendered nothing at all");
+  assert.match(html, /ATAPACK/);
+  assert.match(html, /BTW-uitsplitsing per tarief/, "what was learned must be named, not summarised");
+  assert.match(html, /statiegeld/);
+  assert.match(html, /Terugzetten/);
+  assert.doesNotMatch(html, />gl\.[a-zA-Z.]+</, "an untranslated key reached the screen");
+});
+
+// ── [GROOTBOEK] The purchase invoices that still need a cost account ──────────────────────────
+test("[GROOTBOEK] the panel is absent until its read answers — never an empty 'all done'", async () => {
+  const { default: GrootboekPanel } = await import("../../src/components/grootboek/GrootboekPanel");
+  // "Every invoice is on an account" and "we could not look" are opposite answers, and the first
+  // is the dangerous one: it tells the owner their administratie is finished.
+  const html = renderToStaticMarkup(React.createElement(GrootboekPanel as never));
+  assert.equal(html, "", "a heading with a count of zero under it would read as finished");
+});
+
+test("[GROOTBOEK] and it RENDERS with rows — the empty case exercises no branch at all", async () => {
+  const { GrootboekList } = await import("../../src/components/grootboek/GrootboekPanel");
+  const { LEDGER_ACCOUNTS } = await import("../../src/lib/grootboek");
+  // The production shape, and one row per BASIS so every reason branch is actually called.
+  const data = {
+    ok: true as const,
+    accounts: [...LEDGER_ACCOUNTS],
+    openInvoices: 550,
+    decided: 58,
+    total: 608,
+    open: [
+      { key: "id:a", vendor: "Enka Horeca B.V.", ids: ["1", "2"], count: 102, gross: 20079.28,
+        newest: "2026-08-14",
+        suggestion: { accountId: "7000", confidence: 0.95, basis: "supplier_history" as const } },
+      { key: "id:b", vendor: "Van Dijk Vastgoed", ids: ["3"], count: 1, gross: 1250,
+        newest: "2026-07-01",
+        suggestion: { accountId: "4100", confidence: 0.6, basis: "keywords" as const, matched: "huur" } },
+      { key: "name:onbekend", vendor: null, ids: ["4"], count: 3, gross: 0, newest: null,
+        suggestion: { accountId: "4000", confidence: 0, basis: "default" as const } },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(GrootboekList as never, { data, saving: null, onAssign: () => {} }),
+  );
+  assert.ok(html.length > 0, "the list rendered nothing at all");
+  assert.match(html, /Enka Horeca/, "the supplier name never reached the screen");
+  // Every reason branch produced Dutch, not a key.
+  assert.match(html, /eerder op/, "the supplier-history reason");
+  assert.match(html, /huur/, "the keyword reason names the word that decided");
+  assert.match(html, /weten het niet/, "an unknown basis says so rather than pretending");
+  // The size of the decision is on screen — 102 invoices behind one dropdown.
+  assert.match(html, /102 facturen/);
+  // A vendor with no name must not crash the row, and a group of 3 is still plural.
+  assert.match(html, /3 facturen/);
+  assert.doesNotMatch(html, />gb\.[a-zA-Z.]+</, "an untranslated key reached the screen");
+});
+
 // ── [OPDRACHTGEVER] Who this year's money came from ───────────────────────────────────────────
 test("[OPDRACHTGEVER] the panel states the facts and no verdict, and a failed read says so", async () => {
   const { default: OpdrachtgeversPanel } = await import("../../src/components/dba/OpdrachtgeversPanel");

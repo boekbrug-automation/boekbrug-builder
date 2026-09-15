@@ -66,8 +66,13 @@ export interface MergeSupplier {
 
 export type MergeRefusal = 'same-supplier' | 'different-kvk' | 'two-accounts' | 'no-evidence'
 
-/** What made this pair one company. Never a name. */
-export type MergeEvidence = 'kvk' | 'iban'
+/**
+ * What made this pair one company. Never a name.
+ *
+ * 'owner': the owner named the pair themselves (planOwnerMerge). Not a fact the app found — a
+ * decision the app was told, and the trail records it as that.
+ */
+export type MergeEvidence = 'kvk' | 'iban' | 'owner'
 
 export type MergePlan =
   | {
@@ -167,6 +172,38 @@ export function planSupplierMerge(a: MergeSupplier, b: MergeSupplier): MergePlan
   // Nothing proves one party. Two rows that merely read alike are exactly the pair this module
   // exists to refuse.
   return { ok: false, reason: 'no-evidence' }
+}
+
+/**
+ * [SAMENVOEGEN-EIGENAAR] A pair the OWNER named, in the direction they chose.
+ *
+ * The app offers only pairs it can prove (findMergeCandidates). But the reader does found two rows
+ * for one company without leaving a shared number behind — a misread name on one paper, nothing
+ * else — and then there is no proof to find, only an owner who knows. This is their door.
+ *
+ * What it keeps of the guard is the part that is FACT, not evidence: the two vetoes. Two KVK
+ * numbers are two legal entities whoever says otherwise; two own accounts would drop the number the
+ * IBAN-change check reads. Both are asked first, exactly as in planSupplierMerge, and neither can be
+ * talked past. What it gives up is the demand for proof: where a shared number exists it is cited,
+ * and where none does the evidence is the owner's word, recorded as such.
+ *
+ * The direction is not re-picked: the survivor is the row the owner pointed at.
+ */
+export function planOwnerMerge(survivor: MergeSupplier, mergedAway: MergeSupplier): MergePlan {
+  if (!survivor?.id || !mergedAway?.id || survivor.id === mergedAway.id) return { ok: false, reason: 'same-supplier' }
+  const proven = planSupplierMerge(survivor, mergedAway)
+  // A veto is a veto. Only the missing-evidence answer is the owner's to overrule.
+  if (!proven.ok && proven.reason !== 'no-evidence') return proven
+  const base = {
+    ok: true as const,
+    survivorId: survivor.id,
+    mergedAwayId: mergedAway.id,
+    survivorName: survivor.name,
+    mergedAwayName: mergedAway.name,
+    movesInvoices: mergedAway.invoiceCount ?? 0,
+  }
+  if (proven.ok) return { ...base, evidence: proven.evidence, sharedValue: proven.sharedValue }
+  return { ...base, evidence: 'owner', sharedValue: '' }
 }
 
 /**

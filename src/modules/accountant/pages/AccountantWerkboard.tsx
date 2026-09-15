@@ -625,6 +625,16 @@ export default function AccountantWerkboard({ clients, klantenOnleesbaar = false
                       >
                         {t('bh.werk.jaarKnop')}
                       </a>
+                      {/* [JOURNAAL-BRON] Het grootboek van deze klant: saldibalans, kaart en
+                          journaalposten, uit dezelfde journaalbouwer als het auditfile hiernaast.
+                          Het staat vóór de XAF-knoppen omdat dat de volgorde van het werk is —
+                          eerst kijken of de boeking klopt, dán importeren. */}
+                      <a
+                        href={`/dashboard/grootboek?clientId=${encodeURIComponent(row.id)}`}
+                        style={{ flexShrink: 0, fontSize: 12, fontWeight: 600, color: '#1A73E8', textDecoration: 'none', border: '1px solid #E0E0E0', borderRadius: 6, padding: '5px 10px' }}
+                      >
+                        {t('bh.werk.grootboekKnop')}
+                      </a>
                       {/* [XAF] Het jaar als XML Auditfile Financieel 3.2 — het bestand dat het
                           eigen pakket van het kantoor importeert. Zelfde dubbelpad-route. */}
                       <a

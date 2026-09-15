@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { fetchAllRows } from "@/lib/supabase-paginate";
 import { amsterdamToday } from "@/lib/format-nl";
-import { opdrachtgeverYear, type OpdrachtgeverInvoice, type OpdrachtgeverHours } from "@/lib/opdrachtgevers";
+import { opdrachtgeverDossier, type OpdrachtgeverInvoice, type OpdrachtgeverHours, type OpdrachtgeverAgreedRate } from "@/lib/opdrachtgevers";
 
 export const dynamic = "force-dynamic";
 
@@ -34,14 +34,19 @@ export async function GET(req: NextRequest) {
     // offerte is not money, and a concept was never issued.
     // [VOL-GELEZEN] Paged: a busy year passes the 1000-row cap, and a truncated year would
     // understate the biggest client's share — the one figure this panel exists to state.
-    const [invoices, hours] = await Promise.all([
+    const [invoices, hours, rates] = await Promise.all([
+      // [DBA-DOSSIER] No year filter any more, deliberately. "Since when" and "won this year" are
+      // both answers about the history, and a query cut at 1 January cannot give either: an
+      // opdrachtgever of four years and one of six weeks look identical inside one year. The cut is
+      // made in opdrachtgeverDossier instead, on the same rule the query used — an invoice with no
+      // readable date belongs to no year — so the year's own totals are exactly what they were.
       fetchAllRows<OpdrachtgeverInvoice>((lo, hi) =>
         supabase.from("invoices")
           .select("client_id, client_name, total_ex_btw, invoice_date")
           .eq("sender_id", user.id).eq("direction", "outgoing")
           .in("invoice_type", ["factuur", "creditnota"])
           .not("status", "in", "(draft,archived,cancelled)")
-          .gte("invoice_date", start).lte("invoice_date", end)
+          .lte("invoice_date", end)
           .order("id", { ascending: true }).range(lo, hi)),
       fetchAllRows<OpdrachtgeverHours>((lo, hi) =>
         supabase.from("time_entries")
@@ -49,8 +54,17 @@ export async function GET(req: NextRequest) {
           .eq("user_id", user.id)
           .gte("worked_on", start).lte("worked_on", end)
           .order("id", { ascending: true }).range(lo, hi)),
+      // [DBA-DOSSIER] The rate the owner AGREED per klant. Read, never derived: revenue divided by
+      // hours folds in every product line and every unbilled hour, and would print a price nobody
+      // ever quoted. The column is newer than the generated types, hence the relaxed client.
+      fetchAllRows<OpdrachtgeverAgreedRate>((lo, hi) =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (supabase as any).from("clients")
+          .select("client_id:id, default_hourly_rate")
+          .eq("user_id", user.id)
+          .order("id", { ascending: true }).range(lo, hi)),
     ]);
-    return NextResponse.json({ ok: true, ...opdrachtgeverYear({ year, invoices, hours }) });
+    return NextResponse.json({ ok: true, ...opdrachtgeverDossier({ year, invoices, hours, rates }) });
   } catch (e) {
     console.error("[OPDRACHTGEVER] jaar lezen mislukt", { year, error: e instanceof Error ? e.message : String(e) });
     return NextResponse.json({ error: "We konden je opdrachtgevers nu niet ophalen." }, { status: 503 });

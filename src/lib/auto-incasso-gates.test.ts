@@ -24,6 +24,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+// [RECONCILE-VOLGORDE] Which passes the hourly reconcile runs is declared data now, not a call
+// spelled out in the cron. Two gates below ask it directly, which is stronger than the text match
+// they used to do: an import that nothing calls could always satisfy a regex.
+import { passesFor } from "./reconcile-sequence";
 
 /** Source with comments stripped — these files explain the very mistakes the gates look for. */
 function code(path: string): string {
@@ -35,6 +39,7 @@ function code(path: string): string {
 const SETTLE = "src/lib/incasso-settle.ts";
 const MANAGE = "src/app/dashboard/incoming/manage/IncomingManageClient.tsx";
 const CRON = "src/app/api/cron/reconcile/route.ts";
+const SEQ = "src/lib/reconcile-sequence.ts";
 
 test("[AUTO-INCASSO] the booking goes through the same door as every other payment", () => {
   const src = code(SETTLE);
@@ -95,12 +100,20 @@ test("[AUTO-INCASSO] neither pay button survives on an invoice the bank collects
 
 test("[AUTO-INCASSO] the hourly reconcile keeps booking after the day you switch it on", () => {
   const src = code(CRON);
-  // The CALL, not the import. An import that nothing calls is exactly how this breaks — the line
-  // stays at the top of the file, tsc is happy, and the pass simply never runs.
-  assert.match(
-    src, /settleIncassoForUser\([^)]*\buid\b/,
+  // [RECONCILE-VOLGORDE] The call moved into the sequence; the property did not move at all. This
+  // used to match settleIncassoForUser(... uid) in the cron's own source, and the note beside it
+  // said why: an import that nothing calls leaves tsc happy while the pass never runs. Asking the
+  // DECLARATION is the same guarantee without the text: a pass the cron does not run is not in
+  // passesFor("cron"), whatever any file imports.
+  assert.ok(
+    passesFor("cron").some((p) => p.id === "incasso-settle"),
     "the cron no longer runs the incasso pass for its users — the switch would then work once, in " +
       "the request that flips it, and every invoice after that would stay open forever",
+  );
+  // …and the pass must still settle for the user the run was handed, not some other one.
+  assert.match(
+    code(SEQ), /settleIncassoForUser\([^)]*ctx\.userId/,
+    "the incasso pass no longer settles for the user of the run it belongs to",
   );
   // An owner whose bills are all collected automatically has no pending bank lines, no cash-paid
   // invoices and no drawer entries — none of the three sets the cron discovers users from. Without
@@ -174,7 +187,17 @@ test("[DD-SIGNAL] the CSV mapper still has a role for the incasso columns", () =
 
 test("[DD-SIGNAL] a proposal is a question, never a decision", () => {
   const src = code("src/app/api/cron/reconcile/route.ts");
-  assert.match(src, /proposeIncassoMandates\([^)]*uid/, "the cron no longer looks for mandates in the statement");
+  // [RECONCILE-VOLGORDE] Same move, same property: the cron runs this pass by declaring it, not by
+  // naming it. The stamp below is NOT a pass — it is the cron's own follow-through on its own
+  // notification — so it is still asked of the cron's source, where it still lives.
+  assert.ok(
+    passesFor("cron").some((p) => p.id === "incasso-propose"),
+    "the cron no longer looks for mandates in the statement",
+  );
+  assert.match(
+    code(SEQ), /proposeIncassoMandates\([^)]*ctx\.userId/,
+    "the mandate proposal no longer asks for the user of the run it belongs to",
+  );
   assert.match(src, /markIncassoSuggested/, "without the stamp the same question is asked every hour");
   // The line that would turn this from a question into a silent policy change. Turning the mandate
   // on decides how a supplier's invoices are booked from then on; this app's own rule for that

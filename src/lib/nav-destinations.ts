@@ -194,6 +194,7 @@ export const DOOR_LOOK = {
   "/dashboard/waarheid":       { icon: "monitoring",        tint: "#0B8043" },
   "/dashboard/aangifte":       { icon: "receipt_long",      tint: M3.vault },
   "/dashboard/jaar":           { icon: "date_range",        tint: "#0B57D0" },
+  "/dashboard/grootboek":      { icon: "account_balance",   tint: "#0B57D0" },
   "/dashboard/werkplek":       { icon: "work",              tint: M3.success },
   "/dashboard/bestanden":      { icon: "folder_open",       tint: "#0B57D0" },
   "/dashboard/settings/team":  { icon: "person_add",        tint: M3.tertiary },
@@ -282,6 +283,10 @@ export function railSectionsFor(role: Role | null, counter = false, work = false
         { href: "/dashboard/waarheid", label: "start.waarheid", ...doorLook("/dashboard/waarheid") },
         { href: "/dashboard/aangifte", label: "start.conceptBtw", ...doorLook("/dashboard/aangifte") },
         { href: "/dashboard/jaar", label: "start.jaar", ...doorLook("/dashboard/jaar") },
+        // [GROOTBOEK-KAART] The word a boekhouder looks for by name. The journal has existed since
+        // the auditfile was built; until now it had no door, and a package whose grootboek cannot
+        // be found is a package the accountant concludes does not have one.
+        { href: "/dashboard/grootboek", label: "start.grootboek", ...doorLook("/dashboard/grootboek") },
       ],
     },
     {

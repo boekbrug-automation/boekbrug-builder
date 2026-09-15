@@ -25,7 +25,7 @@ import {
   type MatchOptions,
 } from "./bank-matching";
 import type { BankTransaction } from "./bank-parser";
-import { withSupplierIbans } from "./supplier-known-iban";
+import { withSupplierIbans, fetchSupplierIbans } from "./supplier-known-iban";
 
 const OPTS: MatchOptions = { ...DEFAULT_OPTIONS, amountEpsilon: 0.02 };
 const IBAN = "NL91ABNA0417164300";
@@ -166,4 +166,50 @@ test("[SUPPLIER-IBAN] withSupplierIbans attaches only where the document was sil
   assert.deepEqual(rows.map((r) => r.supplier_known_iban), [IBAN, null, null, null]);
   // The stronger claim is never overwritten — that would LOSE evidence, not add it.
   assert.equal(rows[1].vendor_iban, OTHER_IBAN);
+});
+
+// ── [BLIND-LEVERANCIER] The read says whether it answered ──────────────────────────────────────
+//
+// An empty map has two causes that look identical from outside: no supplier in this batch has a
+// known account, or the read fell over. Under the second one a payment carrying only an IBAN goes
+// back to the manual pile, and "Probeer alles opnieuw" reports that it examined everything and
+// found nothing new — which the owner reads as a fact about their administratie rather than about
+// a database that was unreachable for a minute.
+
+/** A chainable Supabase-shaped stub whose terminal `.range()` answers with `answer()`. */
+function stubClient(answer: () => Promise<{ data: unknown; error: unknown }>) {
+  const chain: Record<string, unknown> = {};
+  for (const m of ["from", "select", "eq", "in", "order"]) chain[m] = () => chain;
+  chain.range = () => answer();
+  return chain;
+}
+
+test("[BLIND-LEVERANCIER] a good read answers unavailable: false, even when it finds nothing", async () => {
+  const client = stubClient(async () => ({ data: [], error: null }));
+  const got = await fetchSupplierIbans(client, "u1", [{ supplier_id: "s1", vendor_iban: null }]);
+  assert.equal(got.unavailable, false, "an empty administratie is not a failure");
+  assert.equal(got.ibans.size, 0);
+});
+
+test("[BLIND-LEVERANCIER] a good read still returns the map it found", async () => {
+  const client = stubClient(async () => ({ data: [{ id: "s1", iban: "NL91 ABNA 0417 1643 00" }], error: null }));
+  const got = await fetchSupplierIbans(client, "u1", [{ supplier_id: "s1", vendor_iban: null }]);
+  assert.equal(got.unavailable, false);
+  assert.equal(got.ibans.get("s1"), "NL91ABNA0417164300");
+});
+
+test("[BLIND-LEVERANCIER] a failed read is admitted, and still degrades to an empty map", async () => {
+  const client = stubClient(async () => { throw new Error("connection reset"); });
+  const got = await fetchSupplierIbans(client, "u1", [{ supplier_id: "s1", vendor_iban: null }]);
+  assert.equal(got.unavailable, true, "the loss must travel — a silent empty map is the whole bug");
+  assert.equal(got.ibans.size, 0, "…and it still never invents evidence");
+});
+
+test("[BLIND-LEVERANCIER] nothing to ask about is not a failure", async () => {
+  // Every invoice already names its own account, so no query runs at all. Claiming a loss here
+  // would put a warning on the screen on a day when nothing whatsoever went wrong.
+  const client = stubClient(async () => { throw new Error("must not be called"); });
+  const got = await fetchSupplierIbans(client, "u1", [{ supplier_id: "s1", vendor_iban: "NL91ABNA0417164300" }]);
+  assert.equal(got.unavailable, false);
+  assert.equal(got.ibans.size, 0);
 });

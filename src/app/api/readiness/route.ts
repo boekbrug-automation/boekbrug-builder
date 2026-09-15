@@ -31,6 +31,8 @@ import { buildReadiness, type ReadinessSignals } from "@/lib/readiness";
 import { vindBestaandeDubbelen } from "@/lib/existing-duplicates";
 // [GEEN-BTW-SOORT] Welke teruggevraagde BTW misschien een andere belasting is — zie btw-soort.ts.
 import { doubtAboutInputVat } from "@/lib/btw-soort";
+// [BTW-ONGECONTROLEERD] Gemengd tarief zonder specificatie — de btw die niets kon nakijken.
+import { btwUncheckable } from "@/lib/btw-ongecontroleerd";
 import { loadDrawerWitness } from "@/lib/drawer-witness";
 // [KAS-ZACHT] A removed cash movement counts in no total — one definition, see cash-live.ts.
 import { liveCashEntries } from "@/lib/cash-live";
@@ -83,7 +85,7 @@ export async function GET(req: NextRequest) {
   if (!owner.ok) return NextResponse.json({ error: owner.error }, { status: owner.status });
   const ownerId = owner.ownerId;
 
-  // service_role, every query scoped to ownerId (mirrors /api/closing-package/summary).
+  // service_role, every query scoped to ownerId (the same dual-path shape as /api/closing-package).
   const pipeline = createPipelineClient();
 
   // ── 1) Invoice evidence — REUSE summarizeClosingPackage (single source of truth) ──
@@ -324,8 +326,15 @@ export async function GET(req: NextRequest) {
     { exemptRegime: exemption.active },
   );
   const invoices: ResultInvoice[] = invRaw.map((i) => ({
+    id: i.id,
     direction: effDir(i),
     status: i.status, invoice_type: i.invoice_type, total_ex_btw: i.total_ex_btw, btw_amount: i.btw_amount,
+    // [AANSLAG] Both handles for the tax-letter test, which the engine now asks on both schemes:
+    // the stored kind and the sender's name. Selected all along and dropped here, so a
+    // Belastingdienst letter booked as an ordinary purchase — its "btw" (a misread: no letter of
+    // the Belastingdienst carries any) landing in 5b as voorbelasting.
+    tax_kind: i.tax_kind ?? null,
+    client_name: i.client_name ?? null,
     rate_lines: i.id ? rateSharesByInvoice.get(i.id as string) ?? null : null,
     exempt_ex: i.id ? exemptExByInvoice.get(i.id as string) ?? null : null,
     vat_deduction: i.id ? exemption.deductionByInvoice.get(i.id as string) ?? null : null,
@@ -391,6 +400,34 @@ export async function GET(req: NextRequest) {
   // Op naam ontdubbeld: tien polissen van één verzekeraar zijn één ding om na te kijken, en een
   // zin die die naam tien keer noemt wordt niet gelezen.
   const vatDoubtNames = [...new Set(vatDoubts.map((r) => r.naam).filter((n): n is string => !!n))];
+
+  // [BTW-ONGECONTROLEERD] Geboekte inkoopfacturen met een gemengd tarief en zonder de
+  // tariefspecificatie die het enige bewijs is — voorbelasting die niets heeft kunnen nakijken.
+  // Zelfde bron als hierboven: de rijen die al geboekt staan, want daar is de aftrek geclaimd.
+  const uncheckedVat = invRaw
+    .filter((i) => effDir(i as never) === "incoming" && ["received", "paid"].includes(String(i.status ?? "")))
+    .filter((i) => {
+      const fc = (i as { field_confidence: unknown }).field_confidence;
+      const marks = fc && typeof fc === "object" ? (fc as Record<string, unknown>) : {};
+      return btwUncheckable({
+        totalExBtw: (i as { total_ex_btw: number | null }).total_ex_btw,
+        btwAmount: (i as { btw_amount: number | null }).btw_amount,
+        // [REGELS] Either witness counts: the block the supplier printed, or the split built from
+        // the invoice's own lines — which is only ever stored after it reproduced both anchors.
+        hasRateBlock:
+          (Array.isArray(marks._btw_rows) && marks._btw_rows.length > 0) ||
+          (Array.isArray(marks._btw_rows_uit_regels) && marks._btw_rows_uit_regels.length > 0),
+        shifted: marks._btw_verlegd != null,
+      });
+    })
+    .map((i) => ({
+      naam: (i as { client_name: string | null }).client_name,
+      btw: Math.abs(Number((i as { btw_amount: number | null }).btw_amount ?? 0)),
+    }));
+  const uncheckedVatCount = uncheckedVat.length;
+  const uncheckedVatAmount = round2(uncheckedVat.reduce((sum, r) => sum + r.btw, 0));
+  // Op naam ontdubbeld, om dezelfde reden als hierboven: één groothandel is één ding om na te kijken.
+  const uncheckedVatNames = [...new Set(uncheckedVat.map((r) => r.naam).filter((n): n is string => !!n))];
 
   const autoVerifiedCount = invRaw.filter((i) => {
     const fc = i.field_confidence as Record<string, unknown> | null;
@@ -736,6 +773,9 @@ export async function GET(req: NextRequest) {
     autoVerifiedCount,
     doubleBookedCount,
     vatDoubtCount,
+    uncheckedVatCount,
+    uncheckedVatAmount,
+    uncheckedVatNames,
     vatDoubtNames,
     doubleBookedNumbers,
     // [EVIDENCE] De exacte factuurnummers zonder PDF. summarizeClosingPackage bouwt deze

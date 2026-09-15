@@ -84,6 +84,7 @@
 // lifecycle gate enforces that: two roundings that agree today diverge the first time one of them
 // is "improved", and a price is exactly where that must not happen.
 import { round2 } from "./invoice-totals";
+import { PLUS_PRICE_EUR } from "./fair-use";
 
 /** 21% — the Dutch standard rate. Portal access is a digital service; no exemption applies. */
 const BTW_RATE = 0.21;
@@ -148,6 +149,46 @@ export function bandFor(linkedClients: number): AccountantBand {
 export function monthlyChargeExclBtw(linkedClients: number): number {
   if (!ACCOUNTANT_PRICING_ACTIVE) return 0;
   return bandFor(linkedClients).monthlyExclBtw;
+}
+
+/** The same amount with btw removed — Plus is a consumer price, so it is quoted INCLUDING btw. */
+export function exclBtw(inclBtwAmount: number): number {
+  return round2(inclBtwAmount / (1 + BTW_RATE));
+}
+
+/**
+ * The first band an office actually pays for. The honest place to compare anything against,
+ * because the free band compares against nothing.
+ */
+export function firstPaidBand(): AccountantBand | null {
+  return ACCOUNTANT_BANDS.find((b) => b.monthlyExclBtw > 0) ?? null;
+}
+
+/**
+ * ─── [PROVISIE-REKENSOM] The commission we do not pay, priced ────────────────────────────────
+ *
+ * Every office asks whether it gets a cut for bringing its clients in, and "no" on its own reads
+ * as "not yet". So the answer carries the arithmetic: what a commission COULD be worth, next to
+ * what the office already does not pay for the portal.
+ *
+ * This is a CEILING, deliberately generous to the commission it argues against:
+ *   · it assumes EVERY linked client pays Plus, while Plus is only charged above the fair-use
+ *     boundary — most clients pay nothing, so the real figure is lower;
+ *   · it takes the whole rate off our revenue before any cost, as if serving the client were free.
+ *
+ * `rate` is a HYPOTHESIS, not an offer, and nothing bills from this function — it exists to be
+ * rendered beside bandFor().monthlyExclBtw on /voor-boekhouders. If the ceiling is the larger of
+ * the two, the office is being asked to pay the portal price so that we can hand most of it back.
+ */
+export const REFERRAL_RATE_HYPOTHESIS = 0.2;
+
+export function referralCeilingExclBtw(
+  linkedClients: number,
+  rate: number = REFERRAL_RATE_HYPOTHESIS,
+): number {
+  if (!Number.isFinite(linkedClients) || linkedClients <= 0) return 0;
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+  return round2(Math.trunc(linkedClients) * exclBtw(PLUS_PRICE_EUR) * rate);
 }
 
 /** The band table as markdown, for the Terms. Both amounts, because the reader reclaims the btw. */

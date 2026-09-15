@@ -16,6 +16,8 @@ import {
   isAiCredentialError,
   isAiConfigError,
   MODEL_UNAVAILABLE_MESSAGE,
+  isAiCreditError,
+  AI_CREDIT_MESSAGE,
 } from "./ai-model";
 
 /** The regex exactly as email-integration.ts had it, copied verbatim as the benchmark. */
@@ -114,4 +116,47 @@ test("the message does not send the owner to a button that cannot work", () => {
   // The word "opnieuw" may appear only to say that it does NOT help.
   assert.ok(/helpt hier niet/i.test(MODEL_UNAVAILABLE_MESSAGE), MODEL_UNAVAILABLE_MESSAGE);
   assert.ok(!/probeer het later opnieuw/i.test(MODEL_UNAVAILABLE_MESSAGE), MODEL_UNAVAILABLE_MESSAGE);
+});
+
+// ── [GEEN-KREDIET] The outage nobody had a predicate for, until it happened ──────────────────
+
+/** Verbatim shape of what the three transports in ai.ts throw on an exhausted Anthropic account. */
+const CREDIT_ERROR = new Error(
+  'Claude API error 400: {"type":"error","error":{"type":"invalid_request_error",' +
+  '"message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}',
+);
+
+test("[GEEN-KREDIET] an exhausted account is recognised", () => {
+  assert.equal(isAiCreditError(CREDIT_ERROR), true);
+  assert.equal(isAiCreditError(new Error("Claude PDF API error 402: payment required")), true);
+  assert.equal(isAiCreditError(new Error("insufficient_quota")), true);
+});
+
+test("[GEEN-KREDIET] and NONE of the older predicates saw it — which is why it buried invoices", () => {
+  // This is the finding, pinned. Each of these returning false is what made the e-mail sync file a
+  // real incoming invoice as could_not_read and advance the watermark past it.
+  assert.equal(isModelUnavailableError(CREDIT_ERROR), false, "400 is not 404 and names no model");
+  assert.equal(isAiCredentialError(CREDIT_ERROR), false, "invalid_request_error is not invalid_api");
+  assert.equal(isAiConfigError(CREDIT_ERROR), false, "so the union of the two does not see it either");
+});
+
+test("[GEEN-KREDIET] and it stays out of the config union, which a test elsewhere pins", () => {
+  // Folding it in would change what isAiConfigError means for every existing caller. It is wired
+  // in at the one place that consumes it instead.
+  assert.equal(isAiConfigError(new Error("Claude API error 402: payment required")), false);
+});
+
+test("[GEEN-KREDIET] an ordinary refusal is not a credit outage", () => {
+  // The predicate must not swallow a real verdict about a file, or it would hold the watermark on
+  // a document that genuinely cannot be read and freeze the sync forever.
+  assert.equal(isAiCreditError(new Error("Claude API error 400: could not read this PDF")), false);
+  assert.equal(isAiCreditError(new Error("Claude API error 429: rate limited")), false);
+  assert.equal(isAiCreditError(new Error("Claude API error 404: not_found_error")), false);
+  assert.equal(isAiCreditError(null), false);
+  assert.equal(isAiCreditError(undefined), false);
+});
+
+test("[GEEN-KREDIET] the owner is never sent to a setting they do not own", () => {
+  assert.match(AI_CREDIT_MESSAGE, /er gaat niets verloren/);
+  assert.doesNotMatch(AI_CREDIT_MESSAGE, /instellingen|opnieuw proberen helpt/i);
 });

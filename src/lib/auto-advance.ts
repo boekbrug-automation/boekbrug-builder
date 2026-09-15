@@ -31,6 +31,10 @@ import { verdictBlocksAutoBooking } from "./amount-grounding";
 import { placementBlocksAutoBooking } from "./document-verify";
 // [E-FACTUUR-BESLECHT] The one witness that is not a reading. See the gate below.
 import { eInvoiceSettlesAmounts } from "./e-invoice";
+// [NUL-BTW-STIL] The zero-BTW question, shared with the doors that never reach this queue.
+import { zeroBtwUnexplained } from "./zero-btw";
+// [VREEMDE-VALUTA] The euro assumption. A document in another currency is never auto-booked.
+import { foreignCurrencyHold } from "./vreemde-valuta";
 
 // Auto-booking bar — stricter than import-health's 0.7 review line. A present per-field score
 // below this keeps the invoice in the queue for a human, even if it isn't otherwise "flagged".
@@ -135,8 +139,34 @@ export function shouldAutoAdvanceInvoice(s: AutoAdvanceSignals): AutoAdvanceDeci
   // silently zeroed, the one number this app exists to protect, behind an "automatisch geverifieerd"
   // tag that reduces scrutiny. Fail-closed to human review; a genuine 0%/vrijgesteld invoice
   // (btwRate === 0) still auto-advances. Strictly stricter — this can only HOLD, never wrongly book.
-  const btw = s.health?.btw_amount;
-  if (typeof btw === "number" && Math.abs(btw) < 0.005 && s.btwRate !== 0) {
+  // [NUL-BTW-STIL] The question itself now lives in zero-btw.ts, because the doors that do NOT
+  // pass through this queue must ask exactly the same one — and it gained the reverse-charge
+  // answer on the way: a verlegde factuur carries no BTW and no rate BY DESIGN (see the note on
+  // _btw_verlegd in ai.ts), so holding it here named a reading failure that never happened.
+  // [VREEMDE-VALUTA] The document named a currency that is not the euro, so the amounts stored
+  // are not euro amounts — nothing converted them, by design. Auto-booking them would put a
+  // dollar figure in the base, the btw and the aangifte under an "automatisch geverifieerd" tag,
+  // and every arithmetic gate below would pass, because the document is internally consistent in
+  // its own money. Only a human can supply what their bank actually took. Absent currency reads
+  // as no hold, so this changes nothing for a document that never named one.
+  if (foreignCurrencyHold(s.health?.field_confidence?._valuta?.code).hold) {
+    return { advance: false, reason: "foreign_currency" };
+  }
+
+  // [ZELFFACTUUR] The document says the CUSTOMER drew it up. If the owner is the seller, this is
+  // their own turnover and auto-booking it as a cost doubles the sale and claims back btw they
+  // OWE. If the owner is the buyer it is a genuine purchase invoice. Nothing on the paper says
+  // which, so nothing here decides — it waits for the one person who knows.
+  if (s.health?.field_confidence?._zelffactuur === true) {
+    return { advance: false, reason: "self_billed" };
+  }
+
+  if (zeroBtwUnexplained({
+    totalIncBtw: s.totalIncBtw,
+    btwAmount: s.health?.btw_amount,
+    btwRate: s.btwRate,
+    shifted: s.health?.field_confidence?._btw_verlegd != null,
+  })) {
     return { advance: false, reason: "zero_btw_not_explicit_zero_rate" };
   }
 

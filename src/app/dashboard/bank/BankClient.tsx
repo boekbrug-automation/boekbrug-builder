@@ -30,12 +30,16 @@ import { categoryLabel } from '@/lib/bank-categories'
 import { BANK_IGNORE_REASONS, BANK_IGNORE_REASON_LABELS, bankIgnoreReasonLabel, ignoreReasonGroups } from '@/lib/bank-ignore-reason'
 import { rowMatchesQuery } from '@/lib/search'
 import { useDialog } from '@/components/ui/Dialog'
+// [GROTE-STAP] One extra beat, proportional to what a slip would cost — see grote-stap.ts. Undoing
+// a booking is the one destructive action on this screen that took a single tap at any amount.
+import { beoordeelStap, groteStapZin } from '@/lib/grote-stap'
 import { useToast } from '@/components/ui/Toast'
 // [OPEN-TOTAL] Eén definitie van openstaand, gedeeld met elk ander scherm.
 import { openAmount } from "@/lib/partial-payment"
 // [ENABLEBANKING] De bankkoppeling staat BOVEN de uploadkaart, niet in de plaats ervan: een
 // koppeling kan verlopen of geweigerd worden, en dan moet uploaden er gewoon nog staan.
 import BankConnectPanel from './BankConnectPanel'
+import WachtkoppelingPanel from '@/components/bank/WachtkoppelingPanel'
 // [DESIGN] Palette and radius come from the shared source now
 // (src/lib/design/tokens.ts). This file used to declare its own copy; see the
 // header of tokens.ts for why the copies had to go — two of the values in them
@@ -240,6 +244,11 @@ interface MatchResponse {
   ok: boolean
   summary: { pending: number; auto: number; choice: number; none: number }
   suggestions: Suggestion[]
+  /**
+   * [BLIND-GEMATCHT] What this answer could not use. Absent on the ordinary day; present means the
+   * suggestions below are worse than yesterday's for a reason the owner cannot otherwise see.
+   */
+  degraded?: { memory?: boolean; refusals?: boolean; supplierIbans?: boolean }
 }
 
 // [MOVE-PAYMENT] Shapes returned by GET /api/invoice/payment/move.
@@ -286,7 +295,7 @@ export default function BankClient() {
   // instead of only in a toast, because the interesting answer ("gevonden, maar niet aangeraakt")
   // is exactly the one the owner needs to still be readable after the toast has gone.
   const [rematching, setRematching] = useState(false)
-  const [rematchInfo, setRematchInfo] = useState<{ restored: number; booked: number; ambiguous: number; examined: number } | null>(null)
+  const [rematchInfo, setRematchInfo] = useState<{ restored: number; booked: number; ambiguous: number; examined: number; supplierIbansUnavailable?: boolean } | null>(null)
   // [BANK-STATEMENT-DELETE] The statement pending deletion (shown in a confirm
   // dialog) and the id currently being deleted (to disable its row button).
   const [statementToDelete, setStatementToDelete] = useState<{ id: string; name: string } | null>(null)
@@ -487,7 +496,14 @@ export default function BankClient() {
   }, [showToast, t])
 
   // [BANK-UNLINK] Undo a confirmed match — makes auto-confirm safe (every booking reversible).
-  const unlink = useCallback(async (txId: string) => {
+  const unlink = useCallback(async (txId: string, bedrag: number, aantalFacturen: number) => {
+    // [GROTE-STAP] Ontkoppelen is not an untidy screen when it lands on the wrong row: a settled
+    // invoice becomes open again, the balance reads higher than it is, and the owner is looking at
+    // a bill they already paid. Below the threshold this still costs exactly one tap — a beat on
+    // every unlink is clicked away on all of them, including the one that mattered.
+    const oordeel = beoordeelStap({ soort: 'betaling_ontkoppelen', bedrag, aantal: aantalFacturen })
+    const zin = groteStapZin({ soort: 'betaling_ontkoppelen', bedrag }, oordeel, eur.format)
+    if (zin && !(await dialog.confirm({ message: zin, confirmLabel: t('bank.ontkoppelen') }))) return
     setProcessingId(txId)
     try {
       const res = await fetch('/api/bank/unlink', {
@@ -508,7 +524,7 @@ export default function BankClient() {
       else showToast(t('bank.fout.ontkoppelen'))
     } catch { showToast(t('bank.fout.ontkoppelen')) }
     finally { setProcessingId(null) }
-  }, [runMatch, showToast, t])
+  }, [runMatch, showToast, t, dialog])
 
   // [KAS-AUTO-BOOK] The other answer to the amber "even controleren" flag. Ontkoppelen says the
   // booking is wrong; this says it is right, and until now only the first had a button — so the
@@ -1104,7 +1120,7 @@ export default function BankClient() {
         showToast(t('bank.fout.opnieuw'))
         return
       }
-      setRematchInfo({ restored: json.restored ?? 0, booked: json.booked ?? 0, ambiguous: json.ambiguous ?? 0, examined: json.examined ?? 0 })
+      setRematchInfo({ restored: json.restored ?? 0, booked: json.booked ?? 0, ambiguous: json.ambiguous ?? 0, examined: json.examined ?? 0, supplierIbansUnavailable: json.supplierIbansUnavailable === true })
       const parts: string[] = []
       if (json.restored > 0) parts.push(json.restored === 1 ? t('bank.rematch.terugEen') : t('bank.rematch.terug', { count: json.restored }))
       if (json.booked > 0) parts.push(t('bank.rematch.gekoppeld', { count: json.booked }))
@@ -1914,6 +1930,27 @@ export default function BankClient() {
           Zolang de eerste lezing loopt (data === null) staat er niets. "Alles afgehandeld" boven een
           scherm dat nog aan het laden is, is precies het soort geruststelling dat later een leugen
           blijkt te zijn geweest. */}
+      {/* [BLIND-GEMATCHT] Two signals this page can lose with nothing to show for it: the memory of
+          what the owner already confirmed, and the list of suggestions they refused. Losing the
+          first makes a counterparty they identify every month go manual again; losing the second
+          brings back a suggestion they explicitly said no to. Both make the app look like it
+          forgot — and an app that seems to forget is one nobody teaches twice. So it says which
+          one it could not read, once, above the list it affects. */}
+      {data?.degraded && (
+        <p style={{ fontSize: 13, color: '#B26A00', margin: '0 0 12px', lineHeight: 1.5, textAlign: 'start' }}>
+          {/* [RUSTIG] Two losses, two sentences — and when both happened, both are shown rather
+              than a third sentence that says the same thing twice. One thought, one place. */}
+          {data.degraded.memory && t('bank.blind.geheugen')}
+          {data.degraded.memory && data.degraded.refusals && ' '}
+          {data.degraded.refusals && t('bank.blind.geweigerd')}
+          {/* [BLIND-LEVERANCIER] The third loss in the same family: the account each supplier is
+              known to bill from. Without it a payment carrying only an IBAN has nothing to be
+              recognised by, and goes back to the manual pile as if it never could be. */}
+          {(data.degraded.memory || data.degraded.refusals) && data.degraded.supplierIbans && ' '}
+          {data.degraded.supplierIbans && t('bank.blind.leverancier')}
+        </p>
+      )}
+
       {data && (
         <p style={{ fontSize: 13.5, color: '#5F6368', margin: '0 0 18px', lineHeight: 1.5 }}>
           {/* "Nog geen transacties" hangt aan de lezing zelf, niet aan de genegeerd-lijst: die
@@ -2004,6 +2041,11 @@ export default function BankClient() {
           </button>
         </div>
       )}
+
+      {/* [WACHTKOPPELING] Betalingen die de eigenaar al deed en die de bank nog niet liet zien.
+          Hier, omdat dit het scherm is waar je kijkt of geld al binnen is — en omdat een voorstel,
+          als er een komt, over een regel op dit scherm gaat. */}
+      <WachtkoppelingPanel onChanged={() => { void runMatch() }} />
 
       {/* [ENABLEBANKING] De bankkoppeling. Verbergt zichzelf als de server er niet voor is ingesteld. */}
       {setupZichtbaar && (
@@ -2201,6 +2243,13 @@ export default function BankClient() {
               to escape — so it has to say where to look instead of quietly doing nothing. */}
           {rematchInfo && (
             <div style={{ padding: '10px 14px', borderBottom: '1px solid #F0F0F0', background: '#F8F9FA', fontSize: 12.5, color: '#3c4043', lineHeight: 1.5 }}>
+              {/* [BLIND-LEVERANCIER] "Niets nieuws te koppelen" is a claim about the administratie.
+                  When a matching signal could not be read it is a claim about a database, and the
+                  owner must be able to tell the two apart before they conclude there is nothing
+                  there. Said beside the count, never instead of it. */}
+              {rematchInfo.supplierIbansUnavailable && (
+                <div style={{ color: '#B26A00', marginBottom: 4 }}>{t('bank.blind.leverancier')}</div>
+              )}
               {rematchInfo.restored === 0 && rematchInfo.booked === 0 && rematchInfo.ambiguous === 0 ? (
                 <>{t('bank.rematch.alles', { count: rematchInfo.examined })}</>
               ) : (
@@ -2652,7 +2701,7 @@ export default function BankClient() {
                 onReject={(invId) => rejectSuggestion(s.transactionId, invId)}
                 onUndoReject={undoReject[s.transactionId] ? () => undoRejectSuggestion(s.transactionId) : undefined}
                 isDoneTab={bankTab === 'done'}
-                onUnlink={() => unlink(s.transactionId)}
+                onUnlink={() => unlink(s.transactionId, Math.abs(s.amount), (s.linkedInvoices ?? []).length)}
                 onMove={() => openMove(s.transactionId)}
                 onMatchChecked={() => markMatchChecked(s.transactionId)}
                 onStorno={s.storno ? () => applyStorno(s.transactionId, s.storno!.originTxId) : undefined}

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import {
   paidInvoiceExplainsLine,
+  paidInvoiceForLine,
   buildDoubleBookingGuard,
   isMollieCredit,
   type PaidExplainerRow,
@@ -94,4 +95,75 @@ test("[DUBBEL-GEDEKT] a guard that could not look does not claim to know", () =>
   const blind = buildDoubleBookingGuard({ paidRows: [], hasRecentMolliePayout: false, molliePayoutKnown: false });
   assert.equal(known.molliePayoutKnown, true);
   assert.equal(blind.molliePayoutKnown, false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [AL-BETAALD-NUMMER] The handle the guard was missing: the number printed on the bank line.
+//
+// Measured on the production database before this was written: 53 unlinked outgoing payments
+// print the number of exactly one purchase invoice, 49 of those invoices were already settled,
+// and together they carry € 34.858,79 — every one of them invisible to an amount-keyed rule the
+// moment a bank charge or a rounding shifts a cent.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const numbered = (over: Partial<PaidExplainerRow> = {}): PaidExplainerRow =>
+  paid({ invoice_number: "2670428", ...over });
+
+const debit = (over: Partial<GuardLine> & { reference?: string | null } = {}): GuardLine & { reference?: string | null } => ({
+  amount: -250, date: "2026-07-12", description: null, counterpart_name: null, ...over,
+});
+
+test("[AL-BETAALD-NUMMER] the printed number explains the line, whatever the amount says", () => {
+  // The amount is nowhere near the invoice: a bank charge, a partial, a rounding. Identity wins.
+  const hit = paidInvoiceForLine([numbered()], debit({ amount: -237.5, description: "Factuur 2670428" }));
+  assert.equal(hit?.invoice_number, "2670428");
+});
+
+test("[AL-BETAALD-NUMMER] the printed number explains it outside the settlement window too", () => {
+  // Six weeks later the amount rule gives up — and it should, since a second € 250 is a real
+  // possibility. A payment that NAMES the invoice is not a coincidence.
+  assert.equal(paidInvoiceForLine([numbered()], debit({ date: "2026-08-25" })) === null, true, "no number in the text");
+  const named = paidInvoiceForLine([numbered()], debit({ date: "2026-08-25", description: "betaling 2670428" }));
+  assert.equal(named?.invoice_number, "2670428");
+});
+
+test("[AL-BETAALD-NUMMER] direction still decides, however the number reads", () => {
+  // A SALES invoice cannot explain money leaving the account, even when the line quotes it.
+  const sale = numbered({ direction: "outgoing" });
+  assert.equal(paidInvoiceForLine([sale], debit({ description: "2670428" })), null);
+  assert.equal(paidInvoiceForLine([sale], debit({ amount: 250, description: "2670428" }))?.invoice_number, "2670428");
+});
+
+test("[AL-BETAALD-NUMMER] the number rules referenceMatches already paid for still hold", () => {
+  // A digit-flanked fragment is a DIFFERENT invoice — the lesson that cost a wrong one-tap payment.
+  assert.equal(paidInvoiceForLine([numbered({ invoice_number: "2050" })],
+    debit({ amount: -9, description: "ref 26302050" })), null, "2050 inside 26302050 is not identity");
+  // A bare calendar year is not identity either.
+  assert.equal(paidInvoiceForLine([numbered({ invoice_number: "2026" })],
+    debit({ amount: -9, description: "Huur juli 2026" })), null);
+  // …and a needle under four characters is never safe.
+  assert.equal(paidInvoiceForLine([numbered({ invoice_number: "12" })],
+    debit({ amount: -9, description: "nota 12" })), null);
+});
+
+test("[AL-BETAALD-NUMMER] a row with no number falls back to the amount rule, unchanged", () => {
+  assert.equal(paidInvoiceForLine([paid()], debit())?.total_inc_btw, 250);
+  assert.equal(paidInvoiceForLine([paid()], debit({ amount: -250.5 })), null);
+});
+
+test("[AL-BETAALD-NUMMER] the old signature still answers exactly as it did", () => {
+  // Every existing caller passes three arguments and must keep the amount-and-date behaviour.
+  assert.equal(paidInvoiceExplainsLine([numbered()], -250, "2026-07-12"), true);
+  assert.equal(paidInvoiceExplainsLine([numbered()], -250, "2026-08-25"), false);
+  // …and a caller that DOES hand over the words gets the number handle.
+  assert.equal(paidInvoiceExplainsLine([numbered()], -237.5, "2026-08-25", { description: "Factuur 2670428" }), true);
+});
+
+test("[AL-BETAALD-NUMMER] the guard holds a category on the number alone", () => {
+  const g = buildDoubleBookingGuard({ paidRows: [numbered()], hasRecentMolliePayout: false });
+  // Amount far off, date far off — only the printed number ties them, and that is enough to
+  // refuse writing 'kosten' a second time over money a paid invoice already carries.
+  assert.equal(g.hold("kosten", debit({ amount: -237.5, date: "2026-08-25", description: "Factuur 2670428" })), "paid-invoice");
+  // A line naming nothing, far from the amount, is still a free line.
+  assert.equal(g.hold("kosten", debit({ amount: -237.5, date: "2026-08-25" })), null);
 });

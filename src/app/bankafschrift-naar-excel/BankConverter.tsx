@@ -13,7 +13,13 @@ import { useState, useRef, useCallback } from 'react'
 import Link from 'next/link'
 import { parseBankFile, type ParseResult } from '@/lib/bank-parser'
 import { toExportMatrix, toNormalizedCsv } from '@/lib/bank-csv'
-import { matrixToXlsxBytes } from '@/lib/xlsx-adapter'
+// [SHEET-LAAT] SheetJS is NOT imported here. Measured in the built chunks and then in what the
+// server actually hands out: 266 kB raw, 88 kB over the wire. On this page it is needed by exactly
+// one thing — the .xlsx download button at the very end of the flow, beside a CSV button that needs
+// none of it. A static import made every visitor to a PUBLIC page pay for a writer most of them
+// never reach, on the page whose entire job is to convert a stranger in the first seconds. Same
+// trap as PdfDownloadButton.tsx, different library, and its lesson is the one that counts: the
+// deferral is worth nothing unless the IMPORT moves, so it lives inside the click handler below.
 import { looksLikeSpreadsheetBinary } from '@/lib/detect-file'
 // [AFSCHRIFT-SLUIT] Dezelfde controle die de app op elk geüpload afschrift draait.
 import { reconcileStatementBalance } from '@/lib/bank-statement-balance'
@@ -85,10 +91,21 @@ export default function BankConverter() {
     if (f) handleFile(f)
   }, [handleFile])
 
-  const downloadXlsx = () => {
-    if (!parsed) return
-    const bytes = matrixToXlsxBytes(toExportMatrix(parsed.result))
-    download(bytes, `${parsed.baseName}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  // [SHEET-LAAT] The writer arrives when it is asked for. A failed load says so — a download button
+  // that does nothing at all is the worst answer on a page built to earn trust.
+  const [xlsxBezig, setXlsxBezig] = useState(false)
+  const downloadXlsx = async () => {
+    if (!parsed || xlsxBezig) return
+    setXlsxBezig(true)
+    try {
+      const { matrixToXlsxBytes } = await import('@/lib/xlsx-adapter')
+      const bytes = matrixToXlsxBytes(toExportMatrix(parsed.result))
+      download(bytes, `${parsed.baseName}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    } catch {
+      setError('De Excel-schrijver kon niet worden geladen. Download hem als CSV — dat bestand opent ook in Excel.')
+    } finally {
+      setXlsxBezig(false)
+    }
   }
   const downloadCsv = () => {
     if (!parsed) return
@@ -220,8 +237,8 @@ export default function BankConverter() {
             )}
 
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <button onClick={downloadXlsx} style={{ background: '#1a73e8', color: '#fff', border: 'none', borderRadius: 10, padding: '13px 22px', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
-                ⬇︎ Download als Excel (.xlsx)
+              <button onClick={downloadXlsx} disabled={xlsxBezig} style={{ background: '#1a73e8', color: '#fff', border: 'none', borderRadius: 10, padding: '13px 22px', fontSize: 15, fontWeight: 700, cursor: xlsxBezig ? 'default' : 'pointer', opacity: xlsxBezig ? 0.7 : 1 }}>
+                {xlsxBezig ? 'Even geduld…' : '⬇︎ Download als Excel (.xlsx)'}
               </button>
               <button onClick={downloadCsv} style={{ background: '#fff', color: '#1a73e8', border: '1px solid #1a73e8', borderRadius: 10, padding: '13px 22px', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
                 ⬇︎ Download als CSV

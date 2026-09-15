@@ -44,6 +44,7 @@ import { URENCRITERIUM_HOURS, type UrencriteriumLevel, type UrencriteriumStatus 
 // segmenten, dus een ondernemer op een Engelstalig systeem tikt mm-dd-jjjj in een Nederlands
 // veld. Dit veld typt in dd-mm-jjjj en zegt terug welke datum het begrepen heeft.
 import DateFieldNL from '@/components/ui/DateFieldNL'
+import RittenPanel from './RittenPanel'
 import {
   groupBillable, entryValue, isUninvoiced, isDeclarable, MAX_HOURS_PER_ENTRY,
   prefillHourlyRate, billableSharePercent, type TimeEntry,
@@ -63,7 +64,9 @@ export interface UrenClientCard {
   default_hourly_rate?: number | null
 }
 
-type Tab = 'open' | 'billed'
+// [RITTEN] The kilometre log is a third tab and not a screen of its own: driving to a customer
+// and working there are one afternoon, and a second door would be a second thing to remember.
+type Tab = 'open' | 'billed' | 'km'
 type Form = { id: string | null; client_id: string; worked_on: string; description: string; hours: string; hourly_rate: string; billable: boolean }
 
 // [TZ] amsterdamToday, niet toISOString(). Tussen middernacht en 02:00 zomertijd is de UTC-dag de
@@ -337,16 +340,18 @@ export default function UrenClient({
       )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        <button type="button" onClick={() => { setRatePrefilled(false); setForm(emptyForm()) }} disabled={busy} style={{
-          padding: '10px 16px', borderRadius: R.sm, border: 'none', background: M3.primary,
-          color: '#fff', fontFamily: FONT, fontSize: 14, fontWeight: 600, cursor: 'pointer',
-        }}>{t('uren.nieuw')}</button>
-        {(['open', 'billed'] as Tab[]).map((k) => (
-          <button key={k} type="button" onClick={() => setTab(k)} style={{
+        {tab !== 'km' && (
+          <button type="button" onClick={() => { setRatePrefilled(false); setForm(emptyForm()) }} disabled={busy} style={{
+            padding: '10px 16px', borderRadius: R.sm, border: 'none', background: M3.primary,
+            color: '#fff', fontFamily: FONT, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+          }}>{t('uren.nieuw')}</button>
+        )}
+        {(['open', 'billed', 'km'] as Tab[]).map((k) => (
+          <button key={k} type="button" onClick={() => { if (k === 'km') setForm(null); setTab(k) }} style={{
             padding: '10px 14px', borderRadius: R.sm, cursor: 'pointer', fontFamily: FONT, fontSize: 14,
             border: `1px solid ${tab === k ? M3.primary : M3.outline}`,
             background: tab === k ? '#E8F0FE' : '#fff', color: tab === k ? M3.primary : M3.neutral,
-          }}>{k === 'open' ? t('uren.teFactureren') : t('uren.gefactureerd')}</button>
+          }}>{k === 'open' ? t('uren.teFactureren') : k === 'billed' ? t('uren.gefactureerd') : t('ritten.tab')}</button>
         ))}
       </div>
 
@@ -426,6 +431,10 @@ export default function UrenClient({
           </div>
         </div>
       )}
+
+      {/* [RITTEN] The kilometre log. It fetches its own trips, so the hours read above is
+          untouched and an owner who never drives pays nothing for it. */}
+      {tab === 'km' && <RittenPanel clients={clients} />}
 
       {tab === 'open' && groups.length === 0 && !failed && (
         <div style={{ background: '#fff', borderRadius: R.md, boxShadow: EL1, padding: 24, textAlign: 'start' }}>

@@ -384,9 +384,6 @@ export default function KwartaalPage() {
   async function handleAction(invoiceId: string, action: ActionValue | null) {
     setUpdatingId(invoiceId)
 
-    // [BOEK-006] null clears the status (neutral state)
-    const update: Record<string, string | null> = { accountant_status: action }
-
     // NOTE: 'voldaan' is a UI-only label, NOT a DB status (violates CHECK).
     // Creditnota stays 'paid' in DB; the UI shows "Voldaan" based on type+status.
     // (removed the previous update.status = 'voldaan' which caused a 23514 error)
@@ -394,7 +391,19 @@ export default function KwartaalPage() {
     setInvoices(prev => prev.map(i =>
       i.id === invoiceId ? { ...i, accountant_status: action } : i
     ))
-    const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId)
+    // [BOEKHOUDER-DEUR] Through the server door, never straight at the table. This screen used to
+    // write accountant_status with a browser UPDATE — and 'verwerkt' is the value that freezes an
+    // invoice's paid state, so the app's hardest money refusal was set and cleared by a client with
+    // no authorization check and no record of who did it. The door derives the accountant from the
+    // session, checks the client linkage and the invoice, and writes both columns at once; the
+    // database refuses this column from any session client, so there is no way round it.
+    // [BOEK-006] null clears the status (neutral state) — the undo, and still a legal one.
+    const res = await fetch('/api/accountant/invoice-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, invoiceId, status: action }),
+    }).catch(() => null)
+    const error = res && res.ok ? null : { message: res ? `door_${res.status}` : 'network' }
     if (error) {
       // revert optimistic on failure
       setInvoices(prev => prev.map(i =>

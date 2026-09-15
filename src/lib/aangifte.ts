@@ -84,11 +84,13 @@ export interface AangifteCompleteness {
   // Verified invoices with NO invoice_date. A date-range fetch silently drops them, so they
   // are NOT in the figures above — surfaced as a note so the concept isn't quietly too low.
   datelessVerifiedCount?: number;
-  // [COUNT-BASIS] Which set the two counts above describe. Under kasstelsel the rubrieken are
-  // built from SETTLEMENTS (money that moved in this quarter), not from the invoices DATED in it
-  // — two genuinely different sets, on purpose: an invoice from last year paid in March belongs
-  // in this quarter, and one issued in March but unpaid does not. The counts then had to be
-  // taken from the settled set, and the sentences had to stop saying "ingevoerd" about them.
+  // [COUNT-BASIS] Which set the counts above describe. Under kasstelsel the OMZET rubrieken are
+  // built from SETTLEMENTS (money that came in this quarter), not from the invoices DATED in it
+  // — two genuinely different sets, on purpose: a sales invoice from last year paid in March
+  // belongs in this quarter, and one issued in March but unpaid does not. So outgoingInvoiceCount
+  // is the settled set under kas.
+  // [KAS-VOORBELASTING] incomingInvoiceCount is NOT: 5b is dated by the purchase invoice on both
+  // schemes, so it counts the purchase invoices of this quarter either way.
   // Absent → 'factuur' (the accrual wording, unchanged).
   scheme?: "factuur" | "kas";
 }
@@ -376,13 +378,20 @@ export function buildAangifte(
     if (completeness.turnoverDays === 0 && input.salesByRate.length === 0 && !(input.vrijgesteldeOmzet ?? 0)) {
       notes.push("Er is nog geen omzet ingevoerd — 5a is leeg tot je dagomzet of verkoopfacturen toevoegt.");
     }
+    // [KAS-VOORBELASTING] One sentence for both schemes: 5b counts the purchase invoices of this
+    // quarter, paid or not. The kasstelsel moves the btw you OWE to the payment date and leaves the
+    // deduction on the invoice date, so the sentence that said "die je hebt BETAALD" described a
+    // rule the Belastingdienst does not have.
     notes.push(
-      onCash
-        ? `Voorbelasting (5b) telt alleen de ${telWoord(completeness.incomingInvoiceCount, "inkoopfactuur")} die je in dit kwartaal hebt BETAALD (kasstelsel). ` +
-          "Een onbetaalde inkoopfactuur telt pas mee zodra je hem betaalt."
-        : `Voorbelasting (5b) telt alleen ${telWoord(completeness.incomingInvoiceCount, "ingevoerde inkoopfactuur")}. ` +
-          "Ontbreekt er een inkoopfactuur, dan is de voorbelasting te laag en het te betalen bedrag te hoog.",
+      `Voorbelasting (5b) telt alleen ${telWoord(completeness.incomingInvoiceCount, "ingevoerde inkoopfactuur")}. ` +
+        "Ontbreekt er een inkoopfactuur, dan is de voorbelasting te laag en het te betalen bedrag te hoog.",
     );
+    if (onCash) {
+      notes.push(
+        "Onder het kasstelsel verschuift alleen de BTW over je omzet naar de betaaldatum. " +
+          "De voorbelasting trek je af in het kwartaal van de inkoopfactuur, ook als je die nog niet betaald hebt.",
+      );
+    }
     if (input.cashOmzetZonderBtw > 0) {
       notes.push(
         `€${euro(input.cashOmzetZonderBtw)} omzet heeft nog geen BTW-tarief (contante omzet, bankomzet of een niet-gesplitste kassadag) — die is NIET in 1a/1b ingedeeld. ` +

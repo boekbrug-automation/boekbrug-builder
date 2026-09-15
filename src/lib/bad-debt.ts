@@ -231,9 +231,16 @@ const EMPTY_CLAWBACK: VatClawbackResult = { eligible: [], totalRepayableBtw: 0, 
 
 /**
  * Detect purchase invoices whose deducted voorbelasting has become repayable as of `asOf`.
- * Pure. Returns nothing under kasstelsel (you deduct on payment, so an unpaid purchase never got
- * a deduction) and nothing under KOR (no voorbelasting is deducted at all — without this guard a
+ * Pure. Returns nothing under KOR (no voorbelasting is deducted at all — without this guard a
  * KOR shop would be told to repay BTW it never claimed).
+ *
+ * [KAS-VOORBELASTING] It no longer returns nothing under the kasstelsel. The old premise — "you
+ * deduct on payment, so an unpaid purchase never got a deduction" — was the same misreading the
+ * engine carried: the kasstelsel moves the btw you OWE to the payment date and leaves the
+ * DEDUCTION on the invoice date. A kas owner therefore deducts on an unpaid purchase like anyone
+ * else, and art. 29 lid 7 falls due on it like anyone else's. `scheme` stays in the arguments
+ * because the sales side (detectBadDebt) still turns on it, and because a caller that resolves it
+ * for one side of art. 29 and not the other is exactly the asymmetry this file exists to prevent.
  */
 export function detectVatClawback(args: {
   scheme: VatScheme;
@@ -241,7 +248,7 @@ export function detectVatClawback(args: {
   korActive?: boolean;
   invoices: BadDebtInput[];
 }): VatClawbackResult {
-  if (args.scheme === "kas" || args.korActive === true) return EMPTY_CLAWBACK;
+  if (args.korActive === true) return EMPTY_CLAWBACK;
   const asOf = args.asOf.slice(0, 10);
   const eligible: VatClawbackInvoice[] = [];
   let usedInvoiceDateFallback = false;

@@ -48,13 +48,20 @@ test("[AANSLAG] under kasstelsel the settlement slice is withheld by the id map"
   const events = [...ib, ...meat];
   const plain = computeResult([], [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: events });
   assert.equal(plain.kosten, 3700, "without the map the letter is a cost — the old defect, under kas");
-  const r = computeResult([], [], [], [], undefined, 0, undefined, {
+  // [KAS-VOORBELASTING] The COST leg is the settlement; the DEDUCTION is dated by the invoice, so
+  // the rows go in too — and the letter's own (misread) btw must stay out of 5b through both
+  // handles: the id map the cash leg uses, and the columns the invoice-dated pass reads.
+  const rows = [
+    inv({ id: "ib", client_name: "Belastingdienst", tax_kind: "inkomstenbelasting", total_ex_btw: 1200, btw_amount: 210 }),
+    inv({ id: "meat", client_name: "Slagerij", total_ex_btw: 2500, btw_amount: 225 }),
+  ];
+  const r = computeResult(rows, [], [], [], undefined, 0, undefined, {
     scheme: "kas", settlements: events,
     taxKindByInvoice: new Map([["ib", "inkomstenbelasting" as const]]),
   });
   assert.equal(r.kosten, 2500);
   assert.equal(r.aanslagen, 1200);
-  assert.equal(r.btwVoorbelasting, 225);
+  assert.equal(r.btwVoorbelasting, 225, "the purchase is deducted, the letter's misread btw is not");
 });
 
 test("[AANSLAG] motorrijtuigenbelasting is a cost for its whole gross, and a misread btw on it is never voorbelasting", () => {

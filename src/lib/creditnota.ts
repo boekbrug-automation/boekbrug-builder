@@ -14,6 +14,12 @@
 //
 // The link was always there (invoices.original_invoice_id, written and FK-guarded by the
 // creditnota route) — it simply never reached the page.
+//
+// [CREDITNOTA-EXTERN] A STANDALONE creditnota — for an invoice issued outside BoekBrug — has no
+// row to link. Its reference is what the owner typed: credited_invoice_number and
+// credited_invoice_date (creditnota_external_reference.sql). creditReferenceOf() merges the two
+// sources, the linked one first; checkStandaloneCreditnota() is the send door's refusal for a
+// standalone creditnota that names nothing, because art. 219 leaves no third option.
 
 /** ISO 'YYYY-MM-DD' → 'DD-MM-YYYY'. Pure string surgery, so no timezone can shift the day. */
 function dayNL(iso: string | null | undefined): string | null {
@@ -42,4 +48,48 @@ export function creditnotaReferenceLine(args: {
   return day
     ? `Deze creditnota corrigeert factuur ${number} van ${day}.`
     : `Deze creditnota corrigeert factuur ${number}.`;
+}
+
+/**
+ * [CREDITNOTA-EXTERN] The reference a creditnota prints: the linked original when there is one,
+ * the external number and date the owner typed when there is not. Whitespace is not a number.
+ */
+export function creditReferenceOf(args: {
+  linkedNumber?: string | null;
+  linkedDate?: string | null;
+  creditedNumber?: string | null;
+  creditedDate?: string | null;
+}): { originalNumber: string | null; originalDate: string | null } {
+  const linked = String(args.linkedNumber ?? "").trim();
+  if (linked) return { originalNumber: linked, originalDate: args.linkedDate ?? null };
+  const typed = String(args.creditedNumber ?? "").trim();
+  if (typed) return { originalNumber: typed, originalDate: args.creditedDate ?? null };
+  return { originalNumber: null, originalDate: null };
+}
+
+export type StandaloneCreditnotaCheck =
+  | { ok: true }
+  | { ok: false; code: "creditnota_zonder_verwijzing"; error: string };
+
+/**
+ * [CREDITNOTA-EXTERN] May this creditnota be issued? A linked one always may (the link IS the
+ * reference); a standalone one only with the number of the invoice it corrects. Anything that is
+ * not a creditnota passes untouched. Dutch on purpose: this is the sentence the send door answers
+ * with, like kor-invoice.ts — the owner is refused in the language of the document.
+ */
+export function checkStandaloneCreditnota(args: {
+  invoiceType: string | null | undefined;
+  originalInvoiceId: string | null | undefined;
+  creditedNumber: string | null | undefined;
+}): StandaloneCreditnotaCheck {
+  if (args.invoiceType !== "creditnota") return { ok: true };
+  if (args.originalInvoiceId) return { ok: true };
+  if (String(args.creditedNumber ?? "").trim()) return { ok: true };
+  return {
+    ok: false,
+    code: "creditnota_zonder_verwijzing",
+    error:
+      "Een losse creditnota moet de factuur noemen die ze corrigeert: vul het factuurnummer in " +
+      "(art. 219 btw-richtlijn).",
+  };
 }

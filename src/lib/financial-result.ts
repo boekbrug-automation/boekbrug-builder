@@ -15,7 +15,7 @@
 // a rate are surfaced separately (cashOmzetZonderBtw) rather than silently guessed.
 
 import { pnlRole } from "./bank-categories";
-import { taxLetterBooking, taxLetterWithheldFromCosts, effectiveTaxKind, type TaxKind } from "./tax-letter";
+import { taxLetterBooking, effectiveTaxKind, type TaxKind } from "./tax-letter";
 // [OFFERTE-GEEN-OMZET] One answer to "is this a quote", shared with the follow-up engine.
 import { isQuote } from "./offerte-followup";
 import { turnoverNetOmzet, turnoverBtw, parsePosSettlement, SETTLE_LAG_DAYS, type DailyTurnover } from "./turnover";
@@ -534,6 +534,37 @@ export function computeResult(
     }
   };
 
+  // [AANSLAG] The tax-letter kind of a row, from WHICHEVER handle the caller supplied: the columns
+  // on the row itself, or the id-keyed map the kasstelsel fetch builds. Both legs ask this one
+  // question now, because both need the same answer and the callers do not all carry both handles
+  // — three of the four map neither column, so a Belastingdienst letter reached the accrual leg
+  // looking like an ordinary purchase while the cash leg (which reads the map) withheld it.
+  const taxKindOfRow = (inv: ResultInvoice): TaxKind | null =>
+    effectiveTaxKind(inv) ?? (inv.id ? taxKindOf.get(inv.id) ?? null : null);
+
+  // [KAS-VOORBELASTING] The BTW on ONE purchase invoice, deducted on that invoice's own date.
+  //
+  // One booking site for both schemes, because both deduct on the same date — see the block at the
+  // kas branch. A tax letter never gets here (no letter of the Belastingdienst carries btw).
+  //
+  // [TEGENTEKEN] A base and a BTW pointing in opposite directions is not a document that can
+  // exist — a rate is never negative — so this is the one place that must NOT quietly add it up.
+  // Found in a live administration: a creditnota stored at base −123,00 with btw +13,42, which
+  // every credit check passed (the type says creditnota, the total is negative, and the three
+  // numbers add up) while contributing +13,42 to the tax reclaimed instead of −13,42. Booking it
+  // as −|btw| would be the other guess, and creditnota-signal.ts already ruled against per-field
+  // sign repair in writing. So it is left out and NAMED: 5b too low by an amount the note states,
+  // which errs toward claiming less rather than more.
+  const bookPurchaseVat = (inv: ResultInvoice): void => {
+    const btw = inv.btw_amount ?? 0;
+    if (taxKindOfRow(inv)) return;
+    if (btwSignOpposesBase({ totalExBtw: inv.total_ex_btw ?? 0, btwAmount: btw })) {
+      voorbelastingTegenteken += Math.abs(btw);
+      return;
+    }
+    bookVoorbelasting(btw, inv.vat_deduction);
+  };
+
   // [AANGIFTE] Sales BTW per rate, accumulated across every sales source. Kept unrounded
   // so the per-rate BTW sums back to btwVerschuldigd with no drift.
   const salesRate = new Map<number, { omzet: number; btw: number }>();
@@ -637,8 +668,31 @@ export function computeResult(
         // reach 5b as voorbelasting.
         if (taxKind) { kosten += s.ex + s.btw; continue; }
         if (assetIds.has(s.invoiceId)) investeringen += s.ex; else kosten += s.ex;
-        bookVoorbelasting(s.btw, opts.deductionByInvoice?.get(s.invoiceId));
+        // [KAS-VOORBELASTING] The btw on this purchase is deliberately NOT booked here. It is
+        // deducted on the invoice's own date, in the pass directly below.
       }
+    }
+    // ── [KAS-VOORBELASTING] Under the kasstelsel the DEDUCTION is not on the payment date ───────
+    //
+    // The kasstelsel moves the btw you OWE to the day your customer pays you (art. 26 Wet OB). It
+    // does not move the btw you RECLAIM: voorbelasting is deducted in the period of the purchase
+    // invoice, on both schemes. The Belastingdienst says it in one sentence — "De factuurdatum
+    // bepaalt in welk tijdvak u de btw aftrekt" — and does not qualify it by regime; you do not
+    // have to wait until you have paid your supplier.
+    //
+    // This branch booked the deduction off the SETTLEMENT, so a kas owner's 5b was the btw on the
+    // bills they happened to pay that quarter. Two ways that costs money, both silent:
+    //   · a bill received in March and paid in April was deducted a quarter late, so one aangifte
+    //     was too high and the next too low — with belastingrente on the first;
+    //   · at a switch of scheme the same bill was deducted TWICE: once on its invoice date in the
+    //     last factuur quarter, once again on its payment date in the first kas quarter.
+    // The cost leg above keeps the payment date: which quarter a cost belongs to is an income-tax
+    // question (goed koopmansgebruik), and the kasstelsel is a btw regime. Only the btw moves.
+    for (const inv of invoices) {
+      // [OFFERTE-GEEN-OMZET] A supplier's quote is not a purchase invoice — same refusal as below.
+      if (isQuote(inv.invoice_type)) continue;
+      if (inv.direction !== "incoming" || !INCOMING_OK.has(inv.status ?? "")) continue;
+      bookPurchaseVat(inv);
     }
   } else {
     for (const inv of invoices) {
@@ -701,24 +755,15 @@ export function computeResult(
         // [AANSLAG] A Belastingdienst letter is never a cost: income tax and Zvw are private, a
         // btw-naheffing is a settlement, an unknown letter is withheld and named. Only
         // motorrijtuigenbelasting falls through to kosten. Nothing of it is voorbelasting.
-        if (taxLetterWithheldFromCosts(inv)) { aanslagen += ex + btw; continue; }
+        const taxKind = taxKindOfRow(inv);
+        if (taxKind && taxLetterBooking(taxKind) !== "kosten") { aanslagen += ex + btw; continue; }
         // Motorrijtuigenbelasting: a cost, gross, and never voorbelasting — see the kas branch.
-        if (effectiveTaxKind(inv)) { kosten += ex + btw; continue; }
+        if (taxKind) { kosten += ex + btw; continue; }
         // [BEDRIJFSMIDDEL] See the kas branch: an asset purchase is reported apart, not as a cost.
         if (inv.id && assetIds.has(inv.id)) investeringen += ex; else kosten += ex;
-        // [TEGENTEKEN] A base and a BTW pointing in opposite directions is not a document that can
-        // exist — a rate is never negative — so this is the one place that must NOT quietly add it
-        // up. Found in a live administration: a creditnota stored at base −123,00 with btw +13,42,
-        // which every credit check passed (the type says creditnota, the total is negative, and
-        // the three numbers add up) while contributing +13,42 to the tax reclaimed instead of
-        // −13,42. Booking it as −|btw| would be the other guess, and creditnota-signal.ts already
-        // ruled against per-field sign repair in writing. So it is left out and NAMED: 5b too low
-        // by an amount the note states, which errs toward claiming less rather than more.
-        if (btwSignOpposesBase({ totalExBtw: ex, btwAmount: btw })) {
-          voorbelastingTegenteken += Math.abs(btw);
-        } else {
-          bookVoorbelasting(btw, inv.vat_deduction);
-        }
+        // [KAS-VOORBELASTING · TEGENTEKEN] One booking site for both schemes — the deduction is
+        // dated by the invoice on either one, so the refusals belong in one place too.
+        bookPurchaseVat(inv);
       }
     }
   }

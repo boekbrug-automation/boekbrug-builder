@@ -8,11 +8,24 @@
 // Read-only, gebruikerscontext, geen AI: het groepeert de bestaande inkoopfacturen per leverancier
 // en laat de pure rekenkunde in @/lib/supplier-cadence oordelen. Die zwijgt in verreweg de meeste
 // gevallen, en dat is het ontwerp — zie de drie regels bovenaan dat bestand.
+//
+// [BETAALD-GEEN-STUK] Sinds kort beantwoordt dit eindpunt de vraag TWEE keer, met twee soorten
+// bewijs, en dat verschil staat er ook bij:
+//
+//   · `missing` is een VERWACHTING. Het ritme van de leverancier zegt dat er iets had moeten zijn.
+//     Dat kan ook betekenen dat het abonnement is gestopt.
+//   · `unpaired` is een WAARNEMING. Het geld is weg, de tegenpartij is een leverancier waar we
+//     facturen van hebben, en er hangt niets aan. Daar valt niets aan te gissen.
+//
+// De tweede is de sterkere en staat daarom niet in een eigen eindpunt: "wat ontbreekt er" hoort
+// één deur te hebben, anders vindt de eigenaar de ene lijst wel en de andere nooit.
 
 import { NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { assessSupplierCadence, cadenceReason, type CadenceVerdict } from "@/lib/supplier-cadence";
 import { supplierNameKey } from "@/lib/supplier-registry";
+// [BETAALD-GEEN-STUK] De waarneming naast de verwachting.
+import { paymentsWithoutDocument, type BankLine, type PaymentWithoutDocument } from "@/lib/betaling-zonder-stuk";
 // [TZ] The owner's day, not the server's — see amsterdamToday().
 import { amsterdamToday } from "@/lib/format-nl";
 // [RITME-AFKAP] Een afgekapte lezing is hier hetzelfde als "er ontbreekt niets".
@@ -105,5 +118,55 @@ export async function GET() {
   // moeilijkst nog op te vragen is.
   missing.sort((a, b) => b.daysLate - a.daysLate);
 
-  return NextResponse.json({ missing });
+  // ── [BETAALD-GEEN-STUK] De waarneming: betaald aan een bekende leverancier, niets gekoppeld ──
+  //
+  // Alleen tegenpartijen waar deze administratie al facturen van heeft. Een afschrijving bij een
+  // winkel die nog nooit een factuur stuurde is het gewone "hier hoort een bon bij", en dat
+  // beantwoordt needsDocument() al op het bankscherm; het hier herhalen begraaft het signaal dat
+  // er wél toe doet onder een dat elders al is beantwoord.
+  const bekend = new Map<string, string>();
+  for (const g of groups.values()) {
+    if (g.name) bekend.set(supplierNameKey(g.name), g.name);
+  }
+
+  let unpaired: PaymentWithoutDocument[] = [];
+  let unpairedUnavailable = false;
+  try {
+    const bankRows = await fetchAllRows<{
+      id: string; date: string | null; amount: number | null; description: string | null;
+      counterpart_name: string | null; invoice_id: string | null; status: string | null;
+    }>((from, to) => supabase
+      .from("bank_transactions")
+      .select("id, date, amount, description, counterpart_name, invoice_id, status")
+      .eq("user_id", user.id)
+      .lt("amount", 0)
+      .is("invoice_id", null)
+      .order("id", { ascending: true })
+      .range(from, to));
+
+    const lines: BankLine[] = bankRows
+      .filter((r) => r.date != null && r.amount != null)
+      .map((r) => ({
+        id: r.id,
+        date: String(r.date),
+        amount: Number(r.amount),
+        counterpartName: r.counterpart_name,
+        description: r.description,
+        invoiceId: r.invoice_id,
+        status: r.status,
+      }));
+    unpaired = paymentsWithoutDocument({ lines, knownSuppliers: bekend, keyOf: supplierNameKey });
+  } catch (e) {
+    // [RITME-STIL] Dezelfde regel als hierboven: een mislukte lezing mag nooit als "niets aan de
+    // hand" op het scherm komen. De lijst blijft leeg én zegt dat hij niet gevuld kón worden.
+    unpairedUnavailable = true;
+    reportHandledFailure({
+      tag: "BETAALD-GEEN-STUK",
+      message: "de bankregels konden niet worden gelezen — de eigenaar zag geen onbetaalde-stukken-lijst zonder dat er iets is gecontroleerd",
+      severity: "gate-unavailable",
+      context: { userId: user.id, error: e instanceof Error ? e.message : String(e) },
+    });
+  }
+
+  return NextResponse.json({ missing, unpaired, ...(unpairedUnavailable ? { unpairedUnavailable: true } : {}) });
 }

@@ -90,11 +90,11 @@ drawdown, work-in-progress value, meerwerk flagging, and a DBA dossier.
 | Opdracht with agreed hours and budget | DIENST skin: referentie, afgesproken uren; over-budget signal | no maandbedrag/retainer on this skin (the schoonmaak skin has it) |
 | Strippenkaart / prepaid bundle | — | a prepaid balance that hours draw down against, with expiry |
 | Offerte → opdracht → deelfactuur | offertes, aanbetaling, final invoice settles it, [OFFERTE-WERK] turns the accepted offerte into the opdracht | — |
-| Reiskosten | reiskosten line kind (per km) on the opdracht | no km log per client; the public tool computes only |
+| Reiskosten | reiskosten line kind (per km) on the opdracht; [RITTEN] the kilometre log per trip, with the year's deduction | billing a logged trip to a customer is still a second step |
 | EU clients | verlegde-btw.ts, icp.ts, ICP in the aangifte | — |
-| Unbilled hours signal | hours without a rate on Vandaag and Werk | hours WITH a rate but on no invoice for 30+ days is the bigger leak |
+| Unbilled hours signal | hours without a rate on Vandaag and Werk; [UREN-OUD] priced hours older than 30 days, in euros | — |
 | Retainer overuse | — | hours against the bundle, and the moment it is exceeded |
-| DBA dossier | — | per opdrachtgever: share of revenue and hours per year, tariff history, contracts; nobody offers it |
+| DBA dossier | [OPDRACHTGEVER] per client: revenue, share, hours, invoices | tariff history and contracts |
 | Month-end batch invoicing | verzamelfactuur per client, recurring invoices | a "factureer alle klare uren" moment at month end |
 
 Everything in the left column exists and is gated. Everything in the right column is small next
@@ -118,6 +118,9 @@ to what the trades needed, because it is arithmetic on rows the app already has.
 | [UREN-OUD] | Hours worked, priced, and still on no invoice after thirty days — in euros, on Vandaag and on the Werk screen, leading to the hours screen. The segment's largest leak. | `werk-stand.ts`, `workSignals` |
 | [OFFERTE-WERK] | The accepted offerte becomes the opdracht: its client, its lines and its amount as the begroting. One offerte becomes one piece of work, and it is archived the moment it does, so there is one door to the money. Deleting the work reopens it. | `werk.ts`, `/api/werk`, the work screen |
 | [OPDRACHTGEVER] | Who this year's money came from: per client the revenue, the share, the hours, the invoices; the count and the largest share. Facts only — no threshold, no verdict, because there is no rule to check against. | `opdrachtgevers.ts`, `/api/opdrachtgevers`, the Jaar screen |
+| [TARIEF-KLANT] | The rate agreed with a customer, on the customer, offered when an hour is written for them. Fills an empty field only; a rate we filled in follows the switch to another customer instead of standing under a name that never agreed it. The hours screen also names the declarabel share as a percentage. | `clients.default_hourly_rate`, `uren.ts`, the hours screen |
+| [ONDERHANDEN-WERK] | What was worked and not yet invoiced on the last day of the book year, per customer. "Not yet invoiced" is a question about the INVOICE's date: December hours billed in January are onderhanden werk on 31 December. Unpriced hours are counted and named, never valued. | `onderhanden-werk.ts`, `/api/onderhanden-werk`, the Jaar screen |
+| [RITTEN] | The kilometre log. Per trip: date, from, to, purpose, distance, and what the customer pays per kilometre. The year gives the business kilometres and the deduction at the statutory rate for THAT year — a law, looked up by year, never stored on a row. | `mileage_entries`, `ritten.ts`, `/api/ritten`, the hours screen |
 
 What was deliberately NOT built: a timer (the hours screen says why in its own header), a
 kostprijs per hour (the owner prices as they like), and any judgement about schijnzelfstandigheid.

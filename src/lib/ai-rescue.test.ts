@@ -132,6 +132,17 @@ check("Claude 400 (bad request) → NOT transient (terminal)", isTransientAiErro
 check("invalid PDF → NOT transient", isTransientAiError(new Error("Ongeldig PDF-bestand")) === false);
 check("JSON parse failure → NOT transient", isTransientAiError(new Error("Unexpected token < in JSON")) === false);
 check("null → NOT transient", isTransientAiError(null) === false);
+// [LEZER-KLOK] Our own deadline. The relabelled message carries "timeout"; the bare DOMException
+// says only "This operation was aborted", which no pattern here would have caught — and a read
+// classified as terminal is a document written off as unreadable instead of being tried again.
+check("our relabelled deadline → transient",
+  isTransientAiError(new Error("Claude API: request timeout after 60000 ms")) === true);
+check("bare AbortError (name only) → transient",
+  isTransientAiError(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })) === true);
+check("bare TimeoutError (name only) → transient",
+  // The message must NOT contain "timeout", or this passes on the pattern above and proves nothing
+  // about the name branch it exists to test.
+  isTransientAiError(Object.assign(new Error("This operation was aborted"), { name: "TimeoutError" })) === true);
 
 console.log("\n— [REREAD-STRONG] a model-unavailable 404 is an API error (re-thrown → honest 502), not a verdict —");
 check("404 model not found → API error (so it re-throws, not a false 'not invoice')",

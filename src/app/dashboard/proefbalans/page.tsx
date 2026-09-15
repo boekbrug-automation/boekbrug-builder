@@ -1,0 +1,16 @@
+// src/app/dashboard/proefbalans/page.tsx
+// [VAKWOORD] Het woord dat een boekhouder typt, op het scherm dat het al beantwoordt.
+// Hier: proef- en saldibalans is één overzicht, en dat staat daar
+//
+// De koppeling zelf staat NIET in dit bestand maar in src/lib/vakwoorden.ts, zodat elf deuren één
+// lijst delen en een gate kan nakijken dat de lijst en de mappen elkaar dekken.
+import { redirect } from "next/navigation";
+import { vakwoordNaar } from "@/lib/vakwoorden";
+
+export const dynamic = "force-dynamic";
+
+export default function Page() {
+  // Nooit een vaste string hier: een deur die zijn eigen bestemming bijhoudt, drijft weg van de
+  // lijst die zegt waar hij heen gaat.
+  redirect(vakwoordNaar("proefbalans") ?? "/dashboard");
+}

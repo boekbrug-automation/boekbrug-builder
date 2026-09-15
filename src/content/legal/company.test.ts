@@ -14,6 +14,9 @@ import voorwaarden from "./algemene-voorwaarden";
 import privacy from "./privacyverklaring";
 import eerlijkGebruik from "./eerlijk-gebruik";
 import cookiebeleid from "./cookiebeleid";
+// [DPA-BEREIKBAAR] The processing agreement is a published page now, so it is held to the
+// same rule: not one placeholder may survive onto a document an accountant signs.
+import dpa from "./verwerkersovereenkomst";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -31,6 +34,7 @@ const DOCS = [
   ["privacyverklaring", privacy],
   ["eerlijk-gebruik", eerlijkGebruik],
   ["cookiebeleid", cookiebeleid],
+  ["verwerkersovereenkomst", dpa],
 ] as const;
 
 console.log("\n— geen enkele blokhaak haalt een juridische pagina —");

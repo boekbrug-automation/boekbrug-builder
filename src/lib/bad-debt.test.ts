@@ -151,8 +151,14 @@ console.log("\n— art. 29 lid 7: the clock —");
 
 console.log("\n— art. 29 lid 7: only what was actually deducted —");
 {
-  check("kasstelsel deducts on payment, so nothing is ever clawed back",
-    claw([pur()], "2026-07-19", { scheme: "kas" }).eligible.length === 0);
+  // [KAS-VOORBELASTING] The kasstelsel moves the BTW you OWE, never the deduction: a kas owner
+  // deducts on the invoice date like anyone else, so an old unpaid purchase is repayable like
+  // anyone else's. This test asserted the opposite while the engine deducted on payment.
+  const kas = claw([pur()], "2026-07-19", { scheme: "kas" });
+  check("kasstelsel deducts on the invoice date, so art. 29 lid 7 falls due there too",
+    kas.eligible.length === 1 && near(kas.totalRepayableBtw, 210));
+  check("…and it says exactly what the factuurstelsel says about the same invoice",
+    kas.totalRepayableBtw === claw([pur()]).totalRepayableBtw);
   check("KOR deducts no voorbelasting at all → nothing to repay",
     claw([pur()], "2026-07-19", { korActive: true }).eligible.length === 0);
   check("a paid purchase keeps its deduction", claw([pur({ status: "paid", amountPaid: 1210 })]).eligible.length === 0);

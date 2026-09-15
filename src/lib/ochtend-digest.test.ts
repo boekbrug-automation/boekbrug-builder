@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { planOchtendMail, type OchtendInput } from "./ochtend-digest";
+import { planOchtendMail, type OchtendInput, takenVoorMail, taakZin, MAX_TAKEN, type OchtendTaak } from "./ochtend-digest";
 
 const base = (over: Partial<OchtendInput> = {}): OchtendInput => ({
   gisteren: "2026-08-24",
@@ -116,4 +116,98 @@ test("[OCHTEND] a payer's name is content, never markup", () => {
   assert.ok(mail);
   assert.doesNotMatch(mail.html, /<img src=x/, "the stored name is escaped on the way into the mail");
   assert.match(mail.html, /Onbekende betaler|&lt;img/, "…and still shown as text");
+});
+
+// ─── [OCHTEND-TAKEN] Tasks ride along; they never summon ──────────────────────────────────────
+
+const taak = (over: Partial<OchtendTaak> = {}): OchtendTaak => ({
+  soort: "grootboek", aantal: 7, pad: "/dashboard/jaar", ...over,
+});
+
+test("[OCHTEND-TAKEN] a day with no event stays quiet, however much work is open", () => {
+  // THE rule. Standing state may fill a mail something else justified; it may not generate one.
+  // Break this and the mail becomes the daily nag that gets deleted unread — and then it costs
+  // the one mail that mattered.
+  const stil = planOchtendMail({
+    gisteren: "2026-09-10", payments: [], newIncoming: [],
+    taken: [taak({ aantal: 40 }), taak({ soort: "te_laat", aantal: 9 })],
+    baseUrl: "https://boekbrug.nl",
+  });
+  assert.equal(stil, null, "forty open tasks must not summon a mail on a quiet day");
+});
+
+test("[OCHTEND-TAKEN] tasks appear on a day that already earned a mail", () => {
+  const mail = planOchtendMail({
+    gisteren: "2026-09-10",
+    payments: [{ invoiceNumber: "20260005", clientName: "Jansen", amount: 250 }],
+    newIncoming: [],
+    taken: [taak()],
+    baseUrl: "https://boekbrug.nl",
+  });
+  assert.ok(mail);
+  assert.match(mail.html, /Dit wacht op jou/);
+  assert.match(mail.html, /7 facturen hebben nog geen grootboekrekening/);
+  assert.match(mail.subject, /1 ding voor jou/);
+});
+
+test("[OCHTEND-TAKEN] a task with no rows is not a task", () => {
+  assert.deepEqual(takenVoorMail([taak({ aantal: 0 }), taak({ aantal: -1 }), taak({ aantal: NaN })]), []);
+});
+
+test("[OCHTEND-TAKEN] urgency orders the list, never the count", () => {
+  // A btw amount nobody can reclaim costs money today; a missing ledger account costs an
+  // accountant an hour in April. Forty of the second do not outrank two of the first.
+  const out = takenVoorMail([
+    taak({ soort: "grootboek", aantal: 40 }),
+    taak({ soort: "te_laat", aantal: 2 }),
+  ]);
+  assert.deepEqual(out.map((t) => t.soort), ["te_laat", "grootboek"]);
+});
+
+test("[OCHTEND-TAKEN] the list is capped — the rest is on the dashboard, where a list belongs", () => {
+  const alles: OchtendTaak[] = [
+    taak({ soort: "te_laat" }), taak({ soort: "betaald_geen_stuk" }), taak({ soort: "bank_te_beslissen" }),
+    taak({ soort: "te_beoordelen" }), taak({ soort: "wacht_op_bankregel" }), taak({ soort: "grootboek" }),
+  ];
+  assert.equal(takenVoorMail(alles).length, MAX_TAKEN);
+});
+
+test("[OCHTEND-TAKEN] the count and the noun agree, and the amount rides only where it is the point", () => {
+  assert.equal(taakZin(taak({ aantal: 1 })), "1 factuur heeft nog geen grootboekrekening");
+  assert.equal(taakZin(taak({ aantal: 7 })), "7 facturen hebben nog geen grootboekrekening");
+  assert.match(taakZin(taak({ soort: "betaald_geen_stuk", aantal: 2, bedrag: 438 })), /€/);
+  assert.doesNotMatch(taakZin(taak({ aantal: 2, bedrag: null })), /€/);
+  assert.doesNotMatch(taakZin(taak({ aantal: 2, bedrag: 0 })), /€ 0/, "a zero is not an amount worth printing");
+});
+
+test("[OCHTEND-TAKEN] the button lands on the thing that needs doing", () => {
+  const mail = planOchtendMail({
+    gisteren: "2026-09-10",
+    payments: [{ invoiceNumber: "1", clientName: "K", amount: 10 }],
+    newIncoming: [{ id: "inv-1", supplierName: "KPN", amount: 121, dueDate: null }],
+    taken: [taak({ soort: "te_laat", aantal: 3, pad: "/dashboard/facturen" })],
+    baseUrl: "https://boekbrug.nl",
+  });
+  assert.ok(mail);
+  assert.equal(mail.target, "/dashboard/facturen", "a task outranks an arrival: the arrival already has its own link above");
+  assert.match(mail.html, /Pak dit op/);
+});
+
+test("[OCHTEND-TAKEN] with no tasks the mail behaves exactly as it did", () => {
+  const mail = planOchtendMail({
+    gisteren: "2026-09-10", payments: [],
+    newIncoming: [{ id: "inv-1", supplierName: "KPN", amount: 121, dueDate: null }],
+    baseUrl: "https://boekbrug.nl",
+  });
+  assert.ok(mail);
+  assert.doesNotMatch(mail.html, /Dit wacht op jou/);
+  assert.doesNotMatch(mail.subject, /voor jou/);
+  assert.match(mail.target, /focus=inv-1/);
+});
+
+test("[OCHTEND-TAKEN] an unknown task kind is dropped, never printed raw", () => {
+  // A key with no Dutch behind it would reach the owner as an identifier — the [LOGBOEK] failure
+  // in a mailbox instead of a logbook.
+  const raar = { soort: "iets_nieuws", aantal: 3, pad: "/dashboard" } as unknown as OchtendTaak;
+  assert.deepEqual(takenVoorMail([raar]), []);
 });

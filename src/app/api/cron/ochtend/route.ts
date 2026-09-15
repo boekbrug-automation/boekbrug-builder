@@ -27,7 +27,7 @@ import { timingSafeEqualStr } from "@/lib/timing-safe";
 import { beginCronRun, finishCronRun, alreadyRanToday } from "@/lib/cron-heartbeat";
 import { amsterdamToday, amsterdamMidnightUtc } from "@/lib/format-nl";
 import { effectiveDirection } from "@/lib/closing-package";
-import { planOchtendMail, type OchtendIncoming, type OchtendPayment } from "@/lib/ochtend-digest";
+import { planOchtendMail, type OchtendIncoming, type OchtendPayment, type OchtendTaak } from "@/lib/ochtend-digest";
 import { sendOchtendMail, sendBeheerAlarm } from "@/lib/email";
 // [BEHEER-GEZOND] Het oordeel over de andere crons bestond al en had geen enkele lezer.
 import { readSystemHealth, healthAlarm } from "@/lib/beheer-health";
@@ -148,6 +148,78 @@ export async function GET(req: NextRequest) {
       incomingByUser.set(r.receiver_id, arr);
     }
 
+    // ── 2b. [OCHTEND-TAKEN] What is waiting for each owner ──
+    //
+    // Counts only, and only for the owners who are already getting a mail — this read must never
+    // decide WHO gets one. Tasks ride along; they never summon ([OCHTEND-TAKEN] in the digest).
+    //
+    // Every count here is a status this app already maintains, read once for everybody rather
+    // than once per owner: the morning must not become N queries per mailbox.
+    const takenByUser = new Map<string, OchtendTaak[]>();
+    const ontvangers = new Set<string>([...paymentsByUser.keys(), ...incomingByUser.keys()]);
+    if (ontvangers.size > 0) {
+      const push = (uid: string, t: OchtendTaak) => {
+        if (!ontvangers.has(uid)) return;
+        const arr = takenByUser.get(uid) ?? [];
+        arr.push(t);
+        takenByUser.set(uid, arr);
+      };
+
+      // [NO-SILENT-EMPTY] A failed count must leave the task OUT, never show it as zero: "nothing
+      // is waiting" is the one sentence this mail may not get wrong. Each read is guarded on its
+      // own so one failure does not cost the others.
+      type TaakRij = { receiver_id: string | null; status: string | null; ledger_account?: string | null; due_date?: string | null };
+      try {
+        const rijen = await fetchAllRows<TaakRij>((from, to) => pipeline
+          .from("invoices")
+          .select("receiver_id, status")
+          .eq("direction", "incoming")
+          .eq("status", "processing")
+          .order("id", { ascending: true }).range(from, to));
+        const per = new Map<string, number>();
+        for (const r of rijen) if (r.receiver_id) per.set(r.receiver_id, (per.get(r.receiver_id) ?? 0) + 1);
+        for (const [uid, n] of per) push(uid, { soort: "te_beoordelen", aantal: n, pad: "/dashboard/incoming" });
+      } catch { /* the task stays out; the mail is still true without it */ }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rijen = await fetchAllRows<TaakRij>((from, to) => (pipeline as any)
+          .from("invoices")
+          .select("receiver_id, status, ledger_account")
+          .eq("direction", "incoming")
+          .in("status", ["received", "paid"])
+          .is("ledger_account", null)
+          .order("id", { ascending: true }).range(from, to));
+        const per = new Map<string, number>();
+        for (const r of rijen) if (r.receiver_id) per.set(r.receiver_id, (per.get(r.receiver_id) ?? 0) + 1);
+        for (const [uid, n] of per) push(uid, { soort: "grootboek", aantal: n, pad: "/dashboard/grootboek" });
+      } catch { /* [DEPLOY-SAFE] ledger_account arrives by a hand-applied migration */ }
+
+      try {
+        const rijen = await fetchAllRows<{ user_id: string | null }>((from, to) => pipeline
+          .from("bank_transactions")
+          .select("user_id")
+          .eq("status", "pending")
+          .is("invoice_id", null)
+          .order("id", { ascending: true }).range(from, to));
+        const per = new Map<string, number>();
+        for (const r of rijen) if (r.user_id) per.set(r.user_id, (per.get(r.user_id) ?? 0) + 1);
+        for (const [uid, n] of per) push(uid, { soort: "bank_te_beslissen", aantal: n, pad: "/dashboard/bank" });
+      } catch { /* the task stays out */ }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rijen = await fetchAllRows<{ user_id: string | null }>((from, to) => (pipeline as any)
+          .from("wachtkoppelingen")
+          .select("user_id")
+          .in("status", ["wachtend", "voorgesteld"])
+          .order("id", { ascending: true }).range(from, to));
+        const per = new Map<string, number>();
+        for (const r of rijen) if (r.user_id) per.set(r.user_id, (per.get(r.user_id) ?? 0) + 1);
+        for (const [uid, n] of per) push(uid, { soort: "wacht_op_bankregel", aantal: n, pad: "/dashboard/bank" });
+      } catch { /* [DEPLOY-SAFE] wachtkoppelingen arrives by a hand-applied migration */ }
+    }
+
     // ── 3. The owners this concerns, with their address and their choice ──
     const userIds = [...new Set([...paymentsByUser.keys(), ...incomingByUser.keys()])];
     type ProfielRij = { id: string; email: string | null; role: string | null; ochtend_mail?: boolean | null };
@@ -189,6 +261,33 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── [BEHEER-GEZOND] Draaien de ándere taken nog? ────────────────────────
+    //
+    // cron-heartbeat legt elke run vast en judgeCron velt er een oordeel over. Dat oordeel had één
+    // lezer — /api/health, dat je moet CURLEN — en cronsNeedingAttention had in de hele
+    // productiecode geen enkele aanroeper. Het systeem meet dus dat een taak is gestopt, oordeelt
+    // erover, en vertelt het aan niemand. Valt reminders om, dan worden er geen herinneringen meer
+    // verstuurd; valt payment-due om, dan mist een ondernemer zijn betaaltermijnen — en het scherm
+    // ziet er in beide gevallen normaal uit.
+    //
+    // Hier meeliftend en niet als twaalfde cron: deze draait al dagelijks, en een wachter die zelf
+    // een aparte wachter nodig heeft is er een te veel. Best-effort in alles — het alarm mag de
+    // ochtendmail nooit laten falen, en de beheerpagina toont dezelfde stand als tweede weg.
+    //
+    // [WACHTER-EERST] En hij staat VÓÓR de mailronde, niet erachter. Dat is geen ordening maar de
+    // hele werking: de mailronde is het langste stuk van deze functie — één mail per eigenaar met
+    // 300 ms ertussen — en dus verreweg het meest waarschijnlijke stuk om op maxDuration te
+    // sneuvelen. Stond de wachter daarachter, dan zweeg hij precies op de ochtend dat er iets mis
+    // wás. Dat is 12 september 2026 ook gebeurd: deze run stopte halverwege, en het alarm dat
+    // gestopte taken meldt was het deel dat niet meer aan de beurt kwam. Een wachter die uitvalt
+    // met datgene waarover hij moet waken, bewaakt niets.
+    let alarmVerstuurd = false;
+    try {
+      alarmVerstuurd = await meldGestopteCrons(pipeline);
+    } catch (e) {
+      console.error("[BEHEER-GEZOND] cron-alarm mislukt", { error: e instanceof Error ? e.message : String(e) });
+    }
+
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://boekbrug.nl";
     let sent = 0;
     let quiet = 0;
@@ -205,6 +304,7 @@ export async function GET(req: NextRequest) {
           gisteren,
           payments: paymentsByUser.get(p.id) ?? [],
           newIncoming: incomingByUser.get(p.id) ?? [],
+          taken: takenByUser.get(p.id) ?? [],
           baseUrl,
         });
         if (!mail) { quiet++; continue; }
@@ -221,25 +321,6 @@ export async function GET(req: NextRequest) {
           userId: p.id, error: e instanceof Error ? e.message : String(e),
         });
       }
-    }
-
-    // ── [BEHEER-GEZOND] Draaien de ándere taken nog? ────────────────────────
-    //
-    // cron-heartbeat legt elke run vast en judgeCron velt er een oordeel over. Dat oordeel had één
-    // lezer — /api/health, dat je moet CURLEN — en cronsNeedingAttention had in de hele
-    // productiecode geen enkele aanroeper. Het systeem meet dus dat een taak is gestopt, oordeelt
-    // erover, en vertelt het aan niemand. Valt reminders om, dan worden er geen herinneringen meer
-    // verstuurd; valt payment-due om, dan mist een ondernemer zijn betaaltermijnen — en het scherm
-    // ziet er in beide gevallen normaal uit.
-    //
-    // Hier meeliftend en niet als twaalfde cron: deze draait al dagelijks, en een wachter die zelf
-    // een aparte wachter nodig heeft is er een te veel. Best-effort in alles — het alarm mag de
-    // ochtendmail nooit laten falen, en de beheerpagina toont dezelfde stand als tweede weg.
-    let alarmVerstuurd = false;
-    try {
-      alarmVerstuurd = await meldGestopteCrons(pipeline);
-    } catch (e) {
-      console.error("[BEHEER-GEZOND] cron-alarm mislukt", { error: e instanceof Error ? e.message : String(e) });
     }
 
     await finishCronRun(pipeline, cronRunId, {

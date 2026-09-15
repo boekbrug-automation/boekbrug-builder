@@ -110,8 +110,15 @@ export async function GET(req: NextRequest) {
     { exemptRegime: exemption.active },
   );
   const invoices: ResultInvoice[] = invRaw.map((i) => ({
+    id: i.id,
     direction: effDir(i),
     status: i.status, invoice_type: i.invoice_type, total_ex_btw: i.total_ex_btw, btw_amount: i.btw_amount,
+    // [AANSLAG] Both handles for the tax-letter test, which the engine now asks on both schemes:
+    // the stored kind and the sender's name. Selected all along and dropped here, so a
+    // Belastingdienst letter booked as an ordinary purchase — its "btw" (a misread: no letter of
+    // the Belastingdienst carries any) landing in 5b as voorbelasting.
+    tax_kind: i.tax_kind ?? null,
+    client_name: i.client_name ?? null,
     rate_lines: i.id ? rateSharesByInvoice.get(i.id) ?? null : null,
     exempt_ex: i.id ? exemptExByInvoice.get(i.id) ?? null : null,
     vat_deduction: i.id ? exemption.deductionByInvoice.get(i.id) ?? null : null,
@@ -259,9 +266,9 @@ export async function GET(req: NextRequest) {
     turnoverDays: turnover.length,
     quarterDays,
     scheme: sr.scheme,
-    incomingInvoiceCount: onCash
-      ? settledInvoiceCount("incoming")
-      : invRaw.filter((i) => effDir(i) === "incoming" && IN_OK.has(i.status ?? "")).length,
+    // [KAS-VOORBELASTING] The DATED set on both schemes: 5b is dated by the purchase invoice under
+    // kas too, so counting the settled purchases here would describe a figure nobody computes.
+    incomingInvoiceCount: invRaw.filter((i) => effDir(i) === "incoming" && IN_OK.has(i.status ?? "")).length,
     outgoingInvoiceCount: onCash
       ? settledInvoiceCount("outgoing")
       : invRaw.filter((i) => effDir(i) === "outgoing" && OUT_OK.has(i.status ?? "")).length,
@@ -320,7 +327,7 @@ export async function GET(req: NextRequest) {
   // [KASSTELSEL] Honest notes for the cash-basis concept. The BTW is on the paid date, and any
   // paid-but-undated money is a HARD gap — surfaced so the concept is never quietly too low.
   if (sr.scheme === "kas") {
-    regimeNotes.push("Kasstelsel actief — de BTW is berekend op de BETAALdatum van je facturen (niet de factuurdatum). Een onbetaalde factuur telt pas mee zodra hij betaald is.");
+    regimeNotes.push("Kasstelsel actief — de BTW over je omzet is berekend op de BETAALdatum van je verkoopfacturen (niet de factuurdatum). Een onbetaalde verkoopfactuur telt pas mee zodra hij betaald is. De voorbelasting (5b) volgt wél de datum van je inkoopfacturen.");
     if (sr.undatedPaidCount > 0) {
       regimeNotes.push(
         `LET OP: ${telWoord(sr.undatedPaidCount, "betaalde factuur")} ${vervoeg(sr.undatedPaidCount, "heeft", "hebben")} geen betaaldatum, ` +

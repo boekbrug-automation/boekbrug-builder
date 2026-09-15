@@ -37,6 +37,65 @@ import { logAuditAction, getClientIP } from '@/lib/audit'
 
 export const dynamic = 'force-dynamic'
 
+/**
+ * [LEVERANCIER-VERWIJDEREN] The owner removes a supplier row: a company that no longer exists,
+ * or a second row the reader founded for one it already had.
+ *
+ * What goes and what stays: the ROW goes, with its aliases and its IBAN history (both cascade).
+ * The invoices stay exactly as they are — art. 52 AWR keeps them — and only lose the link
+ * (invoices.supplier_id is ON DELETE SET NULL); they keep the printed name, so the creditors
+ * screen still lists the company and offers to add it again. The count of what is detached is
+ * read BEFORE the delete and returned, because that number is what the owner confirmed against.
+ *
+ * A duplicate that shares a KVK or an IBAN with its twin is better merged (the merge door keeps
+ * the invoices linked); the sheet says so before this is pressed.
+ */
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const t = await serverTranslator()
+  const acting = await getActingFor()
+  if (!acting) return NextResponse.json({ error: t('lev.fout.nietIngelogd'), code: 'unauthorized' }, { status: 401 })
+  const ownerId = invoiceOwnerId(acting)
+  const { id } = await params
+  const supabase = await createServerSupabaseClient()
+
+  const { data: current, error: readErr } = await supabase
+    .from('suppliers')
+    .select('id, name, iban, kvk_number, btw_number, auto_incasso')
+    .eq('id', id)
+    .eq('user_id', ownerId)
+    .maybeSingle()
+  if (readErr) return NextResponse.json({ error: t('lev.fout.opzoeken'), code: 'lookup_failed', detail: readErr.message }, { status: 503 })
+  if (!current) return NextResponse.json({ error: t('lev.fout.nietGevonden'), code: 'not_found' }, { status: 404 })
+
+  // [NO-SILENT-EMPTY] A count that failed is not zero: the owner is told how many invoices come
+  // loose, and a number we could not read must not read as "none".
+  const { count: linked, error: countErr } = await supabase
+    .from('invoices')
+    .select('id', { count: 'exact', head: true })
+    .eq('receiver_id', ownerId)
+    .eq('supplier_id', current.id)
+  if (countErr) return NextResponse.json({ error: t('lev.fout.verwijderen'), code: 'count_failed', detail: countErr.message }, { status: 503 })
+
+  const { error: delErr } = await supabase
+    .from('suppliers')
+    .delete()
+    .eq('id', current.id)
+    .eq('user_id', ownerId)
+  if (delErr) return NextResponse.json({ error: t('lev.fout.verwijderen'), code: 'delete_failed', detail: delErr.message }, { status: 500 })
+
+  await logAuditAction({
+    userId: ownerId,
+    action: 'supplier.deleted',
+    entityType: 'supplier',
+    entityId: current.id,
+    oldValue: { name: current.name, iban: current.iban, kvk_number: current.kvk_number, btw_number: current.btw_number, auto_incasso: current.auto_incasso },
+    newValue: { invoices_detached: linked ?? 0, via: 'leveranciers', by: acting.actorId },
+    ipAddress: getClientIP(req),
+  }).catch(() => {})
+
+  return NextResponse.json({ ok: true, name: current.name, invoicesDetached: linked ?? 0 })
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const t = await serverTranslator()
   const acting = await getActingFor()

@@ -26,6 +26,7 @@
 
 import { NextResponse } from "next/server";
 import { decidePlan } from "./subscription";
+import { grantStanding, type GrantStanding, type PlanGrantRow } from "./plan-grants";
 import { consumeFairUse, exceededMessage, releaseFairUse, type UsagePlan } from "./fair-use-usage";
 import { fairUseLimit, type FairUseKey } from "./fair-use";
 
@@ -66,10 +67,28 @@ export async function planForUser(client: ProfileReader, userId: string): Promis
       return basic?.role === "accountant" ? "boekhouder" : "free";
     }
 
+    // [TOEKENNING] Lopende toekenningen erbij: de welkomstperiode van 90 dagen, een pilot van een
+    // kantoor, een verlenging. Eigen query en eigen try: is de tabel er nog niet ([DEPLOY-SAFE])
+    // of hapert hij, dan telt er geen toekenning en valt het account terug op gratis — dezelfde
+    // faalrichting als de rest van deze functie, en die ontzegt niemand zijn gegevens.
+    let standing: GrantStanding = { grantedPlusUntil: null, grantOpenEnded: false };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: grants } = await (client as any)
+        .from("plan_grants")
+        .select("plan, starts_at, expires_at, revoked_at")
+        .eq("user_id", userId);
+      if (Array.isArray(grants)) standing = grantStanding(grants as PlanGrantRow[], Date.now());
+    } catch {
+      // standing blijft leeg — zie hierboven.
+    }
+
     return decidePlan({
       role: data.role ?? null,
       subscriptionStatus: data.subscription_status ?? null,
       currentPeriodEnd: data.current_period_end ?? null,
+      grantedPlusUntil: standing.grantedPlusUntil,
+      grantOpenEnded: standing.grantOpenEnded,
       nowMs: new Date().getTime(),
     }).plan;
   } catch {

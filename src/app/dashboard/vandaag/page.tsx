@@ -25,9 +25,9 @@ import { getSessionUser } from "@/lib/session-user";
 import VandaagClient, { type VandaagInvoice } from "./VandaagClient";
 // [CREDITNOTA-NO-CHASE] shared "is this still owed to me" rule — both sides of a credited pair
 // must leave the list together (see src/lib/credited-invoices.ts)
-import { fullyCreditedIdsFrom, filterOpenReceivables } from "@/lib/credited-invoices";
+import { fullyCreditedIdsFrom, filterOpenReceivables, refundableCreditnotas, type RefundOriginalRow } from "@/lib/credited-invoices";
 // [PAGINATION] Past PostgREST's silent ~1000-row cap — see the creditnota read below.
-import { fetchAllRows } from "@/lib/supabase-paginate";
+import { fetchAllRows, fetchAllRowsForIds } from "@/lib/supabase-paginate";
 // [AUTO-INCASSO] The same normalized supplier key the registry stores — see src/lib/auto-incasso.ts.
 import { supplierNameKey } from "@/lib/supplier-registry";
 // [OFFERTE-OPVOLGING] Welke offerte vandaag aandacht vraagt — één regel, zie dat bestand.
@@ -75,10 +75,9 @@ export default async function VandaagPage() {
   // verderop). Geen enkele query verandert daardoor, geen enkele filterregel verschuift, en elke
   // toelichting blijft staan bij wat hij toelicht — alleen de volgorde van het WACHTEN verandert.
   //
-  // Wat er NIET in meegaat: de creditnota-lezing verderop. Die wordt alleen gedaan als er iets te
-  // herinneren VALT, en dat weet je pas als de herinneringslijst binnen is. Hem toch meesturen zou
-  // betekenen dat elke ondernemer zonder openstaande facturen — precies de nieuwe gebruiker — een
-  // query betaalt waarvan het antwoord meteen wordt weggegooid.
+  // Wat er NIET in meegaat: de creditnota-lezing verderop. Die is gepagineerd (fetchAllRows) en
+  // dus geen enkele query maar een reeks, en [CREDIT-TERUG] leest daarna nog de facturen die de
+  // creditnota's corrigeren — een tweede stap die pas kan als de eerste binnen is.
 
   // [TODAY-LISTS-V1] List 1 — Te betalen: incoming invoices verified but unpaid.
   // status='received' = verified Crediteur awaiting payment (NOT 'processing',
@@ -262,20 +261,30 @@ export default async function VandaagPage() {
   //
   // The direction of the error is the bad one too: a credit that falls off the end is a credit
   // that is not subtracted, so the owner chases a customer for money they took back in writing.
-  const creditRows = remindAll.length > 0
-    ? await fetchAllRows<{ original_invoice_id: string | null; total_inc_btw: number | null }>((from, to) => supabase
+  //
+  // [CREDIT-TERUG] List 4 — creditnota's die nog terugbetaald moeten worden — reads the SAME set.
+  // A creditnota is money the owner OWES, and this page listed what to pay and what to chase and
+  // never a credit note. So this read runs whenever the page does, not only when there is
+  // something to remind, and it carries the standalone creditnotas too (no original): the
+  // reminder question skips those, the refund rule flags them. No status filter, on purpose
+  // ([CREDIT-BRON]): a settled creditnota still counts against its invoice, and the refund rule
+  // keeps the unsettled ones itself. Whether and how much has to go back is decided in
+  // credited-invoices.ts against the invoice each one corrects, read below — never here.
+  const creditRows = await fetchAllRows<{
+    id: string; original_invoice_id: string | null; total_inc_btw: number | null;
+    invoice_number: string | null; invoice_date: string | null; client_name: string | null; status: string | null;
+  }>((from, to) => supabase
         .from("invoices")
         // [DEEL-CREDIT] The amount too: a partial credit does not take the invoice off the list.
-        .select("original_invoice_id, total_inc_btw")
+        .select("id, original_invoice_id, total_inc_btw, invoice_number, invoice_date, client_name, status")
         .eq("sender_id", user.id)
+        .eq("direction", "outgoing")
         .eq("invoice_type", "creditnota")
-        .not("original_invoice_id", "is", null)
         // [PAGE-KEY] by id: a stable, unique order, so no row is served twice or skipped across
         // .range() windows. The same key both sibling readers use.
         .order("id", { ascending: true })
         .range(from, to)
-      ).catch(() => null)
-    : [];
+      ).catch(() => null);
   const remind = creditRows == null
     ? remindAll
     : filterOpenReceivables(remindAll, fullyCreditedIdsFrom(creditRows, remindAll));
@@ -297,5 +306,33 @@ export default async function VandaagPage() {
     amsterdamToday(),
   ).map((r) => ({ ...r.quote, followupState: r.state, followupDays: r.days }));
 
-  return <VandaagClient payable={payable} remind={remind} offertes={offertes} loadFailed={loadFailed} toVerifyCount={toVerifyCount ?? 0} datelessPayableCount={datelessPayableCount ?? 0} zelf={zelf} werk={werk} />;
+  // [CREDIT-TERUG] The invoices the creditnotas correct: total and what the customer paid. The
+  // creditnotas themselves are the paged read above. A failed read on either side is `null` —
+  // the section then says it could not look, rather than listing a refund that is not due or
+  // hiding one that is ([NO-SILENT-EMPTY]).
+  let refunds: ReturnType<typeof refundableCreditnotas> | null = null;
+  if (creditRows != null) {
+    const correctedIds = [...new Set(creditRows.map((r) => r.original_invoice_id).filter((v): v is string => !!v))];
+    const originals = new Map<string, RefundOriginalRow>();
+    try {
+      // [IN-CHUNK] Chunked and paged: an id list that grows with the owner's creditnotas never
+      // travels in one URL, and a partial read throws instead of passing as complete.
+      const origRows = await fetchAllRowsForIds<{ id: string; total_inc_btw: number | null; amount_paid: number | null }, string>(
+        correctedIds,
+        (chunk, from, to) => supabase
+          .from("invoices")
+          .select("id, total_inc_btw, amount_paid")
+          .eq("sender_id", user.id)
+          .in("id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to),
+      );
+      for (const o of origRows) originals.set(o.id, { total_inc_btw: o.total_inc_btw, amount_paid: o.amount_paid });
+      refunds = refundableCreditnotas(creditRows, originals);
+    } catch {
+      refunds = null;
+    }
+  }
+
+  return <VandaagClient payable={payable} remind={remind} offertes={offertes} refunds={refunds} loadFailed={loadFailed} toVerifyCount={toVerifyCount ?? 0} datelessPayableCount={datelessPayableCount ?? 0} zelf={zelf} werk={werk} />;
 }

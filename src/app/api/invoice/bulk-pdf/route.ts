@@ -37,6 +37,8 @@ import { invoiceOwnerId } from "@/lib/acting-for";
 import { isUnknownColumn } from "@/lib/created-by";
 import { planBulkPdf, bulkZipName, BULK_PDF_MAX } from "@/lib/invoice-bulk-pdf";
 import { renderInvoicePdf } from "@/lib/invoice-pdf-server";
+// [CREDITNOTA-EXTERN] The linked original first, the typed external reference second.
+import { creditReferenceOf } from "@/lib/creditnota";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -85,6 +87,10 @@ export async function POST(req: NextRequest) {
     original_invoice_id: string | null;
     // [KLANT-LAND] Absent on an installation behind on client_country.sql — see the second read.
     client_country?: string | null;
+    // [CREDITNOTA-EXTERN] The invoice a standalone creditnota corrects — absent behind
+    // creditnota_external_reference.sql, same second read.
+    credited_invoice_number?: string | null;
+    credited_invoice_date?: string | null;
   }> | null = null;
   let error: { message: string } | null = null;
   try {
@@ -113,7 +119,7 @@ export async function POST(req: NextRequest) {
         //     (art. 35a lid 1 sub c). Newer than some installations, so a read that fails on
         //     exactly this column is repeated below without it: a missing migration costs the
         //     country line in the archive, never the archive.
-        .select("id, invoice_number, client_name, pdf_url, direction, invoice_type, invoice_date, due_date, delivery_date, client_address, client_postal_code, client_city, client_email, client_btw_number, total_ex_btw, btw_amount, original_invoice_id, client_country")
+        .select("id, invoice_number, client_name, pdf_url, direction, invoice_type, invoice_date, due_date, delivery_date, client_address, client_postal_code, client_city, client_email, client_btw_number, total_ex_btw, btw_amount, original_invoice_id, client_country, credited_invoice_number, credited_invoice_date")
         .in("id", chunk)
         .eq(ownerColumn, ownerId)
         .eq("direction", direction)
@@ -121,7 +127,9 @@ export async function POST(req: NextRequest) {
         .range(from, to),
     );
   } catch (e) {
-    if (isUnknownColumn(e, "client_country")) {
+    // [CREDITNOTA-EXTERN] The same second read covers the two reference columns: one migration
+    // behind on any of the three costs that column in the archive, never the archive.
+    if (isUnknownColumn(e, "client_country") || isUnknownColumn(e, "credited_invoice_number") || isUnknownColumn(e, "credited_invoice_date")) {
       try {
         rows = await fetchAllRowsForIds(ids, (chunk, from, to) =>
           supabase
@@ -187,10 +195,17 @@ export async function POST(req: NextRequest) {
   }
   const enriched = invoices.map((i) => {
     const origin = i.original_invoice_id ? originals.get(i.original_invoice_id) : undefined;
+    // [CREDITNOTA-EXTERN] A standalone creditnota carries its reference itself, as typed.
+    const ref = creditReferenceOf({
+      linkedNumber: origin?.invoice_number,
+      linkedDate: origin?.invoice_date,
+      creditedNumber: i.credited_invoice_number,
+      creditedDate: i.credited_invoice_date,
+    });
     return {
       ...i,
-      original_invoice_number: origin?.invoice_number ?? null,
-      original_invoice_date: origin?.invoice_date ?? null,
+      original_invoice_number: ref.originalNumber,
+      original_invoice_date: ref.originalDate,
     };
   });
 

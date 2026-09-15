@@ -50,6 +50,19 @@ async function pdfText(buf: Buffer): Promise<string> {
   return out;
 }
 
+/** The link annotations of a rendered PDF: what a reader will actually open. */
+async function pdfLinks(buf: Buffer): Promise<string[]> {
+  const doc = await getDocument({ data: new Uint8Array(buf), useSystemFonts: true }).promise;
+  const out: string[] = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const a of (await (await doc.getPage(i)).getAnnotations()) as any[]) {
+      if (a.subtype === "Link" && (a.url || a.unsafeUrl)) out.push(String(a.url ?? a.unsafeUrl));
+    }
+  }
+  return out;
+}
+
 const PROFILE = {
   company_name: "Kiwi Food Market",
   address: "Verdiplein 13-14",
@@ -93,6 +106,45 @@ test("the extractor finds text that IS on the page — control for every asserti
   assert.ok(text.length > 200, `the extractor returned ${text.length} characters — it is broken`);
   assert.ok(text.includes("Kiwi Food Market"), "the sender name must come back out of the PDF");
   assert.ok(text.includes("Worstjes"), "and the line descriptions");
+});
+
+// [VOETTEKST-MERK] The product's name on the document that leaves the owner's circle.
+//
+// The invoice PDF is read by the customer and by that customer's bookkeeper, and it is kept for
+// seven years. The credit line at its foot was the only place the product was named, and it was set
+// in the same muted grey at the same size as the sentence beside it. It is now set like a name —
+// and, being style, only the rendered document can say whether it survived.
+test("[VOETTEKST-MERK] the document carries the product's name and where to find it", async () => {
+  const text = await pdfText(await renderInvoicePdf(QUOTE, LINES, PROFILE));
+  assert.ok(text.includes("BoekBrug"), "the name must come out of the rendered PDF");
+  assert.ok(text.includes("boekbrug.nl"), "…with an address a reader can act on");
+  assert.ok(text.includes("De brug tussen jou en je boekhouder"), "…and the promise under it");
+  // It stays a credit line: the SENDER owns the document, and their name is what a customer must
+  // read first. A brand that outgrew the letterhead would read as if BoekBrug sent the invoice.
+  assert.ok(
+    text.indexOf("Kiwi Food Market") < text.indexOf("BoekBrug"),
+    "the owner's own company must still come first on the page",
+  );
+});
+
+// [VOETTEKST-LINK] The address printed as bare text `boekbrug.nl` carried no scheme, so a reader
+// that turns URL-looking text into a link had nothing absolute to work with and resolved it against
+// the FOLDER the file sat in: the owner opened their own invoice from the desktop and the line
+// pointed at …/OneDrive/Desktop/boekbrug.nl. The document goes to a customer and is kept seven
+// years, so a link into a stranger's file system is worse than no link at all.
+//
+// Only the rendered file can answer this: the annotation is not in the text layer, and a source
+// check would read the string `boekbrug.nl` and call it correct — which is exactly how it shipped.
+test("[VOETTEKST-LINK] the address in the footer is an absolute link, not a path", async () => {
+  const links = await pdfLinks(await renderInvoicePdf(QUOTE, LINES, PROFILE));
+  // Two: the name, which is the biggest thing down there and the first a reader reaches for, and
+  // the address under it. Counted, so dropping one shows up here rather than under someone's cursor.
+  const site = links.filter((u) => /^https:\/\/boekbrug\.nl\/?$/.test(u));
+  assert.equal(site.length, 2, `the name and the address must both open the site — found: ${JSON.stringify(links)}`);
+  // Nothing relative, ever: that is the whole defect, in the one place it can be measured.
+  for (const u of links) {
+    assert.match(u, /^https:\/\//, `a link without a scheme resolves against the reader's own folder: ${u}`);
+  }
 });
 
 test("a quote calls itself an Offerte, not a Pro forma", async () => {

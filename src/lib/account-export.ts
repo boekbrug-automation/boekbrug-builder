@@ -720,6 +720,12 @@ export async function buildAccountExportZip(args: {
       supabase.from("asset_dismissals").select("*").eq("user_id", userId).order("invoice_id", { ascending: true }).range(from, to)),
     readAll("invoice_reminders", (from, to) =>
       supabase.from("invoice_reminders").select("*").eq("user_id", userId).order("id", { ascending: true }).range(from, to)),
+    // [TOEKENNING] Waarom dit account meer had dan het gratis plan: de welkomstperiode, een pilot,
+    // een verlenging — met reden en einddatum. Het gaat OVER hem, dus het gaat mee. Er staat geen
+    // bedrag in en niets wat een ander account raakt; wie het weglaat, beweert dat onze
+    // commerciële beslissingen over hem hem niet aangaan.
+    readAll("plan_grants", (from, to) =>
+      supabase.from("plan_grants").select("*").eq("user_id", userId).order("id", { ascending: true }).range(from, to)),
     readAll("bank_tx_invoices", (from, to) =>
       supabase.from("bank_tx_invoices").select("*").eq("user_id", userId).order("id", { ascending: true }).range(from, to)),
     readAll("folders", (from, to) =>

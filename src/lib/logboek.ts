@@ -123,6 +123,10 @@ const KIND_BY_DOMAIN: Readonly<Record<string, LogboekKind | undefined>> = {
   // langs de administratie legt. Onder 'systeem' zou hij verdwijnen tussen de aanmeldingen.
   kasboek: "money",
   supplier: "money",
+  // [WACHTKOPPELING] Een betaling die de eigenaar al deed en die de bank nog niet liet zien. Onder
+  // Geld en nergens anders: het gaat over euro's die het account hebben verlaten, ook al is de
+  // bankregel er nog niet — en het filter beantwoordt "waar is aan mijn geld gezeten".
+  wachtkoppeling: "money",
   snelstart: "money",
   // [WERK] The trade's own work: a werkorder, rit, klus or opdracht opened, moved, invoiced,
   // removed. Filed under money: the row carries no amount, but what it records is the piece of
@@ -176,6 +180,10 @@ export function logboekKindOf(action: string): LogboekKind {
 const SENTENCE_KEYS: readonly MessageKey[] = [
   // Level 1 — Financial (critical)
   "log.invoice.created", "log.invoice.updated",
+  "log.invoice.ledger_account_set",
+  "log.wachtkoppeling.created",
+  "log.wachtkoppeling.linked",
+  "log.wachtkoppeling.withdrawn",
   "log.invoice.correction_proposed", "log.invoice.correction_accepted", "log.invoice.correction_declined",
   "log.invoice.deleted", "log.invoice.duplicated",
   "log.invoice.corrected", "log.invoice.dedup_override", "log.invoice.status_changed",
@@ -216,6 +224,8 @@ const SENTENCE_KEYS: readonly MessageKey[] = [
   // vorige maand.
   "log.supplier.merged",
   "log.supplier.updated",
+  "log.supplier.created",
+  "log.supplier.deleted",
   // Level 3 — Files
   "log.document.uploaded", "log.document.duplicate_blocked", "log.document.deleted",
   "log.document.bulk_deleted", "log.document.restored", "log.document.reminder_filed",

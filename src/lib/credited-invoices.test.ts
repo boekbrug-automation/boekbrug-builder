@@ -10,6 +10,7 @@ import {
   creditedTotalsFrom,
   fullyCreditedIdsFrom,
   openAfterCredit,
+  refundableCreditnotas,
 } from "./credited-invoices";
 
 let passed = 0, failed = 0;
@@ -113,6 +114,43 @@ check("never negative", openAfterCredit(100, 80, 80) === 0);
 check("no credit behaves exactly like before", openAfterCredit(1000, 200, 0) === 800);
 check("magnitudes — a negative total is read as its size", openAfterCredit(-1000, 0, 100) === 900);
 check("rounds to cents", openAfterCredit(100, 0, 33.333) === 66.67);
+
+console.log("\n— [CREDIT-TERUG] refundableCreditnotas: what still has to go back —");
+{
+  const originals = new Map([
+    ["paid", { total_inc_btw: 1000, amount_paid: 1000 }],
+    ["unpaid", { total_inc_btw: 605, amount_paid: 0 }],
+    ["part", { total_inc_btw: 1000, amount_paid: 500 }],
+  ]);
+  const cn = (id: string, original: string | null, total: number, over: Record<string, unknown> = {}) => ({
+    id, invoice_number: `CR-${id}`, invoice_date: "2026-07-24", client_name: "Klant", status: "sent",
+    total_inc_btw: -total, original_invoice_id: original, ...over,
+  });
+
+  // The production case: a credit against an UNPAID invoice cancels the claim, nothing goes back.
+  check("a credit against an unpaid invoice owes nothing", refundableCreditnotas([cn("a", "unpaid", 605)], originals).length === 0);
+  // A paid invoice credited: the whole credit goes back.
+  const paid = refundableCreditnotas([cn("b", "paid", 300)], originals);
+  check("a credit against a paid invoice goes back in full", paid.length === 1 && paid[0].amount === 300 && paid[0].standalone === false);
+  check("…named by its own number", paid[0].invoiceNumber === "CR-b");
+  // Partly paid: the credit first uses up what was still open (500), the rest (500) goes back.
+  const part = refundableCreditnotas([cn("c", "part", 1000)], originals);
+  check("a credit against a partly paid invoice returns only what exceeds the open remainder", part.length === 1 && part[0].amount === 500);
+  // Two partial credits on a partly paid invoice draw on the open remainder in order, oldest first.
+  const two = refundableCreditnotas(
+    [cn("d2", "part", 300, { invoice_date: "2026-08-02" }), cn("d1", "part", 300, { invoice_date: "2026-08-01" })],
+    originals,
+  );
+  check("the older credit uses the open remainder, the newer one owes the rest", two.length === 1 && two[0].id === "d2" && two[0].amount === 100);
+  // Settled: 'paid' on a creditnota IS the refund, recorded.
+  check("a creditnota marked paid is off the list", refundableCreditnotas([cn("e", "paid", 300, { status: "paid" })], originals).length === 0);
+  // Standalone: no invoice to compare with — the whole amount, flagged.
+  const alone = refundableCreditnotas([cn("f", null, 121)], originals);
+  check("a standalone creditnota lists its whole amount, flagged", alone.length === 1 && alone[0].amount === 121 && alone[0].standalone === true);
+  check("a credit whose invoice could not be read is treated the same way", refundableCreditnotas([cn("g", "ghost", 50)], originals)[0]?.standalone === true);
+  check("cents are rounded", refundableCreditnotas([cn("h", "paid", 33.333)], originals)[0]?.amount === 33.33);
+  check("a zero credit is noise", refundableCreditnotas([cn("i", "paid", 0)], originals).length === 0);
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -27,6 +27,9 @@ import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { createNotification } from "@/lib/notifications";
 import { verifyInvoiceFromPdf } from "@/lib/ai";
+// [AANHECHT-EERST] The same keep-the-file path the upload door uses — one, not two.
+import { storeRawIncoming } from "@/lib/store-raw-incoming";
+import { DOC_TYPE_COULD_NOT_READ } from "@/lib/skipped-import";
 import { resolveImportTarget } from "@/lib/bestanden";
 import { computeContentHash } from "@/lib/content-hash";
 import { buildFolderBreadcrumb } from "@/lib/documents";
@@ -53,6 +56,8 @@ import { escapeLikeValue } from "@/lib/sanitize";
 import { trashedDuplicateCleared } from "@/lib/trashed-dedup";
 // [TZ] The owner's day, not the server's — see amsterdamToday().
 import { amsterdamToday } from "@/lib/format-nl";
+// [NUL-BTW-STIL] The zero-BTW question, shared with the verify queue that this door skips.
+import { zeroBtwUnexplained } from "@/lib/zero-btw";
 
 // Amount agreement tolerance between the AI-read invoice total and the bank
 // transaction. Within this → link silently. Outside → still allow, but flag a
@@ -256,10 +261,42 @@ async function runAttachInvoice(req: NextRequest) {
       // [EIGEN-NUMMER] This door passes no receiver identity, so the number is the ONLY way it
       // can recognise the owner's own outgoing invoice being attached as an "expense" proof.
       lookupOwnInvoice: makeOwnInvoiceLookup(supabase, user.id),
+      // [AANHECHT-EERST] The one reader door that never opted in, on the one route that books
+      // straight to 'paid'. Without this an infra failure is swallowed into the confidence-0
+      // FALLBACK — every field null — and this route never checks is_invoice, so it went on to
+      // MINT a paid invoice from a document nobody read: vendor "Onbekende afzender", no number,
+      // and the amount taken from the bank line (aiTotal == null → totalIncBtw = bankAmount).
+      // Flagged for review, yes, but created, marked paid, and consuming the line's budget.
+      // During an outage of hours it does that once per attach.
+      throwOnTransient: true,
     });
   } catch (aiErr) {
+    // [AANHECHT-EERST] Keep the bytes, book nothing, leave the bank line exactly as it was.
+    //
+    // The old branch rethrew, which became a 500 with no sentence and no file kept — the same
+    // loss [BEWAAR-EERST] closed on the upload door, on the door where the stakes are highest.
+    console.error("[AANHECHT-EERST] attach AI read failed — keeping the file, booking nothing", aiErr);
+    const keptId = await storeRawIncoming(
+      buffer, file, user.id, supabase, DOC_TYPE_COULD_NOT_READ, "upload", { aiProcessed: false },
+    );
+    // [FAIR-USE] Niet gelezen, dus niet geteld.
     await gate.release();
-    throw aiErr;
+    // This answer is a FAILURE status on purpose, and that is where this door differs from
+    // /api/intake. There a 200 is honest: the contract is "the file is in the app", and it is.
+    // Here the contract is "this file is now linked to this bank line" — which did not happen.
+    // BankClient counts every res.ok as "gekoppeld", so a 200 would report a link that does not
+    // exist and leave the owner believing the line was handled. The sentence carries the part
+    // that saves them work: the file is kept, so do not upload it again.
+    return NextResponse.json(
+      {
+        error: keptId
+          ? "Automatisch inlezen lukt op dit moment niet. Je bestand is bewaard — je hoeft het niet opnieuw te uploaden. De bankregel staat nog open; je vindt het bestand bij Inkomend onder \u201eOvergeslagen bij import\u201d, met een knop om het opnieuw te laten lezen."
+          : "We konden dit bestand nu niet lezen én niet bewaren. Er is niets geboekt. Bewaar het zelf even en probeer het zo meteen opnieuw.",
+        code: "reader_unavailable",
+        ...(keptId ? { documentId: keptId, kept: true } : {}),
+      },
+      { status: 503 },
+    );
   }
 
   // [DECLARED-INVOICE] Does this payment name MORE invoices than the one being attached?
@@ -362,6 +399,30 @@ async function runAttachInvoice(req: NextRequest) {
     }
   }
   const amountWarning = (aiTotal != null && !amountAgrees) || totalFromBank;
+
+  // [NUL-BTW-STIL] A zero BTW that the document does not explain. This door is the one place where
+  // that zero is invisible: it books straight to 'paid' with no verify queue, so the [BTW-GATE] in
+  // auto-advance.ts — which holds exactly this shape for a human — never gets to run. And every
+  // other signal reads clean, by construction: the gross-as-net fallback above makes ex equal incl,
+  // so the arithmetic identity holds, classifyImportHealth is silent, and the row lands looking
+  // perfect with the voorbelasting at 0. On a EUR 121 supplier bill that is EUR 21 the owner is
+  // entitled to and will never be told about.
+  //
+  // Not a refusal — the payment happened and the cost is real, and the conservative fallback is
+  // still the right number to book. It is carried instead, in the same register as
+  // [EIGEN-CONTROLE-ONBEKEND] and [IBAN-CHECK-HONEST], so import health says it in Dutch.
+  //
+  // The question comes from zeroBtwUnexplained, the same one the verify queue asks, so a document
+  // that explains its zero (an explicit 0 %-tarief, a verlegde factuur) is silent here too.
+  // Incoming only: an outgoing document with an untrustworthy split was already refused above.
+  const btwZeroUnexplained =
+    direction === "incoming" &&
+    zeroBtwUnexplained({
+      totalIncBtw,
+      btwAmount,
+      btwRate: verification.btw_rate,
+      shifted: verification.field_confidence?._btw_verlegd != null,
+    });
 
   // [OUTGOING-BTW TRUTH] A bank CREDIT is booked as omzet from total_ex_btw. The gross-as-net fallback
   // above is SAFE only for an incoming COST (understating our own VAT reclaim to 0 is conservative).
@@ -734,8 +795,15 @@ async function runAttachInvoice(req: NextRequest) {
       // coverage all mean a human must look. amount < 0.7 is the existing channel:
       // classifyImportHealth turns it into needs-review on every list this row appears on.
       field_confidence:
-        splitDropped || amountWarning || !fullySettled
-          ? { ...(verification.field_confidence ?? {}), amount: Math.min(verification.field_confidence?.amount ?? 1, 0.4) }
+        splitDropped || amountWarning || !fullySettled || btwZeroUnexplained
+          ? {
+              ...(verification.field_confidence ?? {}),
+              // [NUL-BTW-STIL] The fact travels with the row; import-health turns it into the
+              // Dutch sentence. A boolean, not a number, because there is nothing to compare —
+              // the figure we would have shown is precisely the one we never had.
+              ...(btwZeroUnexplained ? { _btw_zero_unexplained: true } : {}),
+              amount: Math.min(verification.field_confidence?.amount ?? 1, 0.4),
+            }
           : (verification.field_confidence ?? null),
     })
     .select("id")

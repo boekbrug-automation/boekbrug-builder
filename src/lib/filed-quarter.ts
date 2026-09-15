@@ -142,26 +142,62 @@ export async function readFiling(
  * filings could not be read is not a year with no filings ([NO-SILENT-EMPTY]). A missing table
  * genuinely holds none — same deploy-safe rule as readFiling above.
  */
+export interface FiledQuarterOfYear {
+  quarter: number;
+  /** 'YYYY-MM-DD', or null when the row predates the column or never carried one. */
+  filedAt: string | null;
+}
+
+/**
+ * The filed quarters of one year WITH the day each was filed.
+ *
+ * [CORRECTIE-TIJDVAK] The day matters at exactly one place: the notice shown before a correction
+ * lands in a quarter that has already gone to the Belastingdienst. "Q3 2026, ingediend op
+ * 2026-10-14" is a fact the owner can go and check; "Q3 2026, ingediend" is a claim they have to
+ * take on trust. It is optional on purpose — a missing filed_at weakens the sentence, it never
+ * silences it.
+ *
+ * [NO-SILENT-EMPTY] `failed` is the whole point of the shape. An empty list means "you have filed
+ * nothing this year", which is the ordinary state of a young administration and must never be what
+ * a failed read looks like.
+ */
+export async function readFiledQuartersDetailOfYear(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  userId: string,
+  year: number,
+): Promise<{ rows: FiledQuarterOfYear[]; failed: boolean }> {
+  const { data, error } = await db
+    .from("btw_filings")
+    .select("quarter, filed_at")
+    .eq("user_id", userId)
+    .eq("year", year);
+  if (error) {
+    if (isMissingRelation(error.message)) return { rows: [], failed: false };
+    console.error("[JAARSTAND] btw_filings jaarlezing mislukt", { userId, year, error: error.message });
+    return { rows: [], failed: true };
+  }
+  const seen = new Map<number, FiledQuarterOfYear>();
+  for (const r of (data ?? []) as { quarter: number; filed_at?: string | null }[]) {
+    const q = Number(r.quarter);
+    if (!Number.isInteger(q) || q < 1 || q > 4) continue;
+    const filedAt = typeof r.filed_at === "string" && r.filed_at !== "" ? r.filed_at.slice(0, 10) : null;
+    const had = seen.get(q);
+    // Two rows for one quarter should not exist, but if they do the one that carries a date wins:
+    // a row without one tells the owner strictly less.
+    if (!had || (had.filedAt === null && filedAt !== null)) seen.set(q, { quarter: q, filedAt });
+  }
+  return { rows: [...seen.values()].sort((a, b) => a.quarter - b.quarter), failed: false };
+}
+
 export async function readFiledQuartersOfYear(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
   userId: string,
   year: number,
 ): Promise<{ quarters: number[]; failed: boolean }> {
-  const { data, error } = await db
-    .from("btw_filings")
-    .select("quarter")
-    .eq("user_id", userId)
-    .eq("year", year);
-  if (error) {
-    if (isMissingRelation(error.message)) return { quarters: [], failed: false };
-    console.error("[JAARSTAND] btw_filings jaarlezing mislukt", { userId, year, error: error.message });
-    return { quarters: [], failed: true };
-  }
-  const quarters = ((data ?? []) as { quarter: number }[])
-    .map((r) => Number(r.quarter))
-    .filter((q) => Number.isInteger(q) && q >= 1 && q <= 4);
-  return { quarters: [...new Set(quarters)].sort((a, b) => a - b), failed: false };
+  const { rows, failed } = await readFiledQuartersDetailOfYear(db, userId, year);
+  return { quarters: rows.map((r) => r.quarter), failed };
 }
 
 export interface FiledQuarterImpact {

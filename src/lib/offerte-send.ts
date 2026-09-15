@@ -126,6 +126,8 @@ export function offerteFileName(clientName: string | null | undefined, dateIso: 
 
 import { escapeHtml } from "./escape-html";
 import { formatDateNL } from "./format-nl";
+// [MERK-VOET] The sign-off, from the one place that defines it.
+import { merkVoet } from "./mail-merk";
 
 export interface OfferteEmailFields {
   clientName: string;
@@ -207,7 +209,7 @@ export function offerteEmailHtml(f: OfferteEmailFields): string {
               ? `antwoord dan op deze mail of stuur een bericht naar <a href="mailto:${escapeHtml(antwoordAdres)}" style="color:#1a73e8;">${escapeHtml(antwoordAdres)}</a>`
               : "laat het ons dan weten"} — dan sturen we de factuur.
         </p>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `;
 }

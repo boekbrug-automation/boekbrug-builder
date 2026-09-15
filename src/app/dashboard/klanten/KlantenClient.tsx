@@ -18,6 +18,9 @@ import type { ProfileRow } from '@/types/rows'
 // null-veilige bron voor alle pagina's (src/lib/search.ts).
 import { foldText } from '@/lib/search'
 import { useDialog } from '@/components/ui/Dialog'
+import AdresZoeker from '@/components/AdresZoeker'
+import BtwControle from '@/components/BtwControle'
+import KvkControle from '@/components/KvkControle'
 import { useToast } from '@/components/ui/Toast'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
@@ -357,6 +360,24 @@ export default function KlantenClient({ profile, openByClient = null }: {
                     placeholder={f.placeholder}
                     style={{ width: '100%', borderRadius: R.md, border: `2px solid ${form[f.key] ? M3.primary : M3.outline}`, padding: '12px 14px', fontSize: 14, outline: 'none', boxSizing: 'border-box', fontFamily: FONT, background: M3.surface, color: M3.onSurface, transition: 'border-color 0.15s' }}
                   />
+                  {/* [ADRES-ECHT] Onder het plaatsveld, want dan staan alle drie de velden er al.
+                      Het register stelt voor; de eigenaar tikt Overnemen. */}
+                  {f.key === 'kvk_number' && <KvkControle nummer={form.kvk_number} />}
+                  {f.key === 'btw_number' && <BtwControle nummer={form.btw_number} />}
+                  {f.key === 'city' && (
+                    <AdresZoeker
+                      postcode={form.postal_code}
+                      huisnummer={form.address.replace(/^\D+/, '')}
+                      straat={form.address.replace(/\s*\d.*$/, '')}
+                      plaats={form.city}
+                      onOvernemen={(adres) => setForm(p => ({
+                        ...p,
+                        address: `${adres.street} ${adres.houseNumber}${adres.addition ? `-${adres.addition}` : ''}`,
+                        postal_code: `${adres.postcode.slice(0, 4)} ${adres.postcode.slice(4)}`,
+                        city: adres.city,
+                      }))}
+                    />
+                  )}
                 </div>
               ))}
             </div>

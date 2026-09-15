@@ -122,10 +122,10 @@ test('[TAAL] a missing translation falls back to Dutch, never to a key or a blan
   // "sent.action.view", or an empty confirmation beside a permanent invoice number, is worse than
   // the same sentence in a language the owner reads less comfortably.
   const key: MessageKey = 'sent.action.view'
-  assert.equal(translate('nl', key), 'Bekijk de factuur')
+  assert.equal(translate('nl', key), 'Factuur bekijken')
   // Turkish is deliberately not written yet — the audience is real but this copy is legal in tone.
-  assert.equal(translate('tr', key), 'Bekijk de factuur', 'tr falls back, and it falls back to Dutch')
-  assert.equal(translate('de', key), 'Bekijk de factuur', 'so does a language we do not have')
+  assert.equal(translate('tr', key), 'Factuur bekijken', 'tr falls back, and it falls back to Dutch')
+  assert.equal(translate('de', key), 'Factuur bekijken', 'so does a language we do not have')
   assert.ok(!translate('tr', key).includes('sent.'), 'a key may never reach the screen')
 })
 

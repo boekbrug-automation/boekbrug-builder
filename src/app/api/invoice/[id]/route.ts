@@ -517,6 +517,28 @@ export async function PUT(
     }
   }
 
+  // ── [CREDITNOTA-EXTERN] The invoice a standalone creditnota corrects, in its OWN write ──
+  //
+  // Not in the patch list above: a column an installation may not have yet would refuse the
+  // whole save (PGRST204). Only when the screen sent the field, only on a creditnota, and only
+  // where the send door will ask for it — the linked flow carries original_invoice_id instead.
+  if (existing.invoice_type === 'creditnota' && typeof body.credited_invoice_number === 'string') {
+    const verwezenNummer = String(body.credited_invoice_number).trim()
+    const verwezenDatum =
+      typeof body.credited_invoice_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.credited_invoice_date)
+        ? body.credited_invoice_date
+        : null
+    const { error: refErr } = await supabase
+      .from('invoices')
+      .update({ credited_invoice_number: verwezenNummer || null, credited_invoice_date: verwezenNummer ? verwezenDatum : null } as never)
+      .eq('id', id)
+      .eq('sender_id', ownerId)
+    if (refErr) {
+      console.warn('[CREDITNOTA-EXTERN] de verwijzing naar de gecrediteerde factuur kon niet worden opgeslagen — pas ' +
+        'supabase/migrations/creditnota_external_reference.sql toe', { invoiceId: id, error: refErr.message })
+    }
+  }
+
   // Replace the lines wholesale.
   //
   // [EDIT-LINES-SAFE] Snapshot first, restore on failure. delete-then-insert is not atomic here

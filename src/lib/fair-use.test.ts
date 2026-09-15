@@ -91,12 +91,17 @@ test("geen enkele overschrijding raakt het inzien of exporteren van eigen data",
 test("opslag wordt in GB getoond zodra het er zijn, en de prijs staat vast", () => {
   assert.equal(formatLimit(fairUseLimit("storageMb"), "free"), "2 GB");
   assert.equal(formatLimit(fairUseLimit("storageMb"), "plus"), "20 GB");
-  assert.equal(PLUS_PRICE_EUR, 12.99);
+  // [PLUS-PRIJS] Raised from 12,99 on 12 September 2026, before the first paying customer that
+  // was not the owner's own shop — which is why nobody had to be told and nothing was
+  // grandfathered. The number is pinned here on purpose: it is published in the Terms, on
+  // /prijzen and on the billing screen, and a change that reaches only some of those is the
+  // defect this line exists to catch.
+  assert.equal(PLUS_PRICE_EUR, 19.99);
 });
 
 test("de gepubliceerde tabel komt uit dezelfde bron als de controle", () => {
   const md = fairUseTableMarkdown();
-  assert.ok(md.includes("€ 12,99/maand"));
+  assert.ok(md.includes("€ 19,99/maand"));
   for (const limit of FAIR_USE_LIMITS) {
     assert.ok(md.includes(limit.label), `${limit.key} ontbreekt in de tabel`);
   }

@@ -144,3 +144,57 @@ database — the components take their data as props. **Hand it rows that exerci
 the same bug is invisible against an empty list, because `[].filter(cb)` never calls `cb`.
 
 When you add a screen to this line, add it there.
+
+# The Arabic vocabulary is decided, and the decisions are written down
+
+A native speaker reviewed the Arabic interface twice — every word on a button, then every heading,
+label, hint, error and explanation — against what each control DOES, not against the Dutch word
+alone. Two things came out of it, and both live in `src/lib/i18n/ar-decisions.ts`:
+
+- **one Arabic wording per Dutch source**, for the strings the interface had been saying two or
+  three ways;
+- **the splits that must stay split**, where one Arabic word had been serving two Dutch meanings —
+  a `bon` is a receipt and never an invoice, `doorsturen` is forwarding and not sending, `uitzetten`
+  disables a setting while `stoppen` ends a run. Each carries its reason, because the next reader's
+  instinct is to unify them, and that instinct is what produced the drift the audit found.
+
+`[AR-TERMEN]` holds both, plus the retired forms in either language. So: **do not re-decide a word
+that is in that file.** If you believe a ruling is wrong, change it there, once, where the reason
+is written — not in `messages.ts`, where the next person cannot see that anyone decided anything.
+
+And `[KNOP-IN-ZIN]`: a sentence that names a button names what the button currently says. That
+broke three times — twice from a rename, once from a button that was removed while the sentence
+telling people to press it stayed, in all three languages.
+
+`btw` stays untranslated — it is what the owner reads on a letter from the Belastingdienst — but it
+is written ONE way inside Arabic, lowercase, and a gate asserts that rather than listing forms. The
+English went the other way and says **`VAT`**, because `BTW` there is only a Dutch abbreviation an
+English reader does not know — with one exception, the legal field «BTW number». Two
+things sit either side of it and neither is the other: **«الضريبة»** is the bare label for a tax
+AMOUNT, and **«رقم btw»** is the identification number. One key was labelling both, two rows apart
+in the same panel, because Dutch "BTW" carries both readings.
+
+One trap worth naming, because it cost a round: a retired wording is normally retired **as a
+label**, and most of them are perfectly good Arabic inside a sentence — «حاول مرة أخرى» closes 85
+error messages correctly. So the retired list is matched on the WHOLE value, and a wording that
+names a control has to be listed a second time, in `AR_RETIRED_EVERYWHERE`, to be refused inside
+sentences as well. Until that existed, four failures reported «فشل فكّ الربط» above a button
+reading «إلغاء الربط» — and `AR_SETTLED` was prescribing the retired wording while `AR_RETIRED`
+forbade it, with no test able to see the contradiction. The lists now check each other.
+
+# A lifecycle gate must not mark its own bounds with a comment
+
+Many gates in `src/lib/lifecycle-gates.test.ts` read a file through `code()` and then cut a window
+out of it — "the rollback branch is between HERE and THERE" — before asserting over that window.
+
+`code()` strips comments. So a marker that lives in a comment is not in the string being cut, and
+`indexOf` returns `-1`. The window then runs to the END of the file, and the gate quietly measures
+something far larger than it claims.
+
+That happened to `[UREN-EENMALIG]`, whose window ended at `"[ARTIKEL-LEREN]"` — a comment. For
+months the only thing bounding it was a 3000-character ceiling meant as a sanity check, and the
+gate went red the moment a second branch was added after the one it was watching. Nothing was
+wrong with the code it guarded; the gate had stopped being able to see where it ended.
+
+**Cut on real code, and assert the marker was found.** A `slice` whose second argument may be `-1`
+is a gate that passes for the wrong reason on the day it matters.

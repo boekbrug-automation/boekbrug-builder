@@ -46,6 +46,11 @@ import {
 import { supplierNameKey } from "@/lib/supplier-registry"
 import { resolveImportTarget, ensureImportedFolder } from "@/lib/bestanden"
 import { computeContentHash } from "@/lib/content-hash"
+// [BEWAAR-EERST] Shared with /api/bank/attach-invoice — one keep-the-file path, not two.
+import { storeRawIncoming } from "@/lib/store-raw-incoming"
+// [BEWAAR-EERST] The label the skipped panel counts, so a file we could not read yet gets its
+// "Lees opnieuw" button — see skipped-import.ts and [TWEEDE-KANS].
+import { DOC_TYPE_COULD_NOT_READ } from "@/lib/skipped-import"
 import { buildFolderBreadcrumb } from "@/lib/documents"
 import { importBankStatement } from "@/lib/bank-ingest"
 import { logAuditAction, getClientIP } from "@/lib/audit"
@@ -91,7 +96,7 @@ import { findSemanticDuplicate, pickDedupMatch, normalizeToIso, type PossibleDup
 // [DUP-TRASHED] De uitzondering op de byte-hash-poort voor een bestand dat de eigenaar zelf heeft
 // weggegooid. Gedeeld met /api/email/upload, /api/bank/attach-invoice en de mailsync — vier kopieën
 // van deze redenering zouden drie kansen zijn dat er één uit de pas gaat lopen.
-import { releaseTrashedHash, trashedDuplicateCleared } from "@/lib/trashed-dedup"
+import { trashedDuplicateCleared } from "@/lib/trashed-dedup"
 import { collectPossibleDuplicate, mergePossibleDuplicate, markDuplicateCheckUnavailable } from "@/lib/possible-duplicate-collect"
 // [READING-MEMORY] Feed the reader what the owner keeps correcting at each supplier.
 import { readingPromptHint } from "@/lib/reading-memory"
@@ -117,6 +122,8 @@ import { gateFairUse, gateFairUseForRead } from "@/lib/fair-use-gate";
 import { amsterdamToday } from "@/lib/format-nl";
 import { supplierBtwForInvoice } from "@/lib/vendor-identity"
 import { telWoord, vervoeg } from "@/lib/nl-plural";
+// [NUL-GRONDSLAG] What may be stored when the split was not read — see read-amounts.ts.
+import { amountsToStore, markUnexplainedZeroBtw } from "@/lib/read-amounts";
 type InvoiceFieldConfidence =
   Database["public"]["Tables"]["invoices"]["Insert"]["field_confidence"]
 
@@ -498,15 +505,46 @@ async function runIntake(req: NextRequest) {
       lookupOwnInvoice: makeOwnInvoiceLookup(supabase, user.id),
     })
   } catch (aiErr) {
-    console.error("[AI-CONFIG-SAFE] intake AI read failed — filing nothing, asking for retry", aiErr)
+    // ── [BEWAAR-EERST] The file is kept BEFORE anything else is decided about it ──────────────
+    //
+    // This branch used to store nothing and answer 503 "probeer het zo meteen opnieuw", and the
+    // comment four lines up said so out loud: "Nothing is stored for the image/PDF path until
+    // AFTER this call, so returning here files nothing." That is a reader outage discarding a
+    // document the owner had already handed us. During an outage of hours it discards it again on
+    // every retry, and the only copy left is the one on their phone.
+    //
+    // The two doors into this app disagreed about that, and the weaker one was the one a HUMAN
+    // stands at: the e-mail sync keeps every attachment it cannot read (saveKeptAttachment) and
+    // holds the watermark so it is read again by itself. Upload threw it away.
+    //
+    // So the bytes are stored first, labelled could_not_read — which is exactly what the skipped
+    // panel counts, so the file arrives there WITH the "Lees opnieuw" button [TWEEDE-KANS] already
+    // on it. No new screen, no new state: the machinery for the second attempt was already built,
+    // it was simply never handed anything from this door.
+    console.error("[BEWAAR-EERST] intake AI read failed — keeping the file, asking nobody to upload it again", aiErr)
+    // ai_processed:false, because it was not. A row that claims a read that never happened is the
+    // kind of small lie the reader-quality panel then reports as a successful read.
+    const keptId = await storeRawIncoming(buffer, file, user.id, supabase, DOC_TYPE_COULD_NOT_READ, source, { aiProcessed: false })
     // [FAIR-USE] Mislukt = niet gelezen = niet geteld. /eerlijk-gebruik §3 belooft dat
     // letterlijk, en het is ook gewoon eerlijk: een storing van ons mag de gebruiker geen
     // document van zijn maandtegoed kosten.
     await gate.release()
-    return NextResponse.json(
-      { error: "We konden dit bestand nu niet lezen. Probeer het zo meteen opnieuw." },
-      { status: 503 },
-    )
+    // [NO-SILENT-EMPTY] And if the STORE failed too, then we really are empty-handed, and the
+    // owner must be told to keep the file — the one answer where "upload it again" is the truth.
+    if (!keptId) {
+      return NextResponse.json(
+        { error: "We konden dit bestand nu niet lezen én niet bewaren. Bewaar het zelf even en probeer het zo meteen opnieuw." },
+        { status: 503 },
+      )
+    }
+    return NextResponse.json({
+      ok: true,
+      destination: "document",
+      documentId: keptId,
+      // Not an error, because nothing went wrong for the owner: the file is in, and the app owes
+      // them the read. It says the one thing that saves them work — do not upload this again.
+      message: "Automatisch inlezen lukt op dit moment niet. Je bestand is bewaard — je hoeft het niet opnieuw te uploaden. Je vindt het bij Inkomend onder \u201eOvergeslagen bij import\u201d, met een knop om het opnieuw te laten lezen.",
+    })
   }
 
   // [FAIR-USE §3] Een oordeel dat vóór enige model-aanroep viel (ongeldige PDF) heeft geen
@@ -1318,6 +1356,18 @@ async function runIntake(req: NextRequest) {
   // bar. One flag covers both landings — the invoice that would book as 'received' and the bon
   // that would settle as paid — since both are the app acting without a tap.
   const magAutoBoeken = await autoBoekenAllowed(supabase, user.id)
+  // [NUL-GRONDSLAG] What may be STORED, decided once. `?? 0` here made an amount that was never
+  // read indistinguishable from a real zero, and a zero base on a purchase invoice is a claim that
+  // the bill cost nothing — the engine reads kosten off that field. One rule, one place, so the
+  // health verdict below and the row itself can never disagree about the same invoice.
+  const storedAmounts = amountsToStore({
+    totalExBtw: v.total_ex_btw, btwAmount: v.btw_amount, totalIncBtw: v.total_inc_btw, amount: v.amount,
+  });
+  // [NUL-GRONDSLAG] …and the fallback's zero BTW says so. Mutated on the object the insert below
+  // already carries, so there is one field_confidence for this row and not two.
+  Object.assign(fieldConfidence, markUnexplainedZeroBtw({}, storedAmounts, {
+    btwRate: v.btw_rate, shifted: (v.field_confidence as { _btw_verlegd?: unknown } | null)?._btw_verlegd != null,
+  }));
   const autoAdv = !magAutoBoeken
     ? // Its own reason string, ahead of every quality check: "waiting because you asked to see
       // everything" must never read as "the read was weak" — the audit row and the queue both
@@ -1355,9 +1405,11 @@ btwContradictsDocument: btwContradictionOf(v.field_confidence),
 // auto-booking doors must ask it: a gate on one door is not a gate.
 eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
           health: {
-            total_ex_btw: v.total_ex_btw ?? 0,
-            btw_amount: v.btw_amount ?? 0,
-            total_inc_btw: v.total_inc_btw ?? v.amount ?? 0,
+            // [NUL-GRONDSLAG] The health verdict must be about the figures that will be STORED,
+            // or the queue judges one row and the books carry another.
+            total_ex_btw: storedAmounts.total_ex_btw,
+            btw_amount: storedAmounts.btw_amount,
+            total_inc_btw: storedAmounts.total_inc_btw,
             invoice_date: invoiceDate,
             invoice_number: v.invoice_number ?? null,
             invoice_type: v.is_credit_note === true ? "creditnota" : "factuur",
@@ -1444,9 +1496,15 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
       invoice_type: v.is_credit_note === true ? "creditnota" : "factuur",
       // [AANSLAG] Which tax a Belastingdienst letter concerns; null on an ordinary invoice.
       tax_kind: v.tax_kind ?? null,
-      total_ex_btw: v.total_ex_btw ?? 0,
-      btw_amount: v.btw_amount ?? 0,
-      total_inc_btw: v.total_inc_btw ?? v.amount ?? 0,
+      // [NUL-GRONDSLAG] The base was `?? 0`, which stored an amount that was NOT READ as a real
+      // zero — and a zero base on a purchase invoice is a claim that the bill cost nothing. The
+      // engine books kosten from this field. amountsToStore keeps a read split exactly as read and,
+      // when there was none, falls back to the gross as net with no BTW claimed — the same
+      // conservative rule the bank-attach door already used, so the cost is counted rather than
+      // dropped and nothing is deducted off a document we could not read.
+      total_ex_btw: storedAmounts.total_ex_btw,
+      btw_amount: storedAmounts.btw_amount,
+      total_inc_btw: storedAmounts.total_inc_btw,
       pdf_url: pdfUrl,
       document_id: documentId,
       vendor_iban: v.vendor_iban ?? null,
@@ -1638,52 +1696,6 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
 // if it is a fresh file whose store failed. Skips storage when this exact file (byte-hash) already
 // exists, so a corrected re-upload never piles up document rows. Rolls back the storage blob if the
 // documents row fails, so a failed store never leaks an orphan.
-async function storeRawIncoming(
-  buffer: Buffer,
-  file: File,
-  userId: string,
-  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
-  aiDocType: string,
-  source: IntakeSource,
-): Promise<string | null> {
-  const hash = computeContentHash(buffer)
-  try {
-    const { data: existing } = await supabase
-      .from("documents").select("id, trashed").eq("user_id", userId).eq("content_hash", hash).limit(1).maybeSingle()
-    // [DUP-TRASHED] Een weggegooide rij teruggeven zou de boeking koppelen aan bewijs dat de eigenaar
-    // niet meer ziet staan. Sleutel vrijgeven en vers opslaan; lukt dat niet, dan loopt de insert
-    // hieronder op de UNIQUE index stuk en valt dit terug op "geen document" — dit is en blijft
-    // best-effort opslag, de boeking zelf is de money-truth.
-    if (existing?.id && existing.trashed !== true) return existing.id
-    if (existing?.id) await releaseTrashedHash(supabase, userId, existing.id)
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_")
-    const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
-    const { error: upErr } = await supabase.storage
-      .from("documents").upload(storagePath, buffer, { contentType: file.type || "application/octet-stream", upsert: false })
-    if (upErr) {
-      console.error("[STORE-RAW] storage upload failed — the file is NOT kept", { userId, file: file.name, error: upErr.message })
-      return null
-    }
-    const folderId = await ensureImportedFolder(userId, "pipeline")
-    const pipelineDoc = createPipelineClient()
-    const { data: doc, error: docErr } = await pipelineDoc.from("documents").insert({
-      user_id: userId, file_name: file.name, file_url: storagePath,
-      file_size: buffer.length, file_type: file.type || "application/octet-stream",
-      doc_type: "overig", folder_id: folderId, source,
-      ai_processed: true, ai_doc_type: aiDocType, content_hash: hash,
-    }).select("id").single()
-    if (docErr || !doc) {
-      console.error("[STORE-RAW] documents insert failed — the file is NOT kept", { userId, file: file.name, error: docErr?.message })
-      await supabase.storage.from("documents").remove([storagePath]).catch(() => {})
-      return null
-    }
-    return doc.id
-  } catch (e) {
-    console.error("[STORE-RAW] unexpected failure — the file is NOT kept", { userId, file: file.name, error: e instanceof Error ? e.message : String(e) })
-    return null // storage is a convenience; the booking is the money-truth
-  }
-}
-
 // ── [UBL-INTAKE] UBL / Peppol XML e-invoice handler ─────────────────────────────────────────
 // Parses the standard UBL leaf elements and creates a verify-queue invoice (status 'processing')
 // so an e-invoice's BTW/voorbelasting flows into Crediteuren + the aangifte like a PDF invoice,

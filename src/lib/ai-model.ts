@@ -78,6 +78,51 @@ export function isAiCredentialError(error: unknown): boolean {
 }
 
 /**
+ * [GEEN-KREDIET] Is the ACCOUNT out of credit?
+ *
+ * The fourth member of the outage family, and it was missing on the day it happened. Anthropic
+ * answers an exhausted balance with HTTP 400 and `invalid_request_error` — "Your credit balance is
+ * too low to access the Anthropic API" — which is a status and a type that every existing guard
+ * reads as this document's fault:
+ *
+ *   · isTransientAiError  matches 429 and 5xx only              → 400 is not transient
+ *   · isModelUnavailableError  matches 404 / not_found / model:  → no
+ *   · isAiCredentialError  matches invalid[_ ]?api, auth, permission → `invalid_request_error`
+ *                          is not `invalid_api`, so no
+ *   · isAiBudgetError      is THIS app's own daily fuse, not the provider's balance → no
+ *
+ * So the e-mail sync buried every invoice that arrived during the outage as could_not_read and
+ * moved the watermark past it. That is the exact failure [COST-GUARD] describes one screen up,
+ * caused by a different empty wallet: app-wide, never the document's fault, and self-healing the
+ * moment someone tops up. It must HOLD.
+ *
+ * Deliberately NOT folded into isAiConfigError. That union is pinned to the regex the sync used
+ * before it was extracted, by a test that exists to stop this file quietly changing the sync's
+ * behaviour — so a new condition joins as its own predicate and is wired in where it is consumed,
+ * where a reader can see it happen.
+ *
+ * A 402 is matched as well: the message is what Anthropic sends today, the status is what a
+ * payment-required response is by definition, and a predicate guarding money should not hinge on
+ * a sentence a provider may rewrite.
+ */
+export function isAiCreditError(error: unknown): boolean {
+  const message = messageOf(error);
+  if (/\bAPI error\s+402\b/i.test(message)) return true;
+  return /credit balance is too low|insufficient[_ ]?(quota|credit|funds)|payment[_ ]?required|billing[_ ]?error/i.test(message);
+}
+
+/**
+ * What the owner is told. The same sentence the daily fuse uses, and for the same reason: from
+ * where they sit these are one event — reading is off for a moment, through no act of theirs, and
+ * nothing they have handed us is lost. Blaming them, or sending them to a setting they do not own,
+ * would be false.
+ *
+ * Dutch string: UI text shown to the owner, per the language rule in AGENTS.md.
+ */
+export const AI_CREDIT_MESSAGE =
+  "Automatisch inlezen is even niet beschikbaar. Je kunt het bestand gewoon opslaan en de gegevens zelf invullen — er gaat niets verloren.";
+
+/**
  * App-wide configuration error: model or key. Never the fault of whichever file happened to come
  * past, so never a reason to file that document as "unreadable".
  */

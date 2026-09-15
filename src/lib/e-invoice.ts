@@ -368,6 +368,12 @@ function isoDay(v: string | null): string | null {
  * survives every other check in the building. The amounts are internally consistent, the file
  * validates against Peppol, and nothing downstream has a currency to compare against.
  *
+ * Not the same rule as [VREEMDE-VALUTA] (vreemde-valuta.ts), which asks the same question about a
+ * currency the MODEL read off a PDF. There an unrecognisable symbol ("kr", a bare "$") must not
+ * count, because it is an OCR guess; here the value came from a validated XML field that is a
+ * currency code by construction, so anything that is not EUR is refused — and refusing is cheap:
+ * only this witness is dropped, the document is still read.
+ *
  * EXPORTED because there are TWO doors onto the same bytes and only one of them asked. A Peppol
  * invoice arriving as a PDF attachment goes through parseEInvoice/complete() and was refused; the
  * same invoice uploaded as a standalone .xml goes through parseUblInvoice in /api/intake, which

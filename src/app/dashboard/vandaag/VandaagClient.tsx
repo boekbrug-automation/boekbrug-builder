@@ -27,6 +27,8 @@ import { useRouter } from "next/navigation";
 // [TODAY-UX-FIELDS] Display-only formatters (single source of truth). formatEuroNL
 // simply RENDERS a stored number; no arithmetic happens in "Vandaag".
 import { formatEuroNL, formatDateNL, amsterdamToday } from "@/lib/format-nl";
+// [CREDIT-TERUG] The creditnotas that still owe the customer money — decided in the pure rule.
+import type { RefundableCredit } from "@/lib/credited-invoices";
 import { FONT, COLUMN } from "@/lib/design/tokens";
 import { rowMatchesQuery } from "@/lib/search";
 // [SORT] Same ordering module as Inkoopfacturen (IncomingManageClient) — one
@@ -88,6 +90,8 @@ interface Props {
   // [OFFERTE-OPVOLGING] List 3 — verstuurde offertes die bijna of al verlopen zijn. Alleen de
   // rijen die volgens offerte-followup.ts aandacht vragen; de rest komt hier niet eens aan.
   offertes?: VandaagOfferte[];
+  /** [CREDIT-TERUG] List 4 — creditnotas still to refund; null when that read failed (then said). */
+  refunds?: RefundableCredit[] | null;
   loadFailed?: boolean; // [COHERENCE-ERRSTATE] true when a server query errored
   toVerifyCount?: number; // [P1-STUCK-PROCESSING] incoming invoices stuck in the verify queue
   datelessPayableCount?: number; // [DATELESS-TASK] confirmed incoming bills with no due date (else invisible)
@@ -185,7 +189,7 @@ const VANDAAG_SORTS = SORTS.filter((s) => VANDAAG_SORT_KEYS.includes(s.id));
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function VandaagClient({ payable, remind, offertes = [], loadFailed, toVerifyCount = 0, datelessPayableCount = 0, zelf = null, werk = null }: Props) {
+export default function VandaagClient({ payable, remind, offertes = [], refunds = [], loadFailed, toVerifyCount = 0, datelessPayableCount = 0, zelf = null, werk = null }: Props) {
   const t = translator(useLocale())
   const router = useRouter();
   // [HAND-DUBBEL] De app-brede bevestigingsdialoog (DialogProvider staat in de root layout).
@@ -327,8 +331,12 @@ export default function VandaagClient({ payable, remind, offertes = [], loadFail
   // "niets te doen" zeggen terwijl er drie offertes koud staan te worden — precies de valse
   // geruststelling die deze pagina nergens mag geven.
   const zichtbareOffertes = offertes.filter((o) => !dismissed.has(o.id));
+  // [CREDIT-TERUG] A failed read is not an empty list: it keeps the section, which then says so.
+  const refundsUnknown = refunds === null;
+  const zichtbareRefunds = (refunds ?? []).filter((r) => !dismissed.has(r.id));
   const nothingToDo =
-    visiblePayable.length === 0 && visibleRemind.length === 0 && zichtbareOffertes.length === 0;
+    visiblePayable.length === 0 && visibleRemind.length === 0 && zichtbareOffertes.length === 0
+    && zichtbareRefunds.length === 0 && !refundsUnknown;
 
   // [SEARCH] In-page live filter. Smart: while searching it WIDENS beyond today's
   // 3-day window to the full payable/remind sets (minus dismissed), so you can find
@@ -583,6 +591,13 @@ export default function VandaagClient({ payable, remind, offertes = [], loadFail
           {zichtbareOffertes.length > 0 && (
             <OfferteSection offertes={zichtbareOffertes} onOpen={open} onDismiss={dismiss} />
           )}
+          {/* [CREDIT-TERUG] Money the owner OWES: a creditnota against a paid invoice. Its own
+              section for the same reason the offertes have one — nothing on the invoice card
+              (Betalen, "te laat", an open amount) is a word that fits a refund. The button goes to
+              the sales list, on the row, where "Voldaan!" records the refund. */}
+          {(zichtbareRefunds.length > 0 || refundsUnknown) && (
+            <RefundSection refunds={zichtbareRefunds} unknown={refundsUnknown} onOpen={(id) => router.push(`/dashboard/facturen?focus=${id}`)} onDismiss={dismiss} />
+          )}
         </>
       )}
     </div>
@@ -699,6 +714,80 @@ function OfferteSection({
           );
         })}
       </div>
+    </section>
+  );
+}
+
+// [CREDIT-TERUG] The creditnotas that still owe the customer money. The AMOUNT is what the pure
+// rule decided has to go back — not the creditnota's total, which a credit against an unpaid
+// invoice never returns. A standalone creditnota (an invoice outside BoekBrug) is flagged: there
+// was no invoice to compare with, so the owner judges whether the customer had paid.
+function RefundSection({
+  refunds,
+  unknown,
+  onOpen,
+  onDismiss,
+}: {
+  refunds: RefundableCredit[];
+  unknown: boolean;
+  onOpen: (id: string) => void;
+  onDismiss: (id: string) => void;
+}) {
+  const t = translator(useLocale())
+  const telling =
+    refunds.length === 1 ? t('vandaag.terugbetalenEen') : t('vandaag.terugbetalenMeer', { n: refunds.length });
+  return (
+    <section style={{ marginBottom: 32 }}>
+      <header style={{ marginBottom: 12 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 600, color: M3.onSurface, margin: 0 }}>
+          {t('vandaag.terugbetalen')}
+        </h2>
+        <p style={{ fontSize: 13.5, color: M3.onSurfaceVariant, margin: '2px 0 0' }}>
+          {t('vandaag.terugbetalenUitleg')}{unknown ? '' : ` · ${telling}`}
+        </p>
+      </header>
+      {unknown ? (
+        <p style={{ fontSize: 13.5, color: M3.error, margin: 0 }}>{t('vandaag.terugbetalenMislukt')}</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {refunds.map((r) => (
+            <div
+              key={r.id}
+              style={{
+                background: M3.surface, borderRadius: 14, padding: '12px 14px',
+                border: `1px solid ${M3.outlineVariant}`,
+                display: 'flex', alignItems: 'center', gap: 12,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ fontSize: 15, fontWeight: 500, color: M3.onSurface, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.clientName?.trim() || t('vandaag.onbekendePartij')}
+                </p>
+                <p style={{ fontSize: 12.5, color: M3.onSurfaceVariant, margin: '2px 0 0' }}>
+                  {r.invoiceNumber ?? ''}{r.invoiceNumber && r.invoiceDate ? ' · ' : ''}{r.invoiceDate ? formatDateNL(r.invoiceDate) : ''}
+                  {r.standalone ? ` · ${t('vandaag.terugbetalenLos')}` : ''}
+                </p>
+              </div>
+              <span style={{ fontSize: 14, color: M3.onSurfaceVariant, fontFamily: 'Roboto Mono, monospace', whiteSpace: 'nowrap' }}>
+                {formatEuroNL(r.amount)}
+              </span>
+              <button
+                onClick={() => onOpen(r.id)}
+                style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: M3.primary, color: 'white', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}
+              >
+                {t('vandaag.bekijken')}
+              </button>
+              <button
+                onClick={() => onDismiss(r.id)}
+                aria-label={t('vandaag.verbergenVandaag')}
+                style={{ background: 'none', border: 'none', color: M3.onSurfaceVariant, fontSize: 18, cursor: 'pointer', lineHeight: 1, padding: 0 }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

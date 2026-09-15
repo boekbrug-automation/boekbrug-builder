@@ -36,6 +36,8 @@ import { createNotification } from "@/lib/notifications";
 import { shareStatus } from "@/lib/package-share";
 import { logAuditAction } from "@/lib/audit";
 import type { Quarter } from "@/lib/closing-package";
+// [MERK-VOET] The sign-off, from the one place that defines it.
+import { merkVoet } from "@/lib/mail-merk";
 
 /**
  * Eén gezicht voor elke weigering, in HTML — de lezer is een boekhouder die in zijn mailbox op
@@ -51,7 +53,7 @@ function weiger(status: number, zin: string): NextResponse {
 <h1 style="font-size:18px;color:#202124;margin:0 0 10px">Deze link werkt niet meer</h1>
 <p style="font-size:14.5px;color:#5F6368;line-height:1.6;margin:0">${zin}</p>
 <p style="font-size:13px;color:#5F6368;line-height:1.6;margin:14px 0 0">Vraag je klant om een nieuwe link te sturen — dat kost hem één tik.</p>
-<p style="font-size:12px;color:#9aa0a6;margin:26px 0 0">BoekBrug — De brug tussen jou en je boekhouder</p>
+${merkVoet()}
 </main></body></html>`;
   return new NextResponse(body, {
     status,

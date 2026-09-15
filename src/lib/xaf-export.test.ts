@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildXafFile, snapRate, xmlCommentSafe, type XafInput } from "./xaf-export";
+import { buildXafFile, snapRate, xmlCommentSafe, bankLineDescription, type XafInput } from "./xaf-export";
 
 function baseInput(): XafInput {
   return {
@@ -84,13 +84,92 @@ test("a purchase invoice books kosten + voorbelasting against crediteuren", () =
   assert.match(r.xml, /<custSupID>C00001<\/custSupID>/);
 });
 
+// ── [XAF-OMSCHRIJVING] A bank entry says what it is, before what the bank called it ────────────
+//
+// The live case that started this: an owner opened their own ledger, found a row reading
+// `USTD//Factuur:20260005` against Debiteuren, and could not tell what it was. It was the receipt
+// of their own invoice 20260005 from Stichting Contour de Twern. `USTD` is the bank's marker for
+// unstructured remittance information; the payer had simply typed "Factuur:20260005".
+test("[XAF-OMSCHRIJVING] a settled invoice is named, and the bank's own text is kept", () => {
+  const ontvangst = bankLineDescription({
+    amount: 401.99, description: "USTD//Factuur:20260005/", linkedInvoiceDirection: "outgoing",
+    linkedInvoiceNumber: "20260005", counterpartName: "Stichting ContourdeTwern", posSettlement: false,
+  });
+  assert.equal(ontvangst, "Ontvangst verkoopfactuur 20260005 · Stichting ContourdeTwern (USTD//Factuur:20260005/)");
+  // What the app knows comes FIRST: the entry description is clipped at 100 and the label must survive it.
+  assert.ok(ontvangst.indexOf("20260005") < 40, "the invoice number must survive the clip");
+
+  // The verb follows the SIGN, not the document: a refund on a sales invoice is money going OUT.
+  assert.match(bankLineDescription({
+    amount: -401.99, description: null, linkedInvoiceDirection: "outgoing",
+    linkedInvoiceNumber: "20260005", counterpartName: null, posSettlement: false,
+  }), /^Terugbetaling verkoopfactuur 20260005$/);
+  assert.match(bankLineDescription({
+    amount: -2725, description: "SEPA", linkedInvoiceDirection: "incoming",
+    linkedInvoiceNumber: "F2", counterpartName: "HVO Meat", posSettlement: false,
+  }), /^Betaling inkoopfactuur F2 · HVO Meat \(SEPA\)$/);
+  assert.match(bankLineDescription({
+    amount: 120, description: null, linkedInvoiceDirection: "incoming",
+    linkedInvoiceNumber: "F2", counterpartName: null, posSettlement: false,
+  }), /^Terugontvangst inkoopfactuur F2$/, "a supplier refunding you is not a payment by you");
+});
+
+test("[XAF-OMSCHRIJVING] what the app does not know, it does not invent", () => {
+  // A card payout: named for what it is, with the acquirer beside it.
+  assert.equal(bankLineDescription({
+    amount: 230.4, description: "USTD//AFREK. BETAALAUTOMAAT VIDB REFNR. F9Q3BH/", linkedInvoiceDirection: null,
+    linkedInvoiceNumber: null, counterpartName: "ING DD&C", posSettlement: true,
+  }), "Afrekening betaalautomaat · ING DD&C (USTD//AFREK. BETAALAUTOMAAT VIDB REFNR. F9Q3BH/)");
+
+  // Nothing linked: the counterparty is the most the app can honestly say.
+  assert.equal(bankLineDescription({
+    amount: -49, description: "Kosten pakket", linkedInvoiceDirection: null,
+    linkedInvoiceNumber: null, counterpartName: "ING Bank", posSettlement: false,
+  }), "ING Bank (Kosten pakket)");
+  // Not even that: the old fallback, unchanged.
+  assert.equal(bankLineDescription({
+    amount: -49, description: null, linkedInvoiceDirection: null,
+    linkedInvoiceNumber: null, counterpartName: null, posSettlement: false,
+  }), "Bankmutatie");
+  // The bank text is never LOST — a mutation the app cannot place is still traceable to the
+  // statement, which is the whole point of keeping it.
+  assert.equal(bankLineDescription({
+    amount: -49, description: "Pn000037785", linkedInvoiceDirection: null,
+    linkedInvoiceNumber: null, counterpartName: null, posSettlement: false,
+  }), "Bankmutatie (Pn000037785)");
+  // …and never said twice when the bank's text IS what the app would have said.
+  assert.equal(bankLineDescription({
+    amount: -49, description: "ING Bank", linkedInvoiceDirection: null,
+    linkedInvoiceNumber: null, counterpartName: "ING Bank", posSettlement: false,
+  }), "ING Bank");
+  // A linked invoice with no number: the document kind still beats the bank's code.
+  assert.equal(bankLineDescription({
+    amount: 100, description: "USTD//x/", linkedInvoiceDirection: "outgoing",
+    linkedInvoiceNumber: null, counterpartName: null, posSettlement: false,
+  }), "Ontvangst verkoopfactuur (USTD//x/)");
+});
+
+test("[XAF-OMSCHRIJVING] the description reaches the file, on the entry and on both its lines", () => {
+  const input = baseInput();
+  input.bank.push({
+    id: "b1", date: "2026-08-21", amount: 401.99, description: "USTD//Factuur:20260005/",
+    category: null, linkedInvoiceDirection: "outgoing", linkedInvoiceNumber: "20260005",
+    counterpartName: "Stichting ContourdeTwern", posSettlement: false,
+  });
+  const xml = buildXafFile(input).xml;
+  const descs = [...xml.matchAll(/<desc>(.*?)<\/desc>/g)].map((m) => m[1]);
+  const named = descs.filter((d) => d.startsWith("Ontvangst verkoopfactuur 20260005"));
+  assert.equal(named.length, 3, "the journal entry and both of its trLines carry it");
+  assert.ok(!descs.some((d) => d.startsWith("USTD//")), "no line may lead with the bank's own code");
+});
+
 test("bank counter-accounts follow what the app KNOWS: link, card payout, else vraagposten", () => {
   const input = baseInput();
   input.bank.push(
-    { id: "b1", date: "2026-01-05", amount: 121, description: "ontvangst factuur", category: null, linkedInvoiceDirection: "outgoing", posSettlement: false },
-    { id: "b2", date: "2026-01-06", amount: -218, description: "betaling sligro", category: null, linkedInvoiceDirection: "incoming", posSettlement: false },
-    { id: "b3", date: "2026-01-07", amount: 500.5, description: "CCV batch 12", category: "omzet", linkedInvoiceDirection: null, posSettlement: true },
-    { id: "b4", date: "2026-01-08", amount: -40, description: "parkeren", category: "kosten", linkedInvoiceDirection: null, posSettlement: false },
+    { id: "b1", date: "2026-01-05", amount: 121, description: "ontvangst factuur", category: null, linkedInvoiceDirection: "outgoing", linkedInvoiceNumber: null, counterpartName: "Vermeulen BV", posSettlement: false },
+    { id: "b2", date: "2026-01-06", amount: -218, description: "betaling sligro", category: null, linkedInvoiceDirection: "incoming", linkedInvoiceNumber: null, counterpartName: "HVO Meat", posSettlement: false },
+    { id: "b3", date: "2026-01-07", amount: 500.5, description: "CCV batch 12", category: "omzet", linkedInvoiceDirection: null, linkedInvoiceNumber: null, counterpartName: "CCV Nederland", posSettlement: true },
+    { id: "b4", date: "2026-01-08", amount: -40, description: "parkeren", category: "kosten", linkedInvoiceDirection: null, linkedInvoiceNumber: null, counterpartName: null, posSettlement: false },
   );
   const r = buildXafFile(input);
   const got = lines(r.xml);
@@ -585,10 +664,10 @@ function richInput(): XafInput {
     { id: "ob", invoiceNumber: null, invoiceDate: "2026-07-31", vendorName: "Belastingdienst", totalExBtw: 300, btwAmount: 0, taxKind: "omzetbelasting" },
   ];
   input.bank = [
-    { id: "b1", date: "2026-03-20", amount: 1120, description: "Vermeulen betaalt 20260001", category: null, linkedInvoiceDirection: "outgoing", posSettlement: false },
-    { id: "b2", date: "2026-06-01", amount: -2725, description: "HVO Meat F2", category: null, linkedInvoiceDirection: "incoming", posSettlement: false },
-    { id: "b3", date: "2026-06-02", amount: 350.5, description: "CCV payout", category: "pos_income", posSettlement: true, linkedInvoiceDirection: null },
-    { id: "b4", date: "2026-06-03", amount: -49, description: "Bankkosten", category: "fee", posSettlement: false, linkedInvoiceDirection: null },
+    { id: "b1", date: "2026-03-20", amount: 1120, description: "Vermeulen betaalt 20260001", category: null, linkedInvoiceDirection: "outgoing", linkedInvoiceNumber: null, counterpartName: "Vermeulen BV", posSettlement: false },
+    { id: "b2", date: "2026-06-01", amount: -2725, description: "HVO Meat F2", category: null, linkedInvoiceDirection: "incoming", linkedInvoiceNumber: null, counterpartName: "HVO Meat", posSettlement: false },
+    { id: "b3", date: "2026-06-02", amount: 350.5, description: "CCV payout", category: "pos_income", posSettlement: true, linkedInvoiceNumber: null, counterpartName: "CCV Nederland", linkedInvoiceDirection: null },
+    { id: "b4", date: "2026-06-03", amount: -49, description: "Bankkosten", category: "fee", posSettlement: false, linkedInvoiceNumber: null, counterpartName: null, linkedInvoiceDirection: null },
   ];
   input.cash = [
     { id: "c1", date: "2026-06-04", direction: "out", amount: 121, category: "kosten", btwRate: 21, documentId: "doc-1", invoiceId: null, coveredByTurnover: false },

@@ -48,6 +48,9 @@ import { CLIENT_EXTRA_LINE_COLUMNS } from '@/lib/client-extra-lines'
 import {
   linesFromEntries, parseTimeEntryIds, verifyStamped, type TimeEntry, type TimeEntryIdsRefusal,
 } from '@/lib/uren'
+// [RITTEN-EENMALIG] Travel onto the invoice, through the same door and with the same guarantee:
+// the SERVER builds the lines from the log and stamps the trips in the same request.
+import { linesFromTrips, parseMileageIds, type MileageEntry, type MileageIdsRefusal } from '@/lib/ritten'
 
 export const dynamic = 'force-dynamic'
 
@@ -84,6 +87,21 @@ const UREN_REFUSAL_NL: Record<TimeEntryIdsRefusal | 'none_billable' | 'no_rate',
   too_many: 'Meer dan 200 uren op één factuur kan niet. Splits ze over twee facturen.',
   none_billable: 'Deze uren staan al op een factuur, of bestaan niet meer. Ververs de pagina.',
   no_rate: 'Bij deze uren staat nog geen uurtarief. Vul het tarief in, dan kunnen ze op de factuur.',
+}
+
+/**
+ * [RITTEN] Waarom een rit niet gefactureerd kon worden.
+ *
+ * Dutch in an English file, for the reason the UREN block above gives: these sentences are shown
+ * to the owner, and one route answering in two languages would be worse than either.
+ */
+const RITTEN_REFUSAL_NL: Record<MileageIdsRefusal | 'none_billable' | 'no_rate', string> = {
+  not_a_list: 'De ritten konden niet worden gelezen. Ververs de pagina en probeer het opnieuw.',
+  not_an_id: 'De ritten konden niet worden gelezen. Ververs de pagina en probeer het opnieuw.',
+  empty: 'Kies eerst welke ritten op de factuur moeten.',
+  too_many: 'Meer dan 200 ritten op één factuur kan niet. Splits ze over twee facturen.',
+  none_billable: 'Deze ritten staan al op een factuur, of bestaan niet meer. Ververs de pagina.',
+  no_rate: 'Bij deze ritten staat geen tarief per kilometer. Vul het in, dan kunnen ze op de factuur.',
 }
 
 const DB_TYPE: Record<Soort, string> = {
@@ -219,6 +237,63 @@ export async function POST(request: NextRequest) {
       // de uren. Alles hieronder — validatie, totalen, korting, de INSERT — is daarna ongewijzigd.
       body.lines = gebouwd.lines
       urenIds = gebouwd.billedIds
+    }
+
+    // ── [RITTEN-EENMALIG] Reiskosten factureren: de regels komen uit de KILOMETERADMINISTRATIE ──
+    //
+    // Same shape as the hours above, and for the same reason: the amount on the invoice and the
+    // trip it rests on must be one claim, not two. The lines are APPENDED — an owner billing a
+    // month of work plus the travel to it sends both lists, and the travel belongs under the work.
+    //
+    // Only own, not-yet-invoiced trips come along. `user_id = ownerId` is the owner filter on a
+    // service_role client, where RLS does not look ([RLS-UIT]).
+    let ritIds: string[] = []
+    if (body.mileage_entry_ids !== undefined && body.mileage_entry_ids !== null) {
+      const gevraagd = parseMileageIds(body.mileage_entry_ids)
+      if (!gevraagd.ok) {
+        return NextResponse.json({ error: RITTEN_REFUSAL_NL[gevraagd.code], code: gevraagd.code }, { status: 400 })
+      }
+      let ritten: MileageEntry[] | null = null
+      let ritErr: { message: string } | null = null
+      try {
+        ritten = await fetchAllRowsForIds(gevraagd.ids, (chunk, from, to) =>
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (pipeline as any)
+            .from('mileage_entries')
+            .select('id, client_id, driven_on, from_place, to_place, purpose, kilometers, rate_per_km, business, invoice_id')
+            .in('id', chunk)
+            .eq('user_id', ownerId)
+            .is('invoice_id', null)
+            .order('id', { ascending: true })
+            .range(from, to),
+        )
+      } catch (e) {
+        ritErr = { message: e instanceof Error ? e.message : 'ritten read failed' }
+      }
+
+      // [NO-SILENT-EMPTY] An unreachable database must not look like "no trips" — that would be an
+      // invoice without the lines it was asked for, and the trips would stay billable.
+      if (ritErr) {
+        console.error('[RITTEN] ritten lezen mislukt — geen concept gemaakt', { ritErr })
+        return NextResponse.json(
+          { error: 'De ritten konden niet worden gelezen. Probeer het opnieuw.' },
+          { status: 503 },
+        )
+      }
+
+      const gevonden = (ritten ?? []) as MileageEntry[]
+      if (gevonden.length === 0) {
+        return NextResponse.json({ error: RITTEN_REFUSAL_NL.none_billable, code: 'none_billable' }, { status: 409 })
+      }
+
+      // [TARIEF-STRIKT] The RAW value: Number(null) is 0, a legal rate, and a body carrying
+      // ritten_btw_rate: null would bill the whole travel invoice at 0%.
+      const gebouwdeRitten = linesFromTrips(gevonden, body.ritten_btw_rate)
+      if (gebouwdeRitten.lines.length === 0) {
+        return NextResponse.json({ error: RITTEN_REFUSAL_NL.no_rate, code: 'no_rate' }, { status: 409 })
+      }
+      body.lines = [...(Array.isArray(body.lines) ? body.lines : []), ...gebouwdeRitten.lines]
+      ritIds = gebouwdeRitten.billedIds
     }
 
     // ── De regels, gecontroleerd vóór ze de database raken ───────────────────
@@ -463,6 +538,31 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ── [CREDITNOTA-EXTERN] The invoice a standalone creditnota corrects, in its OWN write ──
+    //
+    // Same shape as the country above, same reason: creditnota_external_reference.sql is newer
+    // than some installations, and one unknown column in the INSERT would cost the creditnota.
+    // The document stands; the reference is a separate update that may fail, loudly, naming the
+    // migration — and the send door then refuses the standalone creditnota until it is there.
+    if (soort === 'creditnota') {
+      const verwezenNummer = typeof body.credited_invoice_number === 'string' ? body.credited_invoice_number.trim() : ''
+      const verwezenDatum =
+        typeof body.credited_invoice_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.credited_invoice_date)
+          ? body.credited_invoice_date
+          : null
+      if (verwezenNummer) {
+        const { error: refErr } = await pipeline
+          .from('invoices')
+          .update({ credited_invoice_number: verwezenNummer, credited_invoice_date: verwezenDatum } as never)
+          .eq('id', factuur.id)
+          .eq('sender_id', ownerId)
+        if (refErr) {
+          console.warn('[CREDITNOTA-EXTERN] de verwijzing naar de gecrediteerde factuur kon niet worden opgeslagen — pas ' +
+            'supabase/migrations/creditnota_external_reference.sql toe', { invoiceId: factuur.id, error: refErr.message })
+        }
+      }
+    }
+
     // ── De regels ────────────────────────────────────────────────────────────
     const bron = body.lines as Array<Record<string, unknown>>
     // [UNIT] `unit` komt uit migratie invoice_line_unit.sql en gaat via dezelfde terugval
@@ -613,6 +713,54 @@ export async function POST(request: NextRequest) {
             error: 'De uren konden niet aan deze factuur worden gekoppeld, dus is de factuur niet aangemaakt. ' +
               'Ververs de pagina — waarschijnlijk staan ze inmiddels op een andere factuur.',
             code: 'uren_not_linked',
+          },
+          { status: 409 },
+        )
+      }
+    }
+
+    // [RITTEN-EENMALIG] Dezelfde vastzetstap voor de ritten, met dezelfde uitkomst als er ook maar
+    // één niet terugkomt: de factuur gaat weg. Het opruimen maakt ÓÓK de uren weer los — die zijn
+    // hierboven al aan deze factuur gehangen, en een uur dat naar een verwijderde factuur wijst is
+    // precies het spook dat de foreign key hoort te voorkomen.
+    if (ritIds.length > 0) {
+      const vastgezetteRitten: Array<{ id: string }> = []
+      let ritLinkErr: { message: string } | null = null
+      for (const chunk of chunkIds(ritIds)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: brok, error: brokErr } = await (pipeline as any)
+          .from('mileage_entries')
+          .update({ invoice_id: factuur.id, updated_at: new Date().toISOString() })
+          .in('id', chunk)
+          .eq('user_id', ownerId)
+          // De RACE, niet de netheid: twee tabbladen die dezelfde ritten factureren komen hier
+          // allebei langs, en de tweede krijgt nul rijen terug.
+          .is('invoice_id', null)
+          .select('id')
+        if (brokErr) { ritLinkErr = brokErr; break }
+        vastgezetteRitten.push(...((brok ?? []) as Array<{ id: string }>))
+      }
+
+      const ritUitkomst = ritLinkErr
+        ? { ok: false as const, missing: ritIds }
+        : verifyStamped(ritIds, vastgezetteRitten.map((r) => r.id))
+
+      if (!ritUitkomst.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (pipeline as any).from('mileage_entries').update({ invoice_id: null })
+          .eq('invoice_id', factuur.id).eq('user_id', ownerId)
+        await pipeline.from('time_entries').update({ invoice_id: null })
+          .eq('invoice_id', factuur.id).eq('user_id', ownerId)
+        await pipeline.from('invoice_lines').delete().eq('invoice_id', factuur.id)
+        await pipeline.from('invoices').delete().eq('id', factuur.id)
+        console.error('[RITTEN-EENMALIG] ritten niet vastgezet — concept teruggedraaid', {
+          invoiceId: factuur.id, gevraagd: ritIds.length, missing: ritUitkomst.missing.length, ritLinkErr,
+        })
+        return NextResponse.json(
+          {
+            error: 'De ritten konden niet aan deze factuur worden gekoppeld, dus is de factuur niet aangemaakt. ' +
+              'Ververs de pagina — waarschijnlijk staan ze inmiddels op een andere factuur.',
+            code: 'ritten_not_linked',
           },
           { status: 409 },
         )

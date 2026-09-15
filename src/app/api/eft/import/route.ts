@@ -98,7 +98,13 @@ export async function POST(req: NextRequest) {
 
   // [FAIR-USE] Het tweede hek: de gepubliceerde maandgrens. Het hek hierboven gaat over
   // snelheid, dit over hoeveel er gratis in een maand past. Faalt open, en een weigering
-  // pauzeert alleen dit ene automatische uitlezen — het bestand zelf wordt gewoon bewaard.
+  // pauzeert alleen dit ene automatische uitlezen.
+  //
+  // [BEWAAR-EERST] Dit is een PREVIEW-route: er wordt niets opgeslagen, ook niet bij succes —
+  // de eigenaar leest de afrekening na en pas de COMMIT-stap hierboven schrijft. De vorige
+  // versie van deze regel beloofde "het bestand zelf wordt gewoon bewaard", en dat was niet
+  // waar. Er gaat niets verloren dat de app had: de bon staat nog op de telefoon, en er is een
+  // weg zonder lezer — dezelfde route neemt overgetypte tekst aan (1a hierboven).
   const gate = await gateFairUse({ client: supabase, userId: user.id, metric: "aiDocuments" });
   if (!gate.allowed) return gate.response!;
 
@@ -109,7 +115,13 @@ export async function POST(req: NextRequest) {
   } catch {
     // [FAIR-USE] Niet gelezen, dus niet geteld.
     await gate.release();
-    return NextResponse.json({ error: "kon de afrekening niet lezen" }, { status: 502 });
+    // [LEZER-STIL] En de weg die WEL open is, staat in de zin. Deze route neemt de bon ook als
+    // getypte tekst aan (1a), volledig zonder lezer — een storing van ons is hier dus geen
+    // doodlopende weg, tenzij niemand het zegt.
+    return NextResponse.json(
+      { error: "Automatisch inlezen lukt op dit moment niet. Je kunt de totalen van de bon ook zelf overtypen — dan gaat het verder zonder inlezen." },
+      { status: 502 },
+    );
   }
 
   const { settlement, warnings } = parseEftSettlement(text);

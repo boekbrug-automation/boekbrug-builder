@@ -36,7 +36,7 @@ import { createServerSupabaseClient } from '@/lib/supabase-server'
 // [ACTING-FOR] The registry is the OWNER's; an employee acting for them writes into it.
 import { getActingFor } from '@/lib/acting-for-server'
 import { invoiceOwnerId } from '@/lib/acting-for'
-import { planSupplierMerge, type MergeSupplier } from '@/lib/supplier-merge'
+import { planSupplierMerge, planOwnerMerge, type MergeSupplier } from '@/lib/supplier-merge'
 import { supplierNameKey, isReliableSupplierName, identityIban } from '@/lib/supplier-registry'
 import { supplierAliasSupported } from '@/lib/supplier-alias-write'
 import { logAuditAction, getClientIP } from '@/lib/audit'
@@ -60,7 +60,9 @@ export async function POST(req: NextRequest) {
   if (!acting) return NextResponse.json({ error: 'Niet ingelogd' }, { status: 401 })
   const ownerId = invoiceOwnerId(acting)
 
-  let body: { survivorId?: string; mergedAwayId?: string }
+  // [SAMENVOEGEN-EIGENAAR] byOwner: the owner named this pair in the edit sheet. The vetoes are
+  // still the server's; only the missing-evidence refusal is theirs to overrule.
+  let body: { survivorId?: string; mergedAwayId?: string; byOwner?: boolean }
   try {
     body = await req.json()
   } catch {
@@ -129,9 +131,21 @@ export async function POST(req: NextRequest) {
   const b = asMerge(found[1])
 
   // ── The decision, made here on what was read ──
+  const byOwner = body.byOwner === true
   const plan = planSupplierMerge(a, b)
   if (!plan.ok) {
-    return NextResponse.json({ error: 'refused', reason: plan.reason }, { status: 409 })
+    // Only 'no-evidence' may be overruled, and only by an owner who named the pair. A veto —
+    // two KVK numbers, two own accounts — is a fact and stands whoever asks.
+    if (!(byOwner && plan.reason === 'no-evidence')) {
+      return NextResponse.json({ error: 'refused', reason: plan.reason }, { status: 409 })
+    }
+  }
+  // [SAMENVOEGEN-EIGENAAR] The owner's pair, in the owner's direction, re-judged on what was read.
+  const decision = byOwner
+    ? planOwnerMerge(a.id === askedSurvivor ? a : b, a.id === askedSurvivor ? b : a)
+    : plan
+  if (!decision.ok) {
+    return NextResponse.json({ error: 'refused', reason: decision.reason }, { status: 409 })
   }
   // The PAIR is the server's to judge, and it just did. The DIRECTION is the owner's: they read a
   // sentence naming which company keeps its name, and once both vetoes have passed the two rows are
@@ -144,7 +158,7 @@ export async function POST(req: NextRequest) {
   // supplier has an archived invoice, they are the tie-breaker for which name survives, and
   // overruling the owner on that difference would refuse a perfectly good merge for good: the
   // screen would keep proposing what the server keeps rejecting, with nothing changing in between.
-  if (plan.survivorId !== askedSurvivor && plan.mergedAwayId !== askedSurvivor) {
+  if (!byOwner && plan.ok && plan.survivorId !== askedSurvivor && plan.mergedAwayId !== askedSurvivor) {
     return NextResponse.json({ error: 'stale', reason: 'direction-changed' }, { status: 409 })
   }
 
@@ -258,8 +272,9 @@ export async function POST(req: NextRequest) {
     oldValue: { merged_away_id: mergedAway.id, merged_away_name: mergedAway.name },
     newValue: {
       name: survivor.name,
-      evidence: plan.evidence,
-      shared_value: plan.sharedValue,
+      evidence: decision.evidence,
+      shared_value: decision.sharedValue,
+      by_owner: byOwner,
       invoices_moved: movedCount,
       alias_stored: aliasStored,
       row_removed: removed,

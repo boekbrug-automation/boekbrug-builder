@@ -18,6 +18,8 @@ import type { PayBlock } from './pay-block'
 import { customerMailFrom } from './mail-from'
 // [MAIL-TEKST] De teksthelft van elke mail — zie de kop van mail-text.ts.
 import { htmlToMailText } from './mail-text'
+// [MERK-VOET] De afzendregel onder elke mail, uit één bron — zie de kop van mail-merk.ts.
+import { merkKop, merkVoet, merkVoetTekst, MERK_URL } from './mail-merk'
 import { telWoord, vervoeg } from "./nl-plural";
 
 // [BUILD-SAFE] Construct the Resend client LAZILY, on first send — not at module
@@ -164,6 +166,7 @@ export async function sendAccountantInvite({
     subject: `${zzperName} wil je toevoegen als boekhouder`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Je bent uitgenodigd</h2>
         <p style="color: #555;">${escapeHtml(zzperName)} wil je toevoegen als boekhouder via BoekBrug.</p>
         <p style="color: #555;">Als je accepteert, zie je automatisch alle facturen van ${escapeHtml(zzperName)} in jouw dashboard.</p>
@@ -171,7 +174,7 @@ export async function sendAccountantInvite({
            style="display:inline-block; background:#1a73e8; color:#fff; padding:12px 24px; border-radius:10px; text-decoration:none; font-weight:600; margin-top:16px;">
           Uitnodiging accepteren
         </a>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `
   })
@@ -193,12 +196,13 @@ export async function sendClientInvite({
   // [TRUST-DELIVERY] Capture Resend's { error } — it does NOT throw on an API
   // rejection — and throw so the caller (invite route) rolls back the pending row
   // and returns a retryable error instead of a silent dead-end.
-  const { error: sendError } = await getResend().emails.send({
+  const __sendResult = await getResend().emails.send({
     from: 'BoekBrug <noreply@boekbrug.nl>',
     to: toEmail,
     subject: `${accountantName} nodigt je uit op BoekBrug`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Je bent uitgenodigd</h2>
         <p style="color: #555;">Je boekhouder <strong>${escapeHtml(accountantName)}</strong> nodigt je uit om BoekBrug te gebruiken.</p>
         <p style="color: #555;">Via BoekBrug kun je eenvoudig facturen delen met je boekhouder — geen WhatsApp meer, geen e-mail zoeken.</p>
@@ -215,13 +219,11 @@ export async function sendClientInvite({
           (<strong>${escapeHtml(toEmail)}</strong>), want de uitnodiging hoort daarbij.
         </p>
         <p style="color: #5f6368; font-size: 12px;">Deze uitnodiging verloopt na 14 dagen.</p>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `
   })
-  if (sendError) {
-    throw new Error(`Resend afgewezen: ${sendError.message ?? 'onbekende fout'}`)
-  }
+  await deliverEmail(__sendResult, { label: 'client-invite', critical: true })
 }
 
 // ── [ACTING-FOR] Uitnodiging voor een verkoopmedewerker ──────────────────────────
@@ -238,12 +240,13 @@ export async function sendMemberInvite({
   companyName: string
   acceptUrl: string
 }) {
-  const { error: sendError } = await getResend().emails.send({
+  const __sendResult = await getResend().emails.send({
     from: 'BoekBrug <noreply@boekbrug.nl>',
     to: toEmail,
     subject: `${companyName} vraagt je om facturen te maken op BoekBrug`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Facturen maken voor ${escapeHtml(companyName)}</h2>
         <p style="color: #555;"><strong>${escapeHtml(companyName)}</strong> geeft je toegang tot BoekBrug om verkoopfacturen te maken en te versturen.</p>
         <p style="color: #555;">Wat dat betekent, in gewone woorden:</p>
@@ -257,12 +260,11 @@ export async function sendMemberInvite({
           Toegang accepteren
         </a>
         <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">Deze uitnodiging verloopt na 14 dagen. Verwacht je hem niet? Klik dan niet, en laat het ${escapeHtml(companyName)} weten.</p>
+        ${merkVoet()}
       </div>
     `
   })
-  if (sendError) {
-    throw new Error(`Resend afgewezen: ${sendError.message ?? 'onbekende fout'}`)
-  }
+  await deliverEmail(__sendResult, { label: 'member-invite', critical: true })
 }
 
 // ── إيميل للعميل عند استلام فاتورة ───────────────────────────────────────────
@@ -410,10 +412,10 @@ export async function sendInvoiceToClient({
     ublAttachment ? 'Ook bijgevoegd: een e-factuur (UBL) voor je boekhoudpakket.' : '',
     antwoordAdres ? `Vragen? Antwoord op deze mail of mail ${antwoordAdres}.` : '',
     '',
-    'BoekBrug — De brug tussen jou en je boekhouder',
+    merkVoetTekst(),
   ].filter((r, i, a) => r !== '' || a[i - 1] !== '').join('\n')
 
-  const { error: sendError } = await getResend().emails.send({
+  const __sendResult = await getResend().emails.send({
     from: customerMailFrom(zzperName),
     to: toEmail,
     // [ANTWOORD-ADRES] Beantwoorden komt bij de ondernemer terecht, niet bij noreply@.
@@ -441,7 +443,7 @@ export async function sendInvoiceToClient({
         ${attachmentLine}
         ${eFactuurRegel}
         ${contactRegel}
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `,
     // [FACTUUR-A] Attach the legal PDF — only when rendering succeeded.
@@ -465,10 +467,10 @@ export async function sendInvoiceToClient({
         }
       : {})
   })
-  if (sendError) {
-    // Surface the real reason; the caller treats any throw here as email_failed.
-    throw new Error(`Resend afgewezen: ${sendError.message ?? 'onbekende fout'}`)
-  }
+  // [TRUST-DELIVERY] critical: true, so this still THROWS and the caller's catch still marks the
+  // invoice email_failed — the behaviour the route depends on. What it adds is the labelled log
+  // line every other sender already produced; this one failed silently into a bare Error.
+  await deliverEmail(__sendResult, { label: 'invoice-to-client', critical: true })
 }
 
 // ── BOEK-007: إيميل إشعار رسالة جديدة ────────────────────────────────────────
@@ -491,6 +493,7 @@ export async function sendMessageNotification({
     subject: `Nieuw bericht van ${senderName}`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Nieuw bericht</h2>
         <p style="color: #555;">Beste ${escapeHtml(receiverName)},</p>
         <p style="color: #555;"><strong>${escapeHtml(senderName)}</strong> heeft je een bericht gestuurd via BoekBrug.</p>
@@ -501,7 +504,7 @@ export async function sendMessageNotification({
            style="display:inline-block; background:#1a73e8; color:#fff; padding:12px 24px; border-radius:10px; text-decoration:none; font-weight:600; margin-top:8px;">
           Bericht bekijken
         </a>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `
   })
@@ -523,11 +526,12 @@ export async function sendAccountantUnlinkedNotification({
     subject: `${clientName} heeft de koppeling beëindigd`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Koppeling beëindigd</h2>
         <p style="color: #555;">Beste ${escapeHtml(accountantName)},</p>
         <p style="color: #555;"><strong>${escapeHtml(clientName)}</strong> heeft de koppeling met jou als boekhouder beëindigd via BoekBrug.</p>
         <p style="color: #555;">Je hebt geen toegang meer tot nieuwe facturen of documenten van deze klant. Historische gegevens waar je eerder aan hebt gewerkt, blijven beschikbaar voor je administratie.</p>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `
   })
@@ -550,11 +554,12 @@ export async function sendClientUnlinkedNotification({
     subject: `${accountantName} heeft de koppeling beëindigd`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Koppeling beëindigd</h2>
         <p style="color: #555;">Beste ${escapeHtml(clientName)},</p>
         <p style="color: #555;">Je boekhouder <strong>${escapeHtml(accountantName)}</strong> heeft de koppeling met jou beëindigd via BoekBrug.</p>
         <p style="color: #555;">Je facturen en documenten blijven volledig van jou en blijven beschikbaar in je account. Je kunt op elk moment een nieuwe boekhouder uitnodigen via je instellingen.</p>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `
   })
@@ -593,13 +598,12 @@ export async function sendDraftQueueEmail({
     subject,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Bericht van je boekhouder</h2>
         <div style="background:#f8f9fa; border-radius:12px; padding:16px; margin:20px 0; color:#202124; line-height:1.5;">
           ${safeBody}
         </div>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">
-          ${escapeHtml(accountantName)} · via BoekBrug — De brug tussen jou en je boekhouder
-        </p>
+        ${merkVoet(MERK_URL, `${accountantName} · via BoekBrug`)}
       </div>
     `
   })
@@ -668,6 +672,7 @@ export async function sendAccountExportSummary({
     subject: 'Je BoekBrug-gegevensexport',
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Je gegevensexport is klaar</h2>
         <p style="color: #555;">Je hebt een export van je BoekBrug-gegevens gedownload op ${datum}.</p>
         <div style="background:#f8f9fa; border-radius:12px; padding:16px; margin:20px 0;">
@@ -679,7 +684,7 @@ export async function sendAccountExportSummary({
         het volledige overzicht: wat er per bestand in zit, en wat er bewust niet in zit en waarom.</p>
         ${skippedLine}
         <p style="color: #555; font-size: 13px;">Heb je deze export niet zelf aangevraagd? Neem dan direct contact met ons op.</p>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `
   })
@@ -818,7 +823,7 @@ export async function sendInvoiceReminder({
         ${attachmentLine}
         <p style="color: #5f6368; font-size: 13px;">Heb je deze factuur al betaald? Dan kun je deze ${wik ? 'aanmaning' : 'herinnering'} als niet verzonden beschouwen.</p>
         ${contactRegel}
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `,
     ...(pdfBuffer
@@ -874,6 +879,7 @@ export async function sendPaymentFailedEmail({
     subject: 'Je betaling is niet gelukt',
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">De betaling is niet gelukt</h2>
         <p style="color: #555;">Beste ${escapeHtml(name)},</p>
         <p style="color: #555;">
@@ -891,7 +897,7 @@ export async function sendPaymentFailedEmail({
         <p style="color: #5f6368; font-size: 13px;">
           Heb je je gegevens net al aangepast? Dan kun je deze mail negeren.
         </p>
-        <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `,
   })
@@ -979,6 +985,7 @@ export async function sendQuarterPackageLink({
           Samengesteld met BoekBrug — je klant houdt zijn administratie daar bij en levert hem
           hiermee in één keer aan.
         </p>
+        ${merkVoet()}
       </div>
     `,
   })
@@ -1042,6 +1049,7 @@ export async function sendQuarterReadyToAccountant({
     subject: `${escapeHtml(clientName)} — ${quarterLabel} staat klaar`,
     html: `
       <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color:#202124; font-size:20px; margin:0 0 4px;">${escapeHtml(quarterLabel)} staat klaar</h2>
         <p style="color:#5f6368; font-size:15px; margin:0 0 20px;">van ${escapeHtml(clientName)}</p>
 
@@ -1069,7 +1077,7 @@ export async function sendQuarterReadyToAccountant({
           gemarkeerd — zijn concepten blijven van hem. BoekBrug is voor jou gratis tot en met
           tien gekoppelde klanten.
         </p>
-        <p style="color:#aaa; font-size:12px; margin-top:28px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `,
   })
@@ -1130,6 +1138,7 @@ export async function sendRetentionWarning({
     subject: 'Je administratie bij BoekBrug wordt over 30 dagen verwijderd',
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+        ${merkKop()}
         <h2 style="color: #202124;">Nog 30 dagen om je administratie op te halen</h2>
         <p style="color: #555;">${aanhef}</p>
         <p style="color: #555;">${termijn} Over <strong>30 dagen</strong> verwijderen wij je gegevens definitief.</p>
@@ -1137,7 +1146,7 @@ export async function sendRetentionWarning({
         ${knop}
         <p style="color: #555; font-size: 13px;">Wil je je administratie langer bewaren? Dat kan met de Bewaarkluis. Log in en kies zelf tot welk jaar.</p>
         <p style="color: #5f6368; font-size: 12px; margin-top: 32px;">Je krijgt deze mail omdat je BoekBrug-account is beëindigd en wij je administratie sindsdien hebben bewaard. Dit is de aankondiging uit artikel 5.7.5 van onze voorwaarden.</p>
-        <p style="color: #5f6368; font-size: 12px;">BoekBrug — De brug tussen jou en je boekhouder</p>
+        ${merkVoet()}
       </div>
     `,
   })

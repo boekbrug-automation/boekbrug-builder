@@ -134,6 +134,10 @@ export async function GET(req: NextRequest) {
   // een vastzittende bijlage staat, en om dezelfde reden juist.
 
   let synced = 0, failed = 0, saved = 0, truncated = 0;
+  // [LEZER-STIL] Mailboxes whose documents were HELD because the reader itself was unavailable.
+  // Deliberately not folded into `failed`: those are per-mailbox errors that throw, and a held run
+  // throws nothing at all — which is exactly why it needs a counter of its own.
+  let readerOutages = 0;
   // [CRON-FAIRNESS] Rotate the start each run so a fixed tail of mailboxes never permanently starves
   // when the list can't finish within maxDuration. The cron fires once a day at a FIXED hour, so
   // getUTCHours() was constant → the same tail starved forever. Key the offset off the EPOCH DAY: it
@@ -154,6 +158,10 @@ export async function GET(req: NextRequest) {
     try {
       let r = await syncUserEmails(uid);
       if (r) { synced += 1; saved += r.saved; }
+      // [LEZER-STIL] A reader that refuses app-wide holds every attachment and throws nothing, so
+      // without this the run is written ok:true and the heartbeat watchman reports a healthy
+      // machine while not one document is being read.
+      if (r?.readerOutage) readerOutages += 1;
       // [CRON-DRAIN] syncUserEmails caps NEW classifications per call (SYNC_BATCH_MAX). Keep
       // syncing while items remain, bounded by a round cap — BUT stop the moment a round makes NO
       // progress, so a poison-pill attachment (one that fails to import every round and keeps the
@@ -208,7 +216,18 @@ export async function GET(req: NextRequest) {
   }
 
   // [CRON-HARTSLAG] De uitkomst vastleggen. Best effort: dit mag de cron nooit laten vallen.
-  await finishCronRun(createPipelineClient(), cronRunId, { ok: failed === 0, result: { ok: failed === 0, connections: userIds.length, synced, failed, saved, truncated } });
+  // [LEZER-STIL] A held run is not a successful run. Marking it ok:false is what makes the EXISTING
+  // watchman speak ([BEHEER-GEZOND] in the morning cron, and /dashboard/beheer) — no new alarm, no
+  // new table, no second thing to keep alive. The reason travels with it, so the mail says WHICH
+  // silence this is: nothing was READ, rather than nothing arrived.
+  const gezond = failed === 0 && readerOutages === 0;
+  await finishCronRun(createPipelineClient(), cronRunId, {
+    ok: gezond,
+    ...(readerOutages > 0
+      ? { error: `de lezer was niet beschikbaar voor ${readerOutages} postbus(sen) — documenten zijn vastgehouden, niet overgeslagen` }
+      : {}),
+    result: { ok: gezond, connections: userIds.length, synced, failed, readerOutages, saved, truncated },
+  });
 
-  return NextResponse.json({ ok: true, connections: userIds.length, synced, failed, saved, truncated });
+  return NextResponse.json({ ok: gezond, connections: userIds.length, synced, failed, readerOutages, saved, truncated });
 }

@@ -25,7 +25,7 @@ original does not.
 |---|---|---|
 | The customer card opens each invoice; a late invoice is chipped late on the card; the card offers its own edit | every package | `klanten/[id]` |
 | A customer with invoices or work on it cannot be deleted; the refusal names the counts | every package | `DELETE /api/clients` |
-| "Nog een keer" on a sent sales invoice → a new concept for editing | Moneybird "Kopieer", e-Boekhouden "Kopiëren" | sales list |
+| "Kopie maken" on a sent sales invoice → a new concept for editing | Moneybird "Kopieer", e-Boekhouden "Kopiëren" | sales list |
 | Openstaand and Te laat above the sales list, counted server-side over every invoice | Moneybird, Tellow, Xero | sales list header |
 | Share the pay link as a WhatsApp message | Mollie request page, Tellow, Moneybird | betaalverzoek modal |
 | The supplier's name opens that supplier's invoices | every package | Leveranciers → Crediteuren `?zoek=` |

@@ -17,6 +17,8 @@ import { round2 } from '@/lib/invoice-totals'
 import { staysAFactuur } from '@/lib/negative-line'
 // [KOMMA-INVOER] The one comma-safe money field, shared with the builder and the credit screen.
 import DecimalInput from '@/components/ui/DecimalInput'
+import AdresZoeker from '@/components/AdresZoeker'
+import BtwControle from '@/components/BtwControle'
 import { createClient } from '@/lib/supabase'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
@@ -37,6 +39,8 @@ import DateFieldNL from '@/components/ui/DateFieldNL'
 import { MAX_EXTRA_LINE_LENGTH } from '@/lib/client-extra-lines'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
+// [CREDITNOTA-EXTERN] The door's own rule for a standalone creditnota, asked here first.
+import { checkStandaloneCreditnota } from '@/lib/creditnota'
 
 // [VERLEGD-VERKOOP] The rate menu's sentinel for 'btw verlegd': not a rate, so a value no rate can
 // collide with, translated back into (0%, vat_treatment='reverse_charge') the moment it is chosen.
@@ -78,9 +82,10 @@ export default function InvoiceEditPage() {
   // [HERSTEL] A sent invoice, fully editable while nothing is attached to it.
   const [canCorrectSent, setCanCorrectSent] = useState(false)
   // [OFFERTE-BEWERKBAAR] Dit scherm wist niet WAT het bewerkte. Het heette "Factuur bewerken" boven
-  // een offerte, en zijn bevestiging beloofde "de factuur" te versturen — terwijl versturen een
-  // offerte OMZET in een genummerde factuur (send-route, isConversion). Eén tik, onomkeerbaar
-  // (Art. 35), en het woord offerte kwam nergens voor.
+  // een offerte, en zijn bevestiging beloofde "de factuur" te versturen.
+  // [OFFERTE-GEEN-OMZETTING] Versturen van een offerte ZETTE hem om in een genummerde factuur
+  // (send-route). Dat pad is weg: een offerte gaat hier als offerte de deur uit (send-offerte, de
+  // deur die geen nummer kán slaan) en de factuur komt later via "Maak factuur aan" op de lijst.
   const [invoiceType, setInvoiceType] = useState<string>('factuur')
   const quote = isQuote(invoiceType)
   // [KORTING] Ook hier te wijzigen, niet alleen bij het aanmaken. Een korting die je alleen kunt
@@ -103,6 +108,12 @@ export default function InvoiceEditPage() {
   const [clientCity, setClientCity] = useState('')
   const [clientEmail, setClientEmail] = useState('')
   const [clientBtw, setClientBtw] = useState('')
+  // [CREDITNOTA-EXTERN] A standalone creditnota names the invoice it corrects (art. 219) — the
+  // number and date the owner typed for an invoice issued outside BoekBrug. A linked creditnota
+  // carries original_invoice_id instead and never shows these two.
+  const [creditedNumber, setCreditedNumber] = useState('')
+  const [creditedDate, setCreditedDate] = useState('')
+  const [originalInvoiceId, setOriginalInvoiceId] = useState<string | null>(null)
   // [KLANT-EXTRA] Twee vrije regels direct onder de klantnaam op het document — "t.a.v. …", een
   // afdeling of het inkoopordernummer dat de klant op de factuur wil zien. Leeg is de normale
   // toestand en levert precies het documentblok op dat er altijd al stond.
@@ -211,6 +222,10 @@ export default function InvoiceEditPage() {
       setClientPostal(invoice.client_postal_code || '')
       setClientCity(invoice.client_city || '')
       setClientBtw(invoice.client_btw_number || '')
+      // [CREDITNOTA-EXTERN] select('*') carries the two columns wherever the migration has run.
+      setOriginalInvoiceId(invoice.original_invoice_id ?? null)
+      setCreditedNumber((invoice as { credited_invoice_number?: string | null }).credited_invoice_number || '')
+      setCreditedDate((invoice as { credited_invoice_date?: string | null }).credited_invoice_date || '')
       setClientExtra1(invoice.client_extra_line1 || '')
       setClientExtra2(invoice.client_extra_line2 || '')
       setClientExtra3(invoice.client_extra_line3 || '')
@@ -377,6 +392,10 @@ export default function InvoiceEditPage() {
         // onderscheidt van "een oudere pagina die het veld niet kent".
         discount_type: invoiceType === 'creditnota' ? null : discountType,
         discount_value: invoiceType === 'creditnota' ? null : discountValue,
+        // [CREDITNOTA-EXTERN] Only a standalone creditnota carries these; the route writes them apart.
+        ...(invoiceType === 'creditnota' && !originalInvoiceId
+          ? { credited_invoice_number: creditedNumber, credited_invoice_date: creditedDate || null }
+          : {}),
         lines
       })
     })
@@ -415,6 +434,12 @@ export default function InvoiceEditPage() {
       setError(lineFault)
       return
     }
+    // [CREDITNOTA-EXTERN] The send door refuses a standalone creditnota that names no invoice
+    // (art. 219); asked here first, where the field is on the screen.
+    if (!checkStandaloneCreditnota({ invoiceType, originalInvoiceId, creditedNumber }).ok) {
+      setError(t('nieuw.fout.creditVerwijzing'))
+      return
+    }
 
     setSending(true)
     setError('')
@@ -445,6 +470,10 @@ export default function InvoiceEditPage() {
         // onherroepelijk mee de deur uit tegen de volle prijs.
         discount_type: invoiceType === 'creditnota' ? null : discountType,
         discount_value: invoiceType === 'creditnota' ? null : discountValue,
+        // [CREDITNOTA-EXTERN] Only a standalone creditnota carries these; the route writes them apart.
+        ...(invoiceType === 'creditnota' && !originalInvoiceId
+          ? { credited_invoice_number: creditedNumber, credited_invoice_date: creditedDate || null }
+          : {}),
         lines,
       }),
     })
@@ -456,12 +485,16 @@ export default function InvoiceEditPage() {
       return
     }
 
-    // 2. Call send endpoint (generates number, updates status, emails)
-    const sendRes = await fetch('/api/invoice/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ invoiceId }),
-    })
+    // 2. Deliver. [OFFERTE-GEEN-OMZETTING] A quote goes out AS a quote, through the door that
+    // cannot mint a number; the factuur comes later, from the sales list, through the new-invoice
+    // path. Everything else goes to the send route, which mints the number, sets the status and mails.
+    const sendRes = quote
+      ? await fetch(`/api/invoice/${invoiceId}/send-offerte`, { method: 'POST' })
+      : await fetch('/api/invoice/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ invoiceId }),
+        })
 
     if (!sendRes.ok) {
       const data = await sendRes.json().catch(() => ({}))
@@ -637,6 +670,20 @@ export default function InvoiceEditPage() {
                 />
               </div>
             </div>
+            {/* [ADRES-ECHT] Ook op het bewerkscherm. Het stelt alleen voor — de vastgelegde
+                momentopname van deze factuur verandert pas als de eigenaar Overnemen tikt, en
+                dat is precies de handeling die hij op dit scherm sowieso komt doen. */}
+            <AdresZoeker
+              postcode={clientPostal}
+              huisnummer={clientAddress.replace(/^\D+/, '')}
+              straat={clientAddress.replace(/\s*\d.*$/, '')}
+              plaats={clientCity}
+              onOvernemen={(adres) => {
+                setClientAddress(`${adres.street} ${adres.houseNumber}${adres.addition ? `-${adres.addition}` : ''}`)
+                setClientPostal(`${adres.postcode.slice(0, 4)} ${adres.postcode.slice(4)}`)
+                setClientCity(adres.city)
+              }}
+            />
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">{t('nieuw.klant.btw')}</label>
               <input
@@ -646,7 +693,31 @@ export default function InvoiceEditPage() {
                 placeholder="NL123456789B01"
               />
             </div>
+            {/* [EU-BTW] Ook hier: een verlegde levering met een ongeldig nummer laat
+                de btw bij de ondernemer liggen, en dit scherm is waar hij hem nog repareert. */}
+            <BtwControle nummer={clientBtw} />
           </div>
+          {/* [CREDITNOTA-EXTERN] The invoice this standalone creditnota corrects — named, or the
+              document is not a creditnota at all (art. 219). Printed on the PDF, carried in the e-factuur. */}
+          {invoiceType === 'creditnota' && !originalInvoiceId && (
+            <div className="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">{t('nieuw.credit.verwijzingNummer')}</label>
+                <input
+                  type="text" value={creditedNumber}
+                  onChange={e => setCreditedNumber(e.target.value)}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm"
+                  placeholder="2026-0123"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">{t('nieuw.credit.verwijzingDatum')}</label>
+                {/* [DATE-NL] Typed in dd-mm-jjjj, like every other date on this screen. */}
+                <DateFieldNL value={creditedDate} onChange={setCreditedDate} aria-label={t('nieuw.credit.verwijzingDatum')} />
+              </div>
+              <p className="col-span-2 text-xs text-gray-500">{t('nieuw.credit.verwijzingHint')}</p>
+            </div>
+          )}
         </div>
 
         {/* Datums */}
@@ -1038,7 +1109,7 @@ export default function InvoiceEditPage() {
                 disabled={saving || sending}
                 className="bg-blue-600 text-white px-6 py-3 rounded-xl text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
               >
-                {sending ? t('bewerk.verzendenBezig') : quote ? `✉ ${t('bewerk.omzettenVersturen')}` : `✉ ${t('bewerk.verstuurFactuur')}`}
+                {sending ? t('bewerk.verzendenBezig') : quote ? `✉ ${t('bewerk.offerteVersturen')}` : `✉ ${t('bewerk.verstuurFactuur')}`}
               </button>
             </>
           ) : canCorrectSent ? (
@@ -1087,22 +1158,25 @@ export default function InvoiceEditPage() {
             </h3>
             <p style={{ fontSize: 14, color: '#5F6368', marginBottom: 16, lineHeight: 1.5 }}>
               {quote
-                ? t('bewerk.omzetWaarschuwing')
+                ? t('bewerk.offerteBevestig')
                 : t('detail.bevestig')}
             </p>
             <dl style={{ fontSize: 13, marginBottom: 16, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px' }}>
               <dt style={{ color: '#5F6368', margin: 0 }}>{t('bewerk.modal.nummer')}</dt>
               <dd style={{ color: '#202124', fontWeight: 500, margin: 0 }}>
-                {invoiceNumber || t('bewerk.modal.nummerBijVerzending')}
+                {quote ? '—' : (invoiceNumber || t('bewerk.modal.nummerBijVerzending'))}
               </dd>
               <dt style={{ color: '#5F6368', margin: 0 }}>{t('bewerk.modal.email')}</dt>
               <dd style={{ color: '#202124', fontWeight: 500, margin: 0 }}>{clientEmail}</dd>
               <dt style={{ color: '#5F6368', margin: 0 }}>{t('bewerk.modal.bedrag')}</dt>
               <dd style={{ color: '#202124', fontWeight: 500, margin: 0 }}>€{totalInc.toFixed(2)}</dd>
             </dl>
-            <p style={{ fontSize: 12, color: '#B3261E', backgroundColor: '#FCE8E6', padding: 10, borderRadius: 8, marginBottom: 16, lineHeight: 1.5 }}>
-              ⚠ {t('bewerk.modal.waarschuwing')}
-            </p>
+            {/* [OFFERTE-GEEN-OMZETTING] A quote gets no number, so the number warning is not its. */}
+            {!quote && (
+              <p style={{ fontSize: 12, color: '#B3261E', backgroundColor: '#FCE8E6', padding: 10, borderRadius: 8, marginBottom: 16, lineHeight: 1.5 }}>
+                ⚠ {t('bewerk.modal.waarschuwing')}
+              </p>
+            )}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => setShowSendModal(false)}
                 style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid #E0E0E0', background: 'white', color: '#5F6368', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>

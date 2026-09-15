@@ -93,10 +93,14 @@ export async function POST() {
   // points have. A signal that reaches the matcher on /bank but not on the rematch sweep would make
   // the two disagree about the same line, which is worse than neither having it.
   const rawInvoices = invRows as (InvoiceForMatching & { supplier_id?: string | null })[];
+  // [BLIND-LEVERANCIER] This sweep is the one that most needs to know. It answers "examined
+  // everything, nothing new to link" — a sentence the owner reads as a fact about their
+  // administratie. Said while a matching signal was missing, it is a fact about a database.
+  const supplierIbans = await fetchSupplierIbans(pipeline, user.id, rawInvoices);
   const plan = planRematch({
     ignored: ignoredRows.map(rowToTransaction),
     pending: pendingRows.map(rowToTransaction),
-    invoices: withSupplierIbans(rawInvoices, await fetchSupplierIbans(pipeline, user.id, rawInvoices)),
+    invoices: withSupplierIbans(rawInvoices, supplierIbans.ibans),
   });
 
   // ── Reactivate the provable ones ────────────────────────────────────────────────────────────
@@ -187,5 +191,8 @@ export async function POST() {
     unchanged: plan.unchanged,
     booked,
     categorized,
+    // [BLIND-LEVERANCIER] Present only when a signal was actually lost, so the ordinary run says
+    // nothing and the sweep's own report stays as short as it was.
+    ...(supplierIbans.unavailable ? { supplierIbansUnavailable: true } : {}),
   });
 }

@@ -55,6 +55,9 @@ export default function PublicFooter() {
           <Link href="/privacy" style={link}>Privacyverklaring</Link>
           <Link href="/voorwaarden" style={link}>Algemene Voorwaarden</Link>
           <Link href="/cookies" style={link}>Cookiebeleid</Link>
+          {/* [DPA-BEREIKBAAR] An accountant may not hand us a client file without this.
+              It belongs where they look for it, beside the other three. */}
+          <Link href="/verwerkersovereenkomst" style={link}>Verwerkersovereenkomst</Link>
         </div>
       </div>
       <div style={{ borderTop: '1px solid #f1f3f4', padding: '16px 20px', textAlign: 'center', fontSize: 12, color: '#bdc1c6' }}>

@@ -56,11 +56,15 @@ import Link from 'next/link'
 import PublicHeader from '@/components/public-header'
 import PublicFooter from '@/components/public-footer'
 import { ACCOUNTANT_FREE_CLIENTS } from '@/lib/fair-use'
+import { OFFICE_GETS, OFFICE_NEVER_GETS, REJECTED_MODELS } from '@/lib/office-offer'
 import {
   ACCOUNTANT_BANDS,
   ACCOUNTANT_PRICING_ACTIVE,
+  REFERRAL_RATE_HYPOTHESIS,
   euro,
+  firstPaidBand,
   inclBtw,
+  referralCeilingExclBtw,
 } from '@/lib/accountant-pricing'
 
 export const metadata: Metadata = {
@@ -183,6 +187,17 @@ const SCHERMEN: ReadonlyArray<{ titel: string; uitleg: string }> = [
 /** The four questions an office asks that BoekBrug has to answer with "nee". */
 const NIET: ReadonlyArray<{ vraag: string; antwoord: string }> = [
   {
+    // [WERK-GEDAAN-DEUR] De helft van "wat levert het mij op?" die over geld gaat. Elk kantoor
+    // vraagt hem, en het antwoord is nee — dat hier niet zeggen laat het lijken alsof er nog over
+    // te praten valt, en dat is het soort stilte waar een gesprek later op stukloopt.
+    vraag: 'Krijg ik een vergoeding of marge als ik klanten aanbreng?',
+    antwoord:
+      'Nee. Er is geen commissie, geen marge en geen wederverkoop, en er is er ook geen in de maak — ' +
+      'noch gebouwd, noch geprijsd. Twee redenen, en de tweede is de jouwe: een betaalde aanbeveling ' +
+      'is voor je klant minder waard dan een onbetaalde, en je zou hem moeten melden. De rekensom ' +
+      'staat onder "En wat levert het jou op?" hierboven.',
+  },
+  {
     vraag: 'Doet BoekBrug de aangifte?',
     antwoord:
       'Nee. Het scherm BEREIDT de BTW-aangifte voor — het rekent de rubrieken uit en laat zien ' +
@@ -227,6 +242,13 @@ const NIET: ReadonlyArray<{ vraag: string; antwoord: string }> = [
 ]
 
 export default function VoorBoekhoudersPage() {
+  // [PROVISIE-REKENSOM] The band an office first pays for — the honest size to compare a
+  // commission against, and null-safe because a table of only free bands compares against nothing.
+  const paidBand = firstPaidBand()
+  // An open-ended first paid band (upTo null) has no size to name, so the block renders nothing
+  // rather than comparing "bij 0 klanten" — a sum with a made-up left-hand side.
+  const paidBandClients = paidBand?.upTo ?? 0
+
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: 'var(--font-sans), system-ui, sans-serif' }}>
       <PublicHeader />
@@ -420,7 +442,7 @@ export default function VoorBoekhoudersPage() {
         <section style={{ ...card, marginBottom: 32 }}>
           <h2 style={h2}>Wat BoekBrug niet doet</h2>
           <p style={body}>
-            Vier dingen waar je waarschijnlijk naar zou vragen. Beter hier dan halverwege een
+            De dingen waar je waarschijnlijk naar zou vragen. Beter hier dan halverwege een
             demo.
           </p>
           <dl style={{ margin: 0 }}>
@@ -431,6 +453,154 @@ export default function VoorBoekhoudersPage() {
               </div>
             ))}
           </dl>
+        </section>
+
+        {/* ── [WERK-GEDAAN-DEUR] "En wat levert het mij op?" ───────────────────────── */}
+        {/* De vraag die elk kantoor stelt zodra het snapt wat het product doet, en waar deze
+            pagina geen antwoord op gaf. Het antwoord bestond wél — /api/work-done telt sinds
+            [WERK-GEDAAN] precies deze zes dingen per klant en per kantoor over een zelfgekozen
+            periode — maar het stond ACHTER de inlog, en dus onzichtbaar voor precies de
+            boekhouder die nog moet beslissen of hij binnenkomt.
+
+            De zinnen hieronder zijn woord voor woord die uit work-done.ts. Dat is geen netheid:
+            een kantoor dat hier "facturen uit de e-mail gehaald" leest en straks in de app iets
+            anders ziet staan, gaat terecht twijfelen aan het getal ernaast. */}
+        <section style={{ ...card, marginBottom: 32 }}>
+          <h2 style={h2}>En wat levert het jou op?</h2>
+          {OFFICE_GETS.map((voordeel) => (
+            <div key={voordeel.heading} style={{ marginTop: 16 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 600, color: '#202124', margin: '0 0 4px' }}>
+                {voordeel.heading}
+              </h3>
+              <p style={{ ...body, marginTop: 0 }}>{voordeel.body}</p>
+            </div>
+          ))}
+          <p style={{ ...body, marginTop: 18 }}>
+            De zes handelingen die geteld worden, over een periode die jij kiest:
+          </p>
+          <ul style={{ margin: '14px 0 0', paddingInlineStart: 20, fontSize: 15, lineHeight: 1.9, color: '#3c4043' }}>
+            <li>facturen uit de e-mail gehaald</li>
+            <li>facturen gecontroleerd en geboekt zonder tik</li>
+            <li>bankregels ingedeeld op eerdere antwoorden</li>
+            <li>bankregels aan de juiste factuur gekoppeld</li>
+            <li>kassadagen ingelezen uit een Z-rapport</li>
+            <li>dubbele documenten tegengehouden</li>
+          </ul>
+          <p style={{ ...body, marginTop: 14 }}>
+            <strong>Wat wij er níét bij zetten, is wat het waard was.</strong> Wij weten niet wat
+            een minuut op jouw kantoor kost, en een verzonnen urenbesparing is een getal dat je in
+            een middag onderuit haalt — het eerste cijfer van ons dat niet klopt, is het laatste dat
+            je van ons gelooft. Vul je eigen minuten per handeling in en de rekensom is van jou, en
+            zichtbaar: jouw minuten × ons aantal.
+          </p>
+
+          {/* ── [PROVISIE-REKENSOM] "En een provisie per klant dan?" ──────────────────
+              "Nee" op zichzelf leest als "nog niet", dus staat het antwoord er als som. Beide
+              bedragen komen uit accountant-pricing.ts, zodat de pagina niet kan blijven staan op
+              een tarief dat allang veranderd is — en de provisie is met opzet ruim gerekend: alsof
+              élke klant Plus betaalt, terwijl Plus pas geldt boven het eerlijk gebruik. */}
+          <div style={{ marginTop: 20, borderTop: '1px solid #f1f3f4', paddingTop: 18 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 600, color: '#202124', margin: '0 0 4px' }}>
+              {OFFICE_NEVER_GETS.heading}
+            </h3>
+            <p style={{ ...body, marginTop: 0 }}>{OFFICE_NEVER_GETS.body}</p>
+            <ul style={{ margin: '10px 0 0', paddingInlineStart: 20, fontSize: 14, lineHeight: 1.8, color: '#5f6368' }}>
+              {REJECTED_MODELS.map((afgewezen) => (
+                <li key={afgewezen.model}>
+                  <strong style={{ fontWeight: 600, color: '#3c4043' }}>{afgewezen.model}</strong> —{' '}
+                  {afgewezen.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {paidBand && paidBandClients > 0 && (
+            <div style={{ marginTop: 20, borderTop: '1px solid #f1f3f4', paddingTop: 18 }}>
+              <p style={{ ...body, marginTop: 0 }}>
+                En de som erachter, met onze eigen bedragen, bij {paidBandClients} klanten:
+              </p>
+              <table style={{ width: '100%', borderCollapse: 'collapse', margin: '12px 0 0', fontSize: 15 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: '8px 0', color: '#5f6368' }}>
+                      {Math.round(REFERRAL_RATE_HYPOTHESIS * 100)}% provisie, als ze állemaal Plus
+                      betalen
+                    </td>
+                    <td style={{ padding: '8px 0', textAlign: 'end', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                      {euro(referralCeilingExclBtw(paidBandClients))} p/m
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '8px 0', color: '#5f6368', borderTop: '1px solid #f1f3f4' }}>
+                      {ACCOUNTANT_PRICING_ACTIVE
+                        ? 'Wat het portaal je kost'
+                        : 'Wat je nu niet betaalt voor het portaal'}
+                    </td>
+                    <td style={{ padding: '8px 0', textAlign: 'end', fontWeight: 600, whiteSpace: 'nowrap', borderTop: '1px solid #f1f3f4' }}>
+                      {euro(paidBand.monthlyExclBtw)} p/m
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p style={{ ...body, marginTop: 12 }}>
+                Bedragen excl. btw. De bovenste regel is een <em>plafond</em>: de meeste klanten
+                betalen niets, want Plus geldt pas boven het eerlijk gebruik.{' '}
+                {ACCOUNTANT_PRICING_ACTIVE
+                  ? 'De bovenste regel betalen wij uit de onderste — dat is geld rondpompen, en jij houdt het verschil niet over.'
+                  : 'Om je de bovenste regel te kunnen betalen, zouden we de onderste bij je in rekening moeten brengen. Dat is geen verdienmodel, dat is geld rondpompen.'}
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* ── [DPA-BEREIKBAAR] De vraag die elk kantoor als eerste stelt ──────────── */}
+        {/* Vijf accountants, dezelfde vraag: mag ik de administratie van mijn klanten hierin
+            zetten? Dat is geen gevoelsvraag maar een juridische: het kantoor is
+            verwerkingsverantwoordelijke, wij zijn verwerker, en zonder verwerkersovereenkomst
+            mag die data hier niet eens naartoe. Die overeenkomst was geschreven en stond in de
+            repository — nergens waar een boekhouder hem kon lezen. Nu staat hij er, en deze
+            sectie zegt in vier regels wat erin staat. */}
+        <section style={{ ...card, marginBottom: 32 }}>
+          <h2 style={h2}>Mag je de administratie van je klanten hierin zetten?</h2>
+          <p style={body}>
+            Ja, en dat is een juridische vraag met een juridisch antwoord. Jouw kantoor is
+            verwerkingsverantwoordelijke, BoekBrug is verwerker. De verwerkersovereenkomst (AVG
+            art. 28) staat online, is compleet en hoeft alleen nog door beide partijen te worden
+            ingevuld en ondertekend.
+          </p>
+          <dl style={{ margin: 0 }}>
+            {[
+              {
+                vraag: 'Wie raakt de gegevens aan?',
+                antwoord:
+                  'Negen subverwerkers, allemaal met naam, doel, vestigingsland en grondslag in de overeenkomst. De bankkoppeling (Enable Banking, Finland) en Mollie verwerken in de EU; hosting, opslag, AI en e-mail lopen onder Standard Contractual Clauses. Een nieuwe koppeling die niet in die lijst staat, komt niet door onze build.',
+              },
+              {
+                vraag: 'Wat ziet BoekBrug zelf?',
+                antwoord:
+                  'De database staat onder Row-Level Security: elke rij hangt aan een eigenaar, en een koppeling met jouw kantoor is een aparte, door de klant gegeven toestemming. Toegang tot productiedata is beperkt tot kritieke onderhoudssituaties. Elke handeling die jij namens een klant doet, komt met jouw naam in zijn logboek — dat hij zelf kan inzien.',
+              },
+              {
+                vraag: 'En als er iets misgaat?',
+                antwoord:
+                  'Melding aan jou zonder onnodige vertraging, volledige informatie binnen 72 uur, en de melding aan de Autoriteit Persoonsgegevens doen wij. Je hebt auditrecht op onze maatregelen. Het staat allemaal in artikel 9 en 10.',
+              },
+              {
+                vraag: 'Wat is er nog niet klaar?',
+                antwoord:
+                  'Onze eigen partijgegevens — bedrijfsnaam, KVK en adres — staan nog als "(volgt)" in de overeenkomst omdat de inschrijving loopt. Ze vullen zichzelf zodra dat rond is. Tot die tijd kun je de tekst wel volledig lezen en beoordelen, en dat is precies waarvoor hij er staat.',
+              },
+            ].map((n) => (
+              <div key={n.vraag} style={{ borderTop: '1px solid #f1f3f4', paddingTop: 14, marginTop: 14 }}>
+                <dt style={{ fontSize: 16, fontWeight: 600, color: '#202124', marginBottom: 6 }}>{n.vraag}</dt>
+                <dd style={{ fontSize: 15, color: '#5f6368', lineHeight: 1.65, margin: 0 }}>{n.antwoord}</dd>
+              </div>
+            ))}
+          </dl>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 20 }}>
+            <Link href="/verwerkersovereenkomst" style={btnPrimary}>Verwerkersovereenkomst lezen</Link>
+            <Link href="/privacy" style={btnGhost}>Privacyverklaring</Link>
+          </div>
         </section>
 
         {/* ── Slot ───────────────────────────────────────────────── */}

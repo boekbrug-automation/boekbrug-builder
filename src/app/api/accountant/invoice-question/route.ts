@@ -36,6 +36,8 @@ import { createNotification } from '@/lib/notifications'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { logAuditAction } from '@/lib/audit'
 import { VRAAG_STATUS, vraagTekst } from '@/lib/vragen'
+import { createPipelineClient } from '@/lib/supabase-pipeline'
+import { setAccountantStatus } from '@/lib/accountant-status-door'
 
 export const dynamic = 'force-dynamic'
 
@@ -133,17 +135,25 @@ export async function POST(request: NextRequest) {
   }
 
   // ── (2) De STATUS op de factuur ──────────────────────────────────────────────
-  // Met de sessie-client, zodat de trigger draait die zegt wat een boekhouder mag verzetten. Slaagt
-  // dit niet, dan staat de tekst er wel en de status niet: de klant ziet de vraag dan op
+  // [BOEKHOUDER-DEUR] Door dezelfde deur als het kwartaalscherm. Deze route schreef de kolom zelf
+  // met de sessie-client; de database neemt die schrijf niet meer aan, en dat is de bedoeling —
+  // accountant_status heeft één schrijfpad en daar horen de koppelingscontrole, de factuurcontrole
+  // en de toeschrijving bij. De deur leest de boekhouder uit de sessie, dus 'vraag' kan hier niet
+  // aan iemand anders worden toegeschreven dan wie hem stelt.
+  //
+  // Slaagt dit niet, dan staat de tekst er wel en de status niet: de klant ziet de vraag dan op
   // /dashboard/vragen (die leest de statusrij), alleen tellen de boekhouderstellers hem nog niet.
   // Dat is de goede kant om op te falen — de vraag bereikt de klant, en wij zeggen het eerlijk.
-  const { error: statusErr } = await supabase
-    .from('invoices')
-    .update({ accountant_status: VRAAG_STATUS })
-    .eq('id', invoiceId)
-  const statusApplied = !statusErr
-  if (statusErr) {
-    console.error('[FACTUURVRAAG] status op de factuur zetten mislukt', { accountantId: user.id, invoiceId, error: statusErr.message })
+  const doorResult = await setAccountantStatus({
+    session: supabase,
+    pipeline: createPipelineClient(),
+    invoiceId,
+    clientId,
+    status: VRAAG_STATUS,
+  })
+  const statusApplied = doorResult.ok
+  if (!doorResult.ok) {
+    console.error('[FACTUURVRAAG] status op de factuur zetten mislukt', { accountantId: user.id, invoiceId, error: doorResult.reason })
   }
 
   // ── (3) De klant weten ───────────────────────────────────────────────────────

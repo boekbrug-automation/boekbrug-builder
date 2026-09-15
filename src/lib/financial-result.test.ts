@@ -558,13 +558,63 @@ console.log("\n— [KASSTELSEL] cash-basis invoice leg (scheme 'kas') —");
   check("kas: unpaid invoice (no settlement) contributes 0 omzet", near(r.omzet, 0) && near(r.btwVerschuldigd, 0));
 }
 {
-  // Incoming purchase paid this quarter → kosten + voorbelasting, never a sale row.
+  // Incoming purchase paid this quarter → kosten from the settlement, never a sale row. The BTW is
+  // NOT taken from the settlement: it belongs to the quarter of the INVOICE (see below).
   const hdr = { invoiceId: "pur1", direction: "incoming" as const, totalEx: 500, totalBtw: 105, totalInc: 605 };
   const events = buildSettlementEvents(hdr, 0, [{ payDate: "2026-03-01", amountApplied: 605, estimated: false }]);
   const r = computeResult([], [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: events });
   check("kas: incoming → kosten 500", near(r.kosten, 500));
-  check("kas: incoming → voorbelasting 105", near(r.btwVoorbelasting, 105));
   check("kas: incoming does NOT create a sales row", r.salesByRate.length === 0);
+  check("kas: a payment on a purchase from ANOTHER quarter deducts nothing here",
+    near(r.btwVoorbelasting, 0));
+}
+
+// ── [KAS-VOORBELASTING] The deduction is dated by the purchase invoice, on both schemes ─────────
+//
+// The kasstelsel moves the BTW you OWE to the day your customer pays. It does not move the BTW you
+// RECLAIM: "De factuurdatum bepaalt in welk tijdvak u de btw aftrekt" (Belastingdienst), whichever
+// scheme you are on. Booking it off the settlement deducted a March bill paid in April a quarter
+// late — and deducted it TWICE across a switch of scheme.
+{
+  const purchase: ResultInvoice[] = [{ direction: "incoming", status: "received", total_ex_btw: 500, btw_amount: 105 }];
+  const r = computeResult(purchase, [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: [] });
+  check("kas: an UNPAID purchase invoice of this quarter is deducted in it", near(r.btwVoorbelasting, 105));
+  check("kas: …and its cost is not booked before it is paid", near(r.kosten, 0));
+
+  // Both legs together: the cost on the payment date, the deduction on the invoice date, each once.
+  const hdr = { invoiceId: "pur2", direction: "incoming" as const, totalEx: 500, totalBtw: 105, totalInc: 605 };
+  const ev = buildSettlementEvents(hdr, 0, [{ payDate: "2026-03-01", amountApplied: 605, estimated: false }]);
+  const both = computeResult(purchase, [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: ev });
+  check("kas: paid AND dated in the same quarter → one cost, one deduction",
+    near(both.kosten, 500) && near(both.btwVoorbelasting, 105));
+
+  // The same row on the accrual path answers identically — one rule, two schemes.
+  const accrual = computeResult(purchase, [], [], [], undefined, 0, undefined, {});
+  check("kas and factuur deduct the same purchase invoice alike", near(accrual.btwVoorbelasting, 105));
+
+  // A sales invoice never reaches the deduction, and a supplier's quote is not a purchase.
+  const notPurchases: ResultInvoice[] = [
+    { direction: "outgoing", status: "paid", total_ex_btw: 900, btw_amount: 189 },
+    { direction: "incoming", status: "received", invoice_type: "offerte", total_ex_btw: 900, btw_amount: 189 },
+    { direction: "incoming", status: "processing", total_ex_btw: 900, btw_amount: 189 },
+  ];
+  check("kas: only a verified PURCHASE invoice is deducted",
+    near(computeResult(notPurchases, [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: [] }).btwVoorbelasting, 0));
+}
+{
+  // [AANSLAG] A letter from the Belastingdienst carries no BTW, so a "btw" read off one is a
+  // misread and may never reach 5b — through EITHER handle, on EITHER scheme.
+  const letter: ResultInvoice[] = [{ id: "a1", direction: "incoming", status: "received", total_ex_btw: 1000, btw_amount: 210 }];
+  const viaColumn: ResultInvoice[] = [{ ...letter[0], tax_kind: "inkomstenbelasting" }];
+  const viaMap = new Map([["a1", "inkomstenbelasting" as const]]);
+  check("kas: a tax letter's misread btw is not voorbelasting (column handle)",
+    near(computeResult(viaColumn, [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: [] }).btwVoorbelasting, 0));
+  check("kas: …nor through the id map the kas fetch builds",
+    near(computeResult(letter, [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: [], taxKindByInvoice: viaMap }).btwVoorbelasting, 0));
+  check("factuur: the map handle works there too — three callers map no column at all",
+    near(computeResult(letter, [], [], [], undefined, 0, undefined, { taxKindByInvoice: viaMap }).btwVoorbelasting, 0));
+  check("…and a purchase with no tax kind still deducts",
+    near(computeResult(letter, [], [], [], undefined, 0, undefined, { scheme: "kas", settlements: [] }).btwVoorbelasting, 210));
 }
 {
   // A creditnota refunded this quarter nets omzet + BTW down (negative slice at the real rate).

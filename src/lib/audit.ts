@@ -36,6 +36,13 @@ export type AuditAction =
   | 'invoice.created'
   | 'invoice.updated'
   // [VOORSTEL] The accountant's correction proposal and the client's answer to it.
+  // [GROOTBOEK] The cost account an invoice was put on. It decides where the money lands in the
+  // auditfile, so changing it belongs in the trail like any other booking decision.
+  | 'invoice.ledger_account_set'
+  // [WACHTKOPPELING] Een betaling die de eigenaar al deed, vóór de bankregel er was.
+  | 'wachtkoppeling.created'
+  | 'wachtkoppeling.linked'
+  | 'wachtkoppeling.withdrawn'
   | 'invoice.correction_proposed'
   | 'invoice.correction_accepted'
   | 'invoice.correction_declined'
@@ -256,6 +263,9 @@ export type AuditAction =
   | 'supplier.auto_incasso_off'
   // [LEVERANCIER-BEWERKEN] The owner edited the master record; old_value/new_value hold the fields that moved.
   | 'supplier.updated'
+  // [LEVERANCIER-NIEUW] The owner added a supplier by hand, or adopted one the balance showed.
+  | 'supplier.created'
+  | 'supplier.deleted'
   // [LEVERANCIER-SAMENVOEGEN] Two supplier rows declared one company, and the invoices of one moved
   // under the other's name. At this level because it REWRITES what already-booked invoices say
   // about who sent them — the identity key the IBAN-change check, the incasso mandate and the

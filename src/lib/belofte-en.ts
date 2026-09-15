@@ -41,7 +41,7 @@ export const PROMISE_SHORT =
  * `trial_ends_at` deliberately does not exist in billing_subscription.sql.
  */
 export const PROMISE_REASSURE =
-  "Free · no trial that expires · never charged automatically" as const;
+  "Your first 90 days with everything on · free after that · never charged automatically" as const;
 
 /** The only task left for you. Three steps, because nobody reads more — and these are all. */
 export const PROMISE_STEPS: readonly { head: string; text: string }[] = [
@@ -71,7 +71,7 @@ export const PROBLEM_1 =
 export const PROBLEM_2_BOLD = "The solution is not that you learn bookkeeping.";
 export const PROBLEM_2 =
   " It is that nothing gets lost between the moment you receive a paper and the moment your " +
-  "bookkeeper needs it. That is the only job this app has.";
+  "bookkeeper needs it. Everything this app does serves that one sentence.";
 
 /** For the bookkeeper — a different person with a different problem. */
 export const PROMISE_BOOKKEEPER =

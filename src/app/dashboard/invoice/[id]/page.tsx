@@ -30,6 +30,9 @@ import { formatDateNL } from '@/lib/format-nl'
 import { fileOpenHref } from '@/lib/document-preview'
 // [DEEL-CREDIT] Hoeveel er is gecrediteerd en hoeveel er nog kan — dezelfde regels als de route.
 import { creditedTotalsFrom } from '@/lib/credited-invoices'
+// [KETEN] The life of one invoice, read as a chain — see factuurketen.ts. Used here from the
+// CREDITNOTA's end: its screen never said which invoice it corrects, though its PDF always did.
+import { factuurketen, origineelVan, type KetenDocument } from '@/lib/factuurketen'
 import { creditableRemaining, buildCreditSelection, type LineSelection } from '@/lib/partial-credit'
 
 // [PDF-LAZY] Eén lazy BROK, niet twee losse imports. Hier stond `dynamic()` om PDFDownloadLink
@@ -368,6 +371,14 @@ export default function InvoiceDetailPage() {
           .eq('id', invoiceData.original_invoice_id)
           .maybeSingle()
         if (corrected) setCorrectedInvoice(corrected)
+      } else if (invoiceData.invoice_type === 'creditnota') {
+        // [CREDITNOTA-EXTERN] A standalone creditnota names the invoice it corrects itself: the
+        // number and date the owner typed for an invoice issued outside BoekBrug. select('*')
+        // above carries the two columns wherever the migration has run; absent, nothing is claimed.
+        const ext = invoiceData as { credited_invoice_number?: string | null; credited_invoice_date?: string | null }
+        if (ext.credited_invoice_number?.trim()) {
+          setCorrectedInvoice({ invoice_number: ext.credited_invoice_number.trim(), invoice_date: ext.credited_invoice_date ?? null })
+        }
       }
 
       setLoading(false)
@@ -483,6 +494,40 @@ export default function InvoiceDetailPage() {
     linkedCreditnotas.map((c) => ({ original_invoice_id: invoiceId, total_inc_btw: c.total_inc_btw })),
   ).get(invoiceId) ?? 0
   const nogTeCrediteren = creditableRemaining(invoice?.total_inc_btw, alGecrediteerd)
+
+  // [KETEN] The chain as this page can see it: this document, plus the invoice it corrects when
+  // that one was read. Nothing else is loaded for it — a link we cannot see is never claimed, so a
+  // creditnota written against an invoice issued outside BoekBrug gets the number the owner typed
+  // and no "Bekijken" that would lead nowhere.
+  const ketenDocs: KetenDocument[] = invoice
+    ? [
+        {
+          id: invoice.id,
+          invoice_number: invoice.invoice_number ?? null,
+          invoice_type: invoice.invoice_type ?? null,
+          invoice_date: invoice.invoice_date ?? null,
+          total_inc_btw: invoice.total_inc_btw ?? null,
+          original_invoice_id: (invoice as { original_invoice_id?: string | null }).original_invoice_id ?? null,
+        },
+        ...((invoice as { original_invoice_id?: string | null }).original_invoice_id && correctedInvoice
+          ? [{
+              id: String((invoice as { original_invoice_id?: string | null }).original_invoice_id),
+              invoice_number: correctedInvoice.invoice_number ?? null,
+              invoice_type: 'factuur',
+              invoice_date: correctedInvoice.invoice_date ?? null,
+              total_inc_btw: null,
+            } as KetenDocument]
+          : []),
+      ]
+    : []
+  const gecorrigeerdeFactuur =
+    invoice?.invoice_type === 'creditnota' && ketenDocs.length > 0
+      ? origineelVan(factuurketen(ketenDocs[0], ketenDocs))
+      : null
+  // The number and date the banner shows: from the linked invoice when there is one, otherwise the
+  // two the owner typed for an invoice this administration never held ([CREDITNOTA-EXTERN]).
+  const gecorrigeerdNummer = gecorrigeerdeFactuur?.nummer ?? correctedInvoice?.invoice_number ?? null
+  const gecorrigeerdDatum = gecorrigeerdeFactuur?.datum ?? correctedInvoice?.invoice_date ?? null
   const volledigGecrediteerd = alGecrediteerd > 0 && nogTeCrediteren <= 0
 
   // [DEEL-CREDIT] Wat er nu gekozen staat, en wat dat kost. `null` betekent "de hele factuur" en
@@ -943,6 +988,25 @@ export default function InvoiceDetailPage() {
                     })
                   : t('detail.offerte.op', { datum: formatDateNL(invoice?.offerte_responded_at ?? null) })}
               </p>
+            </div>
+          )}
+
+          {/* [KETEN] On a CREDITNOTA: the invoice it corrects. The reference was written into the
+              PDF (art. 219 Richtlijn 2006/112/EG asks a corrective document to refer specifically
+              to the initial one) and was nowhere on the screen of the person holding it. */}
+          {invoice?.invoice_type === 'creditnota' && gecorrigeerdNummer && (
+            <div style={{ backgroundColor: '#E8F0FE', borderRadius: 16, padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <p style={{ fontSize: 12, fontWeight: 600, color: '#174EA6', margin: 0 }}>
+                {gecorrigeerdDatum
+                  ? t('detail.creditHoortBij', { number: gecorrigeerdNummer, date: formatDateNL(gecorrigeerdDatum) })
+                  : t('detail.creditHoortBijZonderDatum', { number: gecorrigeerdNummer })}
+              </p>
+              {gecorrigeerdeFactuur && (
+                <button onClick={() => router.push(`/dashboard/invoice/${gecorrigeerdeFactuur.id}`)}
+                  style={{ flexShrink: 0, fontSize: 12, fontWeight: 500, color: '#174EA6', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
+                  {t('detail.bekijken')} →
+                </button>
+              )}
             </div>
           )}
 

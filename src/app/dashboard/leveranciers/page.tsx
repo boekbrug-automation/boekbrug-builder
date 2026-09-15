@@ -195,6 +195,25 @@ export default async function Page({
 
   const balance = supplierBalances({ invoices, asOf, settlements })
 
+  // [LEVERANCIER-NIEUW] Balance key → the supplier most of its invoices are linked to. The
+  // creditors list groups on the printed name; the registry row may spell it differently. The
+  // link is the fact, the name is the fallback — and a key with no linked invoice at all is what
+  // the screen offers to ADD.
+  const lineSupplier: Record<string, string> = {}
+  {
+    const votes = new Map<string, Map<string, number>>()
+    for (const r of invoiceRows) {
+      const key = keyOf(r.client_name)
+      if (!key || !r.supplier_id) continue
+      const tally = votes.get(key) ?? new Map<string, number>()
+      tally.set(r.supplier_id, (tally.get(r.supplier_id) ?? 0) + 1)
+      votes.set(key, tally)
+    }
+    for (const [key, tally] of votes) {
+      lineSupplier[key] = [...tally.entries()].sort((a, b) => b[1] - a[1])[0][0]
+    }
+  }
+
   // ── [LEVERANCIER-SAMENVOEGEN] Twee rijen die aantoonbaar één bedrijf zijn ────────────────
   //
   // De registry, de aliassen en de naamkiezer repareren de TOEKOMST: de volgende factuur van een
@@ -313,6 +332,7 @@ export default async function Page({
       corroboration={buildCorroborationPanel(corroboration, locale)}
       merge={mergePanel}
       suppliers={supplierCards}
+      lineSupplier={lineSupplier}
       asOf={asOf}
       today={today}
     />

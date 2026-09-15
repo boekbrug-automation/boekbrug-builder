@@ -29,6 +29,10 @@
 
 const BLOCK_END = /<\/(?:p|div|h[1-6]|li|tr|table|ul|ol|blockquote)>/gi;
 
+/** An address as a person writes it: no scheme, no trailing slash. Used only to decide whether an
+ *  anchor's text and its href are the same address said two ways. */
+const naaktAdres = (s: string): string => s.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
+
 const ENTITIES: Record<string, string> = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'",
   nbsp: " ", euro: "€", eacute: "é", euml: "ë", iuml: "ï", ndash: "–", mdash: "—",
@@ -57,10 +61,18 @@ export function htmlToMailText(html: string): string {
 
   // Links: keep both halves. "Anchor text (https://…)" — but only when the URL adds information;
   // a link whose text IS the url would otherwise print twice.
+  //
+  // "Is the url" includes the form a person actually writes one in. The sign-off under every mail
+  // links the address as `boekbrug.nl`, and comparing the two strings literally made that close
+  // every message with "boekbrug.nl (https://boekbrug.nl)" — the same address twice, in the last
+  // line the reader sees. The scheme and a trailing slash are the two things a visible address
+  // leaves off, so they are what the comparison ignores; anything else in the text is information
+  // ("Bekijk de factuur" keeps its url, which is the whole point of the rule).
   s = s.replace(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, inner: string) => {
     const text = inner.replace(/<[^>]+>/g, "").trim();
     if (!href || href.startsWith("mailto:")) return text || href.replace(/^mailto:/, "");
-    if (!text || text === href) return href;
+    if (!text) return href;
+    if (text === href || naaktAdres(text) === naaktAdres(href)) return text;
     return `${text} (${href})`;
   });
 

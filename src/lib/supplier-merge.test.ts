@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { planSupplierMerge, findMergeCandidates, type MergeSupplier } from './supplier-merge'
+import { planSupplierMerge, planOwnerMerge, findMergeCandidates, type MergeSupplier } from './supplier-merge'
 
 const KVK_BAL = '17123456'
 const KVK_BALKIP = '34129873'
@@ -160,4 +160,53 @@ test('[LEVERANCIER-SAMENVOEGEN] equal invoice counts fall back to identity, then
   const bare = supplier({ id: 'b', name: 'Bare', kvk: KVK_BAL, invoiceCount: 3, createdAt: '2026-01-01T00:00:00Z' })
   const byIdentity = planSupplierMerge(bare, rich)
   assert.ok(byIdentity.ok && byIdentity.survivorId === 'r', 'more identity outranks being older')
+})
+
+// ── [SAMENVOEGEN-EIGENAAR] The pair the owner names themselves ────────────────────────────────
+//
+// The reader founds two rows for one company without leaving a shared number behind: a misread
+// name on one paper and nothing else. There is then no proof to find, only an owner who knows.
+// What their door gives up is the demand for evidence. What it may never give up is a VETO.
+
+test('[SAMENVOEGEN-EIGENAAR] the owner may overrule missing evidence — that is the whole door', () => {
+  const a = supplier({ id: 'a', name: 'Trimex International', invoiceCount: 29 })
+  const b = supplier({ id: 'b', name: 'TRIMEX INTL B.V.', invoiceCount: 2 })
+  // The app itself refuses: nothing here proves one party.
+  assert.deepEqual(planSupplierMerge(a, b), { ok: false, reason: 'no-evidence' })
+  // The owner names the pair, and the direction is theirs — not re-picked by invoice count.
+  const plan = planOwnerMerge(b, a)
+  assert.ok(plan.ok)
+  if (!plan.ok) return
+  assert.equal(plan.survivorId, 'b', 'the row the owner pointed at is the one that stays')
+  assert.equal(plan.mergedAwayId, 'a')
+  assert.equal(plan.evidence, 'owner', 'recorded as a decision, never dressed up as a fact')
+  assert.equal(plan.sharedValue, '')
+  assert.equal(plan.movesInvoices, 29, 'and it says how many invoices move before anything does')
+})
+
+test('[SAMENVOEGEN-EIGENAAR] a veto is a fact and holds whoever asks', () => {
+  // The BALKIP pair, named by the owner this time. Still two companies.
+  const bal = supplier({ id: 'bal', name: 'GROOTHANDEL M.H. BAL V.O.F.', kvk: KVK_BAL, invoiceCount: 72 })
+  const balkip = supplier({ id: 'balkip', name: 'BALKIP B.V.', kvk: KVK_BALKIP, invoiceCount: 7 })
+  assert.deepEqual(planOwnerMerge(bal, balkip), { ok: false, reason: 'different-kvk' })
+  assert.deepEqual(planOwnerMerge(balkip, bal), { ok: false, reason: 'different-kvk' }, 'in either direction')
+
+  // Two rows that each name their own account: merging drops the number the IBAN-change check reads.
+  const one = supplier({ id: 'one', name: 'Sumer Food', iban: IBAN_BAL })
+  const two = supplier({ id: 'two', name: 'Sumer Food B.V.', iban: IBAN_KETELS })
+  assert.deepEqual(planOwnerMerge(one, two), { ok: false, reason: 'two-accounts' })
+
+  // A row with itself is nothing to merge.
+  assert.deepEqual(planOwnerMerge(one, one), { ok: false, reason: 'same-supplier' })
+})
+
+test('[SAMENVOEGEN-EIGENAAR] where a shared number DOES exist it is cited, not hidden behind the owner', () => {
+  const a = supplier({ id: 'a', name: 'W.KETELS & ZN', kvk: KVK_BAL, invoiceCount: 25 })
+  const b = supplier({ id: 'b', name: 'W. Ketels en Zoon', kvk: KVK_BAL, invoiceCount: 3 })
+  const plan = planOwnerMerge(b, a)
+  assert.ok(plan.ok)
+  if (!plan.ok) return
+  assert.equal(plan.evidence, 'kvk', 'the proof the app can see is still the proof it records')
+  assert.equal(plan.sharedValue, KVK_BAL)
+  assert.equal(plan.survivorId, 'b', '…and the owner still chooses which name stays')
 })

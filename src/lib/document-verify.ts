@@ -180,9 +180,31 @@ export function verifyTotal(amount: number | null | undefined, text: string | nu
 
 // ── Date ──────────────────────────────────────────────────────────────────────
 
-const MONTHS_NL = [
-  'januari', 'februari', 'maart', 'april', 'mei', 'juni',
-  'juli', 'augustus', 'september', 'oktober', 'november', 'december',
+// [DOCCHECK-TAAL] The month, in the languages a Dutch administration actually receives invoices in.
+//
+// TOTAL_WORDS above already says exactly that about the total-label — Dutch first, then English and
+// German — and the date reader was written Dutch-only. Measurement caught it: EVERY 'absent' date
+// verdict in production (7 of 86 checked invoices, four different suppliers) was an English-language
+// SaaS invoice whose date was perfectly correct. Their fingerprint is identical and unmistakable —
+// total 'anchored', invoice number 'found', date 'absent' — so the text layer was read fine and only
+// the date FORM was unmatched. Seven owners were told to check a date that was right.
+//
+// Short forms are listed rather than sliced to three letters. Slicing worked for nine months by
+// coincidence ('aug' is both Dutch and English) and silently failed on the three where the languages
+// differ: maart/March, mei/May, oktober/October.
+const MONTHS: ReadonlyArray<readonly string[]> = [
+  ['januari', 'january', 'januar', 'jan'],
+  ['februari', 'february', 'februar', 'feb', 'febr'],
+  ['maart', 'march', 'märz', 'maa', 'mar', 'mrt', 'mrz'],
+  ['april', 'apr'],
+  ['mei', 'may', 'mai'],
+  ['juni', 'june', 'jun'],
+  ['juli', 'july', 'jul'],
+  ['augustus', 'august', 'aug'],
+  ['september', 'sep', 'sept'],
+  ['oktober', 'october', 'okt', 'oct'],
+  ['november', 'nov'],
+  ['december', 'dezember', 'dec', 'dez'],
 ]
 
 /**
@@ -193,8 +215,9 @@ const MONTHS_NL = [
  * a date read a month wrong moves BTW between two filings. Nothing has ever checked it against the
  * paper.
  *
- * Every form a Dutch document might print it in, because a missed format is a false alarm on a
- * correct invoice — and those are what teach people to ignore warnings.
+ * Every form the document might print it in — see MONTHS above for why "Dutch document" was the
+ * wrong frame — because a missed format is a false alarm on a correct invoice, and those are what
+ * teach people to ignore warnings.
  */
 export function verifyDate(iso: string | null | undefined, text: string | null | undefined): FieldVerdict {
   const t = (text ?? '').trim()
@@ -206,8 +229,7 @@ export function verifyDate(iso: string | null | undefined, text: string | null |
   const yy = y.slice(2)
   const dNum = String(Number(d))
   const moNum = String(Number(mo))
-  const monthName = MONTHS_NL[Number(mo) - 1] ?? ''
-  const monthShort = monthName.slice(0, 3)
+  const monthNames = MONTHS[Number(mo) - 1] ?? []
 
   const forms = new Set<string>()
   for (const sep of ['-', '/', '.', ' ']) {
@@ -216,13 +238,40 @@ export function verifyDate(iso: string | null | undefined, text: string | null |
     forms.add(`${d}${sep}${mo}${sep}${yy}`)  // 01-06-26
     forms.add(`${dNum}${sep}${moNum}${sep}${yy}`)
     forms.add(`${y}${sep}${mo}${sep}${d}`)   // ISO and its punctuated cousins
-  }
-  if (monthName) {
-    for (const mn of [monthName, monthShort]) {
-      forms.add(`${dNum} ${mn} ${y}`)
-      forms.add(`${d} ${mn} ${y}`)
-      forms.add(`${dNum} ${mn}. ${y}`)
+    // [DOCCHECK-VOLGORDE] Month first, and ONLY when the day cannot be read as a month.
+    //
+    // "8/13/2026" has exactly one reading, because there is no thirteenth month — so matching it is
+    // free. "01-02-2026" has two, and accepting the American one would destroy the single most
+    // valuable thing this witness does: it is the only check in the app that can catch a day/month
+    // swap, which is the classic silent date error (1 February read as 2 January — a valid date, a
+    // confident reader, a different BTW quarter). Above 12 the swap is impossible; at or below it,
+    // refusing to match is what keeps the swap visible.
+    if (Number(d) > 12) {
+      forms.add(`${mo}${sep}${d}${sep}${y}`)
+      forms.add(`${moNum}${sep}${dNum}${sep}${y}`)
+      forms.add(`${mo}${sep}${d}${sep}${yy}`)
+      forms.add(`${moNum}${sep}${dNum}${sep}${yy}`)
     }
+  }
+  for (const mn of monthNames) {
+    // "1 juni 2026" / "01 June 2026" / "1 jun. 2026"
+    forms.add(`${dNum} ${mn} ${y}`)
+    forms.add(`${d} ${mn} ${y}`)
+    forms.add(`${dNum} ${mn}. ${y}`)
+    forms.add(`${d} ${mn}. ${y}`)
+    // "2. März 2026" — in German the dot sits after the DAY, as an ordinal marker, and Dutch formal
+    // writing does the same. A dot on the other side of the month is a different string entirely.
+    forms.add(`${dNum}. ${mn} ${y}`)
+    forms.add(`${d}. ${mn} ${y}`)
+    // "August 13, 2026" — the order every American invoice prints, and the one no form above
+    // produced. A month NAME is unambiguous whichever side of the day it stands on, so unlike the
+    // numeric order there is nothing to disambiguate here.
+    forms.add(`${mn} ${dNum}, ${y}`)
+    forms.add(`${mn} ${d}, ${y}`)
+    forms.add(`${mn} ${dNum} ${y}`)
+    forms.add(`${mn} ${d} ${y}`)
+    forms.add(`${mn}. ${dNum}, ${y}`)
+    forms.add(`${mn}. ${d}, ${y}`)
   }
 
   const lower = t.toLowerCase()

@@ -63,3 +63,18 @@ test('[MAIL-TEKST] it never throws and never returns empty for visible words', (
   assert.equal(htmlToMailText(null as unknown as string), '')
   assert.ok(htmlToMailText('<div><p>woord</p></div>').length > 0)
 })
+
+test("an address linked as itself is not printed twice", () => {
+  // The sign-off links `boekbrug.nl` to https://boekbrug.nl. Compared literally the two differ, so
+  // every mail used to close with the same address twice in its last line.
+  const voet = htmlToMailText('<a href="https://boekbrug.nl">boekbrug.nl</a>');
+  assert.equal(voet, "boekbrug.nl");
+  assert.equal(htmlToMailText('<a href="https://boekbrug.nl/">boekbrug.nl</a>'), "boekbrug.nl");
+});
+
+test("…but a link whose text says something keeps its url", () => {
+  // The rule that earns the noise: a text-mode reader told to click "Bekijk de factuur" with the
+  // url stripped has been told to click nothing.
+  const knop = htmlToMailText('<a href="https://boekbrug.nl/factuur/9">Bekijk de factuur</a>');
+  assert.match(knop, /Bekijk de factuur \(https:\/\/boekbrug\.nl\/factuur\/9\)/);
+});

@@ -38,7 +38,7 @@ import { failureText } from '@/lib/server-message'
 import { DismissX } from "@/components/ui/DismissX";
 import { duplicateWhere } from "@/lib/duplicate-sentence";
 // [TZ] The owner's Amsterdam day, never the UTC one — see format-nl.ts.
-import { amsterdamToday } from '@/lib/format-nl'
+import { formatEuroNL, amsterdamToday } from '@/lib/format-nl'
 import Link from "next/link";
 // [BOEK-011] Centralized navigation — single source of truth across the app
 import { FONT } from "@/lib/design/tokens";
@@ -136,6 +136,8 @@ import { useCloseOnBack } from '@/lib/use-close-on-back'
 import DateFieldNL from '@/components/ui/DateFieldNL'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
+// [GELEERD-SINDSDIEN] De genegeerde facturen die de lezer inmiddels wél kan lezen.
+import GeleerdPanel from '@/components/grootboek/GeleerdPanel'
 // [PAGINA-VOLGORDE] The order of the pages of one paper invoice, decided in one place and shown
 // in one tray — the same on Uploaden. See src/lib/page-order.ts for why a plain sort is wrong.
 import { usePageTray } from '@/lib/use-page-tray'
@@ -3961,6 +3963,8 @@ export default function IncomingInvoicesClient({
   // [RITME] Leveranciers met een vast ritme waarvan de verwachte factuur uitblijft. Verreweg
   // meestal leeg — dan is er ook geen banner. Zie de drie zwijg-regels in supplier-cadence.ts.
   const [missing, setMissing] = useState<{ supplier: string; reason: string; lastSeen: string }[]>([]);
+  // [BETAALD-GEEN-STUK] Betalingen aan een bekende leverancier waar geen factuur aan hangt.
+  const [unpaired, setUnpaired] = useState<{ transactionId: string; date: string; amount: number; supplier: string }[]>([]);
   const [missingDismissed, setMissingDismissed] = useState(false);
 
   // [IGNORE-UNDO] Een toast met een handeling erin ("Ongedaan maken"). De tijd staat bewust
@@ -4434,6 +4438,8 @@ export default function IncomingInvoicesClient({
         if (!res.ok) return;
         const data = await res.json().catch(() => ({}));
         if (!cancelled && Array.isArray(data.missing)) setMissing(data.missing);
+        // [BETAALD-GEEN-STUK] De waarneming naast de verwachting: geld weg, niets gekoppeld.
+        if (!cancelled && Array.isArray(data.unpaired)) setUnpaired(data.unpaired);
       } catch {
         // Stil falen: dit is een extra oog, nooit iets waar de pagina op mag stukgaan.
       }
@@ -4893,6 +4899,37 @@ export default function IncomingInvoicesClient({
             </div>
           </div>
         )}
+
+        {/* [BETAALD-GEEN-STUK] Onder het ritme-paneel, want het is dezelfde vraag met beter bewijs.
+            Het ritme ZEGT dat er iets had moeten komen; dit LAAT ZIEN dat het geld weg is en er
+            niets aan hangt. Daarom staat het eronder en niet ernaast: wie het leest, leest eerst
+            de verwachting en dan de waarneming. */}
+        {tab === "pending" && unpaired.length > 0 && !missingDismissed && (
+          <div style={{
+            marginBottom: 16, padding: "13px 15px", borderRadius: 12,
+            background: "#fdf3e7", border: "1px solid #f3d9b6",
+          }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: "#8a5300", marginBottom: 6 }}>
+              {unpaired.length === 1
+                ? t('ink.betaaldGeenStuk.een')
+                : t('ink.betaaldGeenStuk.meer', { n: unpaired.length })}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              {unpaired.slice(0, 6).map((u) => (
+                <div key={u.transactionId} style={{ fontSize: 13, color: "#5c3a00", lineHeight: 1.5 }}>
+                  {t('ink.betaaldGeenStuk.regel', { bedrag: formatEuroNL(u.amount), leverancier: u.supplier })}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* [GELEERD-SINDSDIEN] Bovenaan Genegeerd, want dat is precies de plek waar je kijkt als
+            je iets mist. Deze facturen zette de eigenaar opzij toen de lezer ze niet kon lezen; de
+            lezer heeft dat sindsdien geleerd, en niemand had hem dat verteld. Het paneel toont
+            zichzelf alleen als er iets te bieden is — de genegeerd-lijst is geen plek om gezeurd
+            te worden. */}
+        {tab === "ignored" && <GeleerdPanel onRestored={() => router.refresh()} />}
 
         {/* [AFZENDERREGEL] De regels van de eigenaar staan bij Genegeerd, want dat is de plek waar
             je kijkt als je iets mist. Elke regel met het adres erbij en één knop om hem op te

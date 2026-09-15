@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 144 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 154 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 17 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -54,6 +54,12 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('accountant_confirm_mandate.sql', 'column', 'kind', 'accountant_invoice_mandates', 'public'),
   ('accountant_confirm_mandate.sql', 'constraint', 'accountant_invoice_mandates_kind_check', null, 'public'),
   ('accountant_confirm_mandate.sql', 'function', 'has_active_confirm_mandate', null, 'public'),
+  ('accountant_directory.sql', 'constraint', 'accountant_directory_lengths', null, 'public'),
+  ('accountant_directory.sql', 'constraint', 'accountant_directory_published_is_complete', null, 'public'),
+  ('accountant_directory.sql', 'constraint', 'accountant_directory_website_https', null, 'public'),
+  ('accountant_directory.sql', 'index', 'accountant_directory_published_idx', null, 'public'),
+  ('accountant_directory.sql', 'policy', 'accountant_directory_own_delete', 'accountant_directory', 'public'),
+  ('accountant_directory.sql', 'policy', 'accountant_directory_own_read', 'accountant_directory', 'public'),
   ('accountant_discount_guard.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('accountant_invoice_mandate.sql', 'function_body', 'next_invoice_seq', 'has_active_invoice_mandate', 'public'),
   ('accountant_invoice_mandate.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
@@ -125,6 +131,9 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('bank_match_rejections.sql', 'policy', 'bank_match_rejections_insert_own', 'bank_match_rejections', 'public'),
   ('bank_match_rejections.sql', 'policy', 'bank_match_rejections_select_own', 'bank_match_rejections', 'public'),
   ('bank_match_rejections.sql', 'table', 'bank_match_rejections', null, 'public'),
+  ('bank_rpc_never_payable_states.sql', 'function', 'allocate_bank_payment', null, 'public'),
+  ('bank_rpc_never_payable_states.sql', 'function', 'apply_bank_payment', null, 'public'),
+  ('bank_rpc_never_payable_states.sql', 'function', 'confirm_bank_payment', null, 'public'),
   ('bank_statement_periods.sql', 'index', 'idx_bsp_user_iban_start', null, 'public'),
   ('bank_statement_periods.sql', 'policy', 'bsp_owner_read', 'bank_statement_periods', 'public'),
   ('bank_statement_periods.sql', 'table', 'bank_statement_periods', null, 'public'),
@@ -206,6 +215,8 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('company_members_sales_role.sql', 'function', 'next_invoice_seq', null, 'public'),
   ('company_members_sales_role.sql', 'index', 'clients_created_by_idx', null, 'public'),
   ('company_members_sales_role.sql', 'index', 'company_member_invites_owner_idx', null, 'public'),
+  ('creditnota_external_reference.sql', 'column', 'credited_invoice_date', 'invoices', 'public'),
+  ('creditnota_external_reference.sql', 'column', 'credited_invoice_number', 'invoices', 'public'),
   ('creditnota_partial.sql', 'function', 'assert_credit_within_original', null, 'public'),
   ('creditnota_per_rate_ceiling.sql', 'function', 'assert_credit_within_rate', null, 'public'),
   ('crm_backbone.sql', 'column', 'client_id', 'invoices', 'public'),
@@ -263,6 +274,9 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('intake_claims.sql', 'index', 'uq_intake_claims_user_key', null, 'public'),
   ('intake_claims.sql', 'table', 'intake_claims', null, 'public'),
   ('invitations_rls_scoped_read.sql', 'policy', 'invitee or inviter can read invitations', 'invitations', 'public'),
+  ('invoice_accountant_attribution.sql', 'column', 'accountant_id', 'invoices', 'public'),
+  ('invoice_accountant_attribution.sql', 'function', 'accountant_status_door_only', null, 'public'),
+  ('invoice_accountant_status_vocabulary.sql', 'constraint', 'invoices_accountant_status_check', null, 'public'),
   ('invoice_accountant_write_guard.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('invoice_accountant_write_guard.sql', 'function_body', 'prevent_verwerkt_invoice_changes', '.accountant_status,.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('invoice_archive_reason.sql', 'column', 'archive_reason', 'invoices', 'public'),
@@ -326,7 +340,15 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('invoices_deposit.sql', 'column', 'deposit_on_offerte_id', 'invoices', 'public'),
   ('invoices_deposit.sql', 'index', 'invoices_deposit_on_offerte_idx', null, 'public'),
   ('invoices_first_viewed.sql', 'column', 'first_viewed_at', 'invoices', 'public'),
+  ('invoices_ledger_account.sql', 'column', 'ledger_account', 'invoices', 'public'),
+  ('invoices_ledger_account.sql', 'index', 'invoices_ledger_todo_idx', null, 'public'),
   ('kas_opening_balance.sql', 'column', 'kas_opening_balance', 'profiles', 'public'),
+  ('kilometeradministratie.sql', 'index', 'idx_mileage_entries_invoice', null, 'public'),
+  ('kilometeradministratie.sql', 'index', 'idx_mileage_entries_owner', null, 'public'),
+  ('kilometeradministratie.sql', 'policy', 'mileage_entries_delete_own', 'mileage_entries', 'public'),
+  ('kilometeradministratie.sql', 'policy', 'mileage_entries_insert_own', 'mileage_entries', 'public'),
+  ('kilometeradministratie.sql', 'policy', 'mileage_entries_select_own', 'mileage_entries', 'public'),
+  ('kilometeradministratie.sql', 'policy', 'mileage_entries_update_own', 'mileage_entries', 'public'),
   ('kluis_subscriptions.sql', 'index', 'kluis_subscriptions_session_uidx', null, 'public'),
   ('kluis_subscriptions.sql', 'index', 'kluis_subscriptions_user_idx', null, 'public'),
   ('kluis_subscriptions.sql', 'policy', 'kluis_subscriptions_select_own', 'kluis_subscriptions', 'public'),
@@ -363,12 +385,17 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('package_shares.sql', 'policy', 'package_shares_select_own', 'package_shares', 'public'),
   ('package_shares.sql', 'policy', 'package_shares_update_own', 'package_shares', 'public'),
   ('package_shares.sql', 'table', 'package_shares', null, 'public'),
+  ('paid_invoice_money_frozen.sql', 'function', 'prevent_paid_invoice_rewrite', null, 'public'),
   ('pay_bundles.sql', 'index', 'idx_pay_bundle_invoices_bundle', null, 'public'),
   ('pay_bundles.sql', 'index', 'idx_pay_bundle_invoices_invoice', null, 'public'),
   ('pay_bundles.sql', 'index', 'idx_pay_bundles_token', null, 'public'),
   ('pay_bundles.sql', 'index', 'idx_pay_bundles_user', null, 'public'),
   ('pay_bundles.sql', 'index', 'pay_bundle_invoices_unique_pair', null, 'public'),
   ('pay_bundles.sql', 'policy', 'pay_bundle_invoices_delete_own', 'pay_bundle_invoices', 'public'),
+  ('plan_grants.sql', 'function', 'grant_welcome_plus', null, 'public'),
+  ('plan_grants.sql', 'index', 'plan_grants_active_idx', null, 'public'),
+  ('plan_grants.sql', 'policy', 'plan_grants_own_read', 'plan_grants', 'public'),
+  ('plan_grants.sql', 'table', 'plan_grants', null, 'public'),
   ('profile_vak.sql', 'function_body', 'handle_new_user', '.email,.id,.raw_user_meta_data', 'public'),
   ('profile_vak.sql', 'column', 'vak', 'profiles', 'public'),
   ('push_subscriptions.sql', 'index', 'idx_push_subscriptions_user', null, 'public'),
@@ -470,6 +497,12 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('vehicles.sql', 'policy', 'vehicles_update_own', 'vehicles', 'public'),
   ('vehicles.sql', 'table', 'vehicles', null, 'public'),
   ('verwerkt_freeze_level.sql', 'function_body', 'prevent_verwerkt_invoice_changes', '.accountant_status,.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
+  ('wachtkoppelingen.sql', 'index', 'wachtkoppelingen_open_idx', null, 'public'),
+  ('wachtkoppelingen.sql', 'index', 'wachtkoppelingen_tx_idx', null, 'public'),
+  ('wachtkoppelingen.sql', 'policy', 'wachtkoppelingen_owner_read', 'wachtkoppelingen', 'public'),
+  ('wachtkoppelingen.sql', 'policy', 'wachtkoppelingen_owner_update', 'wachtkoppelingen', 'public'),
+  ('wachtkoppelingen.sql', 'policy', 'wachtkoppelingen_owner_write', 'wachtkoppelingen', 'public'),
+  ('wachtkoppelingen.sql', 'table', 'wachtkoppelingen', null, 'public'),
   ('work_done_counts.sql', 'function', 'work_done_counts', null, 'public'),
   ('work_items.sql', 'column', 'lines', 'work_items', 'public'),
   ('work_items.sql', 'column', 'work_item_id', 'invoices', 'public'),
@@ -537,11 +570,25 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 
 -- ── WAT DEEL 1 OVER DEZE FUNCTIES WÉL EN NIET ZEGT ──────────────────
 --
---   9 functies worden door meer dan één migratie geschreven. Voor die functies zegt TOEGEPAST: de
+--   12 functies worden door meer dan één migratie geschreven. Voor die functies zegt TOEGEPAST: de
 --   body in de database bevat elke kolomverwijzing die de map er unaniem in verwacht. Het zegt NIET
 --   welk van die bestanden hem daar gezet heeft — en dat is niet vast te stellen, want een CREATE OR
 --   REPLACE laat geen spoor van zijn herkomst achter. OPEN betekent hier dus: de functie in de
 --   database loopt achter op de map, en de migraties hieronder zijn samen het antwoord.
+--
+--   allocate_bank_payment
+--     · allocate_bank_payment.sql
+--     · bank_rpc_never_payable_states.sql
+--     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
+--     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
+--     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
+--
+--   apply_bank_payment
+--     · bank_rpc_never_payable_states.sql
+--     · invoice_partial_payments.sql
+--     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
+--     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
+--     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
 --
 --   apply_manual_payment
 --     · invoice_manual_payment_idempotency_scope.sql
@@ -553,6 +600,13 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --   book_bank_batch
 --     · bank_confirm_atomic.sql
 --     · book_bank_batch_atomic.sql
+--     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
+--     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
+--     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
+--
+--   confirm_bank_payment
+--     · bank_confirm_atomic.sql
+--     · bank_rpc_never_payable_states.sql
 --     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
 --     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
 --     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
@@ -608,7 +662,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 161
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 171
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen

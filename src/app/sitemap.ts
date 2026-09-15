@@ -21,6 +21,10 @@ export default function sitemap(): MetadataRoute.Sitemap {
     // here for a second reason: sitemap.xml is one of the three sources the public smoke test
     // sweeps, and it is the only one that would have caught /en being behind the login wall.
     { url: `${SITE_URL}/en`, lastModified, changeFrequency: 'weekly', priority: 0.9 },
+    // [LANDING-AR] Same reason, one locale further: /ar/blog and /ar/prijzen were listed here
+    // while the Arabic homepage they link back to was not — and being in this list is what makes
+    // the smoke test sweep it without a session.
+    { url: `${SITE_URL}/ar`, lastModified, changeFrequency: 'weekly', priority: 0.8 },
     { url: `${SITE_URL}/blog`, lastModified, changeFrequency: 'weekly', priority: 0.8 },
     { url: `${SITE_URL}/en/blog`, lastModified, changeFrequency: 'weekly', priority: 0.5 },
     { url: `${SITE_URL}/ar/blog`, lastModified, changeFrequency: 'weekly', priority: 0.4 },
@@ -31,6 +35,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     // decides for its whole book — a single office with fifty ZZP clients is fifty entrepreneurs,
     // which no entrepreneur-facing page can match per visit.
     { url: `${SITE_URL}/voor-boekhouders`, lastModified, changeFrequency: 'monthly', priority: 0.8 },
+    { url: `${SITE_URL}/boekhouders`, lastModified, changeFrequency: 'weekly', priority: 0.7 },
     // [SEGMENT-VOORDEUR] Dezelfde app, drie deuren. Volgorde naar hoeveel papier per maand op de
     // lezer afkomt — zie de kop van src/lib/segment-pages.ts.
     { url: `${SITE_URL}/voor-winkel`, lastModified, changeFrequency: 'monthly', priority: 0.8 },

@@ -20,9 +20,9 @@ Deze Verwerkersovereenkomst ("DPA") maakt deel uit van de gebruiksvoorwaarden tu
 - E-mail: ____________________________
 
 **Verwerker ("BoekBrug"):**
-- Bedrijfsnaam: [JOUW BEDRIJFSNAAM]
-- KVK-nummer: [INVULLEN]
-- Adres: [JOUW ADRES TILBURG]
+- Bedrijfsnaam: [JOUW NAAM]
+- KVK-nummer: [INVULLEN ZODRA INGESCHREVEN]
+- Adres: [JOUW ADRES IN TILBURG]
 - E-mail: privacy@boekbrug.nl
 
 ---
@@ -134,14 +134,17 @@ De Accountant geeft hierbij algemene toestemming voor de volgende subverwerkers:
 
 | Subverwerker | Doel | Locatie | DPA-grondslag |
 |--------------|------|---------|---------------|
-| **Supabase Inc.** | Databasehosting, opslag, authenticatie | VS (EU-data beschikbaar) | SCCs |
-| **Vercel Inc.** | Hosting webapplicatie | VS (EU edge) | SCCs |
-| **Anthropic PBC** | AI-classificatie | VS | SCCs |
+| **Supabase Inc.** | Databasehosting, opslag, authenticatie | VS (EU-datalocatie) | SCCs |
+| **Vercel Inc.** | Hosting webapplicatie en cookieloze bezoekstatistiek | VS (EU edge) | SCCs |
+| **Anthropic PBC** | AI-classificatie van documenten | VS | SCCs |
 | **Resend Inc.** | Transactionele e-mails | VS | SCCs |
 | **Sentry / Functional Software Inc.** | Foutmonitoring | VS | SCCs |
-| **Google LLC** (bij Gmail-koppeling) | OAuth | VS | Google DPA |
-| **Microsoft Corporation** (bij Outlook-koppeling) | OAuth | VS | Microsoft DPA |
-| **Stripe Inc.** (bij betaling) | Betalingsverwerking | VS | Stripe DPA |
+| **Enable Banking Oy** (alleen bij bankkoppeling) | Ophalen van rekeninggegevens en transacties onder PSD2 | Finland (EU) | Verwerkersovereenkomst; geen doorgifte buiten de EER |
+| **Stripe Payments Europe, Ltd.** (alleen bij een betaald abonnement) | Betaalverwerking en abonnementsbeheer | Ierland (EU), met doorgifte naar Stripe, Inc. (VS) | Stripe DPA met SCCs |
+| **Mollie B.V.** (alleen bij een eigen Mollie-koppeling) | iDEAL-betaallinks op facturen en het ophalen van uitbetalingen | Nederland (EU) | Verwerkersovereenkomst; geen doorgifte buiten de EER |
+| **SnelStart B.V.** (alleen bij een eigen SnelStart-koppeling) | Doorgifte van jouw boekingen naar jouw eigen SnelStart-administratie | Nederland (EU) | Doorgifte op jouw instructie naar een systeem dat jij zelf beheert; geen doorgifte buiten de EER |
+| **Google LLC** (alleen bij Gmail-koppeling) | OAuth en API-toegang | VS | Google Cloud DPA |
+| **Microsoft Corporation** (alleen bij Outlook-koppeling) | OAuth en API-toegang | VS | Microsoft DPA |
 
 ### 7.2 Wijzigingen in subverwerkers
 - BoekBrug informeert Accountant minimaal 30 dagen vooraf bij wijziging

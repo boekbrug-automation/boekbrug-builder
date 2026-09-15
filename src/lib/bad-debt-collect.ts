@@ -111,7 +111,10 @@ export async function collectVatClawback(
   asOf: string,
   korActive = false,
 ): Promise<CollectedVatClawback> {
-  if (scheme !== "factuur" || korActive) return { ...EMPTY_CLAWBACK, readFailed: false };
+  // [KAS-VOORBELASTING] Both schemes reach the detector now: a kas owner deducts voorbelasting on
+  // the invoice date, so an old unpaid purchase carries the same art. 29 lid 7 liability. The KOR
+  // short-circuit stays — there is no deduction to give back.
+  if (korActive) return { ...EMPTY_CLAWBACK, readFailed: false };
   // 'received' is the only purchase status whose BTW the ledger actually put in 5b while the
   // invoice is still open. A supplier creditnota sits in the same status, and the pure detector
   // needs it to measure how much of the original it reverses — [DEEL-CREDIT] a PART of it leaves

@@ -2732,6 +2732,13 @@ export async function buildClosingPackageZip(args: {
     invoice_type: i.invoice_type,
     total_ex_btw: i.total_ex_btw,
     btw_amount: i.btw_amount,
+    id: (i as { id?: string | null }).id ?? null,
+    // [AANSLAG] Both handles for the tax-letter test, which the engine now asks on both schemes:
+    // the stored kind and the sender's name. Selected all along and dropped here, so a
+    // Belastingdienst letter booked as an ordinary purchase — its "btw" (a misread: no letter of
+    // the Belastingdienst carries any) landing in 5b as voorbelasting.
+    tax_kind: (i as { tax_kind?: string | null }).tax_kind ?? null,
+    client_name: (i as { client_name?: string | null }).client_name ?? null,
     rate_lines: (i as { id?: string }).id ? rateSharesByInvoice.get((i as { id: string }).id) ?? null : null,
     exempt_ex: (i as { id?: string }).id ? exemptExByInvoice.get((i as { id: string }).id) ?? null : null,
     vat_deduction: (i as { id?: string }).id ? exemption.deductionByInvoice.get((i as { id: string }).id) ?? null : null,
@@ -2815,7 +2822,7 @@ export async function buildClosingPackageZip(args: {
   // [KASSTELSEL] Note the basis on the concept, and hard-warn on paid-but-undated money (its BTW
   // can't be placed in a quarter → the concept could be too low). The accountant sees both.
   if (kasResolution.scheme === "kas") {
-    regimeNotes.push("Kasstelsel actief — de BTW is berekend op de BETAALdatum van de facturen (niet de factuurdatum).");
+    regimeNotes.push("Kasstelsel actief — de BTW over de omzet is berekend op de BETAALdatum van de verkoopfacturen (niet de factuurdatum). De voorbelasting (5b) volgt de datum van de inkoopfacturen.");
     if (kasResolution.undatedPaidCount > 0) {
       warnings.push({
         code: "kas_undated_paid",

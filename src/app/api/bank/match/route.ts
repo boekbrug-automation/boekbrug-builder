@@ -140,6 +140,12 @@ export async function GET() {
   // empty map means "nothing refused", which is exactly today's behaviour. Logged, not raised: the
   // page is worth showing either way.
   let rejectedByTx = new Map<string, Set<string>>();
+  // [BLIND-GEMATCHT] Two signals this page can lose without any visible sign: the memory of
+  // what the owner already confirmed, and the list of suggestions they refused. Losing either
+  // makes the matcher answer worse than it did yesterday, for a reason nobody can see. So the
+  // loss travels with the answer.
+  let refusalsUnavailable = false;
+  let memoryUnavailable = false;
   try {
     const rejectRows = await fetchAllRows<{ transaction_id: string | null; invoice_id: string | null }>(
       (from, to) =>
@@ -153,6 +159,10 @@ export async function GET() {
     );
     rejectedByTx = rejectionsByTransaction(rejectRows);
   } catch (e) {
+    // [BLIND-GEMATCHT] Recorded, not only logged. A refused suggestion coming back is the app
+    // asking a question the owner already answered — and if nobody says why, the owner's
+    // conclusion is that their ✗ does not stick.
+    refusalsUnavailable = true;
     console.warn("[NIET-DEZE-FACTUUR] refusals could not be read — a refused suggestion may come back", {
       userId: user.id, error: e instanceof Error ? e.message : String(e),
     });
@@ -160,11 +170,12 @@ export async function GET() {
 
   // [SUPPLIER-IBAN] The account each supplier is known to bill from, for the invoices whose own
   // document never named one. Best-effort: an empty map leaves the matcher exactly as it was.
+  // [BLIND-LEVERANCIER] …and when that map is empty because the READ failed, it joins the two
+  // losses already carried below: same channel, same rule — only when there is something to admit.
   const rawInvoices = (invRows ?? []) as (InvoiceForMatching & { supplier_id?: string | null })[];
-  const invoices: InvoiceForMatching[] = withSupplierIbans(
-    rawInvoices,
-    await fetchSupplierIbans(pipeline, user.id, rawInvoices),
-  );
+  const supplierIbans = await fetchSupplierIbans(pipeline, user.id, rawInvoices);
+  const supplierIbansUnavailable = supplierIbans.unavailable;
+  const invoices: InvoiceForMatching[] = withSupplierIbans(rawInvoices, supplierIbans.ibans);
 
   // [GEHEUGEN] What the owner has already confirmed, read back. Derived from the link rows a
   // confirmation writes anyway — there is no memory table, so there is nothing to migrate and
@@ -175,6 +186,7 @@ export async function GET() {
   // reason to show the owner a worse answer than yesterday's, and this GET renders the whole bank
   // page.
   const memory = await loadMatchMemory(pipeline, user.id).catch((e) => {
+    memoryUnavailable = true;
     console.error("[GEHEUGEN] confirmed-match memory read failed — matching without it", e);
     return null;
   });
@@ -876,5 +888,10 @@ export async function GET() {
       none: result.noneCount,
     },
     suggestions: allSuggestions,
+    // [BLIND-GEMATCHT] What this answer could NOT use. Absent when everything was read, so the
+    // screen says nothing on the ordinary day; present is an admission the owner can act on.
+    ...(memoryUnavailable || refusalsUnavailable || supplierIbansUnavailable
+      ? { degraded: { memory: memoryUnavailable, refusals: refusalsUnavailable, supplierIbans: supplierIbansUnavailable } }
+      : {}),
   });
 }

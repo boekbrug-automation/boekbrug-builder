@@ -4,7 +4,11 @@
 //
 //   factuurstelsel (accrual)  — BTW lands in the quarter of the INVOICE date (the default,
 //                               and how BoekBrug has always computed).
-//   kasstelsel (cash basis)   — BTW lands in the quarter the invoice is PAID.
+//   kasstelsel (cash basis)   — the BTW you OWE lands in the quarter the sales invoice is PAID.
+//                                 [KAS-VOORBELASTING] The deduction does NOT move with it:
+//                                 voorbelasting is deducted in the period of the purchase invoice
+//                                 on both schemes ("De factuurdatum bepaalt in welk tijdvak u de
+//                                 btw aftrekt" — Belastingdienst).
 //
 // The election lives on profiles.vat_scheme + profiles.vat_scheme_since. The `since` date is
 // load-bearing: a bare global flag would, on the recompute-on-read truth layer, retroactively

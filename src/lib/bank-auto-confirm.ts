@@ -33,7 +33,11 @@ import {
 import { applyConfidenceVeto } from "./bank-match-confidence";
 import { rowToTransaction, type BankTransactionDbRow } from "./bank-import";
 import { planBatchAutoConfirm, type BatchCandidateInvoice } from "./bank-batch-reconcile";
-import { recordPaymentLinks } from "./bank-tx-links";
+// [EEN-GELDMUTATIE] recordPaymentLinks is gone from this file on purpose. It UPSERTS the link row
+// (replacing amount_applied); confirm_bank_payment writes the same row inside the transaction with
+// ON CONFLICT … DO UPDATE SET amount_applied = existing + applied, which ACCUMULATES. Keeping both
+// would mean two writers of one row with two different arithmetics, one of them outside the
+// transaction that owns it. The door writes the evidence; nobody writes it twice.
 import { logAuditAction } from "./audit";
 import { createNotification } from "./notifications";
 import { getVatScheme } from "./vat-scheme";
@@ -213,9 +217,13 @@ export async function runBankAutoConfirm(args: {
   // matcher, the batch reconciler, the hidden-competitor scan — sees the same rows. A signal that
   // reaches one pass and not another is a guard that does not exist.
   const rawInvoices = invRows as (InvoiceForMatching & { amount_paid?: number | null; supplier_id?: string | null })[];
+  // [BLIND-LEVERANCIER] The lookup now says whether it answered. Nothing here changes on a
+  // failure and nothing needs to: this pass only ever BOOKS on a score, a missing signal can only
+  // lower one, so a lost read makes it confirm LESS — never wrongly. The two owner-facing entry
+  // points render the loss; an automatic pass has no screen to render it on.
   const allInvoices: MatchableInvoice[] = withSupplierIbans(
     rawInvoices,
-    await fetchSupplierIbans(pipeline, userId, rawInvoices),
+    (await fetchSupplierIbans(pipeline, userId, rawInvoices)).ibans,
   );
   // [PARTIAL-PAY] Auto-confirm books full-amount matches by writing status='paid' directly (not
   // via apply_bank_payment), so it must NEVER touch an invoice that is mid-instalment (amount_paid
@@ -463,112 +471,100 @@ export async function runBankAutoConfirm(args: {
     // 'verwerkt' exclusion) — authoritative when payClient is service_role (no DB trigger).
     if (!isEligible(m.transaction, inv)) continue;
 
-    // (a) invoice → paid. .select() detects a concurrent pay (0 rows) → skip, never re-own.
-    //     [BANK-PAYDATE] the real settlement date is the bank line's date (cross-quarter safe).
-    //     [B4-WRITE-GUARD] Re-assert the accountant 'verwerkt' exclusion IN the WHERE clause, not
-    //     only in the (possibly minutes-stale) isEligible read above. From cron/import/intake the
-    //     payClient is service-role — no DB trigger with auth.uid() — so without this, an invoice
-    //     the accountant locked in the read-to-write window was still flipped to 'paid'. The .or
-    //     keeps NULL accountant_status matchable (NEQ alone would exclude NULL rows in SQL).
-    const { data: payData, error: payErr } = await payClient
-      .from("invoices")
-      // [PARTIAL-PAY] amount_paid gaat MEE. Deze update zette wel de status op 'paid' en liet de
-      // kolom op 0 staan, terwijl de koppeling hieronder het volle bedrag als amount_applied
-      // vastlegt. De schermen liegen daar niet van — openAmount leest de status eerst — maar de
-      // geldinvariant `amount_paid = Σ amount_applied` is dan geschonden, en money-invariants
-      // meldt dat als `payments_without_paid` op /dashboard/klaar: het scherm waar de eigenaar
-      // beslist zijn kwartaal weg te geven. Gemeten in de productiedatabase: veertien facturen,
-      // samen € 5.321,68, allemaal keurig betaald en allemaal daar als verschil gemeld.
+    // [EEN-GELDMUTATIE] One financial mutation, one transaction. This pass used to write the three
+    // halves of a booking itself — invoice → 'paid', bank line → 'matched', and the allocation row
+    // — as three separate statements with a hand-written compensating update if the second failed.
+    // Its four siblings never did: apply_bank_payment, confirm_bank_payment, allocate_bank_payment
+    // and book_bank_batch each take a row lock on the line AND on the invoice, decide, write all
+    // three, and commit or roll back as one. This was the only writer outside that contract, and
+    // measured in production it is the LARGEST one: 160 of the bookings in the audit trail.
+    //
+    // What that cost, precisely, and why a compensator is not a transaction:
+    //   · the allocation row — the evidence the other two rest on — was written LAST and had no
+    //     compensation at all. A failure there left an invoice paid and a line matched with nothing
+    //     recording what settled what, which is exactly the state recompute_invoice_amount_paid
+    //     reads as "Σ amount_applied = 0" and undoes on the next unlink.
+    //   · the rollback could itself fail ([ROLLBACK-LOUD] said so), and a failed compensator is a
+    //     broken invariant with a log line, not a rolled-back transaction.
+    //   · nothing re-read the LINE's remaining budget, so the one invariant with live violations in
+    //     production — Σ amount_applied ≤ |line| — was enforced nowhere on this path.
+    //
+    // So this books through confirm_bank_payment, the door /api/bank/confirm already uses for a
+    // single invoice. Nothing about WHICH invoice is booked changes: the matcher, the tier, the
+    // confidence veto, the kas gate, the hidden-competitor scan and the isEligible re-check above
+    // are untouched. Only the mutation moves.
+    //
+    // payClient, not pipeline: this is the actor's money write, so the accountant-'verwerkt'
+    // trigger fires with a real auth.uid() wherever a session exists — the same reason the batch
+    // pass above calls book_bank_batch on payClient.
+    const { data: bookedRows, error: bookErr } = await payClient.rpc("confirm_bank_payment", {
+      p_user_id: userId,
+      p_tx_id: txId,
+      p_invoice_id: invoiceId,
+      p_pay_date: m.transaction.date || null,
+    });
+
+    if (bookErr) {
+      // [VERWERKT-WOORDENLIJST] The refusals this door raises are ORDINARY outcomes for an
+      // unattended pass, not faults: between reading the candidates and booking them, a human or
+      // another pass may have paid the invoice, the accountant may have locked it, the line may
+      // have been spent elsewhere, or the invoice may have left a payable state. Each of those is
+      // "skip this one", exactly as the old 0-rows-from-.select() was — and the old code could not
+      // tell them apart from a real failure, because it never saw them as errors at all.
       //
-      // Een vals alarm op precies het paneel dat vertrouwen moet kopen is duurder dan geen paneel.
-      // Deze pas boekt alleen volledig openstaande facturen op hun hele totaal (zie de filter op
-      // amount_paid === 0 hierboven), dus dat totaal is exact wat er is voldaan — hetzelfde
-      // bedrag dat de koppeling krijgt, uit dezelfde uitdrukking.
-      .update({ status: "paid", amount_paid: Math.abs(Number(inv.total_inc_btw ?? 0)), payment_method: "bank", marked_paid_at: new Date().toISOString(), payment_date: m.transaction.date || null })
-      .eq("id", invoiceId)
-      .neq("status", "paid")
-      .or("accountant_status.is.null,accountant_status.neq.verwerkt")
-      .select("id");
-    if (payErr) {
-      // [BATCH-STIL] Same shape as the batch swallow above, same reasoning. The two EXPECTED
-      // outcomes of this write do not arrive as an error at all: an invoice the accountant locked,
-      // or one someone else just paid, comes back as zero rows on the next line. So `payErr` is
-      // never the ordinary case — it is the database refusing the write, and the invoice stays
-      // open while the bank line stays unmatched with nobody told which one.
-      reportHandledFailure({
-        tag: "BANK-AUTO-CONFIRM",
-        message: "marking an invoice paid failed — the bank line stays unmatched",
-        severity: "data-integrity",
-        context: { userId, invoiceId, txId, code: (payErr as { code?: string }).code ?? null, error: payErr.message },
-      });
-      continue;
-    }
-    if (!payData || payData.length === 0) continue; // concurrently paid — not ours to link
-
-    // (b) link the bank line → matched (single invoice ⇒ fully covered). 0 rows ⇒ roll back.
-    //     'amount_only' also stamps auto_match_reason so the UI can flag it "controleer". The
-    //     column is set ONLY for that tier, so a not-yet-applied migration leaves the 'certain'
-    //     path untouched (it never writes the column) — those keep booking; an 'amount_only' write
-    //     would just error → roll back → that one line stays a one-tap manual confirm (safe).
-    const linkPayload: Record<string, unknown> = { status: "matched", invoice_id: invoiceId };
-    if (tier === "amount_only") linkPayload.auto_match_reason = "amount_only";
-    const { data: linkData, error: linkErr } = await pipeline
-      .from("bank_transactions")
-      // auto_match_reason is added by bank_auto_match_reason.sql and not yet in the generated types.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .update(linkPayload as any)
-      .eq("id", txId)
-      .eq("user_id", userId)
-      .eq("status", "pending")
-      .select("id");
-
-    if (linkErr || !linkData || linkData.length === 0) {
-      // [ROLLBACK-LOUD] The rollback itself can fail (transient DB error) — that leaves an invoice
-      // 'paid' with NO linked bank line, the exact state this design promises never exists. It
-      // cannot be silent: log it with ids so it is findable and fixable (the owner can also undo
-      // via pay-toggle). A double fault is rare; an invisible double fault is a lost truth.
-      const { error: rbErr } = await payClient
-        .from("invoices")
-        // amount_paid gaat mee terug, anders laat een geslaagde terugdraai een factuur achter die
-        // niet meer betaald is en toch een bedrag draagt — de spiegelfout van de regel hierboven.
-        .update({ status: inv.status, amount_paid: inv.amount_paid ?? 0, payment_method: null, marked_paid_at: null, payment_date: null })
-        .eq("id", invoiceId)
-        .eq("status", "paid");
-      if (rbErr) {
-        // [ALARM] The code above calls this "the exact state this design promises never exists".
-        // A promise nobody is told has been broken is not a promise — this one wakes someone.
+      // Matched on the wording the RPCs are contractually held to (the six substrings fourteen
+      // callers triage on, plus this repo's own [NOOIT-BETAALBAAR] marker). Anything else IS a
+      // fault and is reported, because a database refusing a money write must never be silent.
+      const msg = String((bookErr as { message?: string }).message ?? bookErr);
+      const expected =
+        msg.includes("already fully paid") || msg.includes("already covered") ||
+        msg.includes("fully applied") || msg.includes("verwerkt") ||
+        msg.includes("no longer payable") || msg.includes("[NOOIT-BETAALBAAR]");
+      if (!expected) {
         reportHandledFailure({
           tag: "BANK-AUTO-CONFIRM",
-          message: "pay rollback FAILED — invoice may be paid with no bank link",
+          message: "the payment door refused an auto-confirm — the invoice stays open and the line unmatched",
           severity: "data-integrity",
-          context: { userId, invoiceId, txId, error: rbErr.message },
+          context: { userId, invoiceId, txId, code: (bookErr as { code?: string }).code ?? null, error: msg },
         });
       }
       continue;
     }
 
-    // [BANK-TX-INVOICES] Record the exact invoice this payment paid so a later reversal
-    // (unlink / delete-statement) reverses by id, never by number. Best-effort — the money-truth
-    // is the tx.invoice_id + invoice.status above; this row is only the collision-free undo index.
-    // [PARTIAL-PAY] The amount MUST travel with the link: recompute_invoice_amount_paid re-derives
-    // invoices.amount_paid as SUM(amount_applied) on every later unlink/undo, so a NULL here would
-    // silently zero a genuinely settled invoice. This pass only ever books fully-open invoices
-    // (amount_paid === 0, line 97) at their full total, so the applied amount is that total.
-    // [LINKS-WRITE-HONEST] De boolean wordt gelezen. Hij bestaat om gelezen te worden, en dit was
-    // de vierde plek die hem liet vallen. Zonder koppelrij herleidt recompute_invoice_amount_paid
-    // amount_paid bij de volgende ontkoppeling of terugdraai als Σ amount_applied, vindt niets, en
-    // zet deze zojuist betaalde factuur terug op haar volle bedrag: geld dat binnen is, als schuld.
-    const linksRecorded = await recordPaymentLinks(pipeline, userId, txId, [invoiceId], {
-      [invoiceId]: Math.abs(Number(inv.total_inc_btw ?? 0)),
-    });
-    if (!linksRecorded) {
-      reportHandledFailure({
-        tag: "BANK-TX-INVOICES",
-        message: "payment link not recorded for an auto-confirmed invoice — the reversal index is incomplete",
-        severity: "data-integrity",
-        context: { userId, invoiceId, txId },
-      });
+    // An empty result is the door's own answer to "this line is no longer pending" — someone else
+    // claimed it between the read and the write. It is the same skip the old .eq("status","pending")
+    // compare-and-set produced, now decided under the line's row lock instead of racing for it.
+    if (!Array.isArray(bookedRows) || bookedRows.length === 0) continue;
+
+    // [AUTO-MATCH-REDEN] A UI hint, not money: 'amount_only' means matched on amount + name with no
+    // printed reference, and the bank screen flags those "controleer". Deliberately a separate write
+    // AFTER the transaction has committed — the booking above is correct whether or not this badge
+    // lands, and undoing a correct payment because a label failed is the compensating-rollback
+    // thinking this whole change removes. Logged, never rolled back.
+    if (tier === "amount_only") {
+      const { error: reasonErr } = await pipeline
+        .from("bank_transactions")
+        // auto_match_reason is added by bank_auto_match_reason.sql and not yet in the generated types.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .update({ auto_match_reason: "amount_only" } as any)
+        .eq("id", txId)
+        .eq("user_id", userId);
+      if (reasonErr) {
+        // [ALARM] Not a log line. The money is committed and correct; what failed is the flag that
+        // tells the owner this one was matched on amount and name ALONE, with no printed reference.
+        // Unflagged, the weakest auto-booking this pass makes is indistinguishable on screen from
+        // the strongest — a safeguard the app always offers, silently not offered this once. That
+        // is the definition of gate-unavailable, and it is the failure mode this change introduced
+        // by moving the badge out of the money transaction, so it is wired to the channel here.
+        reportHandledFailure({
+          tag: "AUTO-MATCH-REDEN",
+          message: "booking is committed, the 'controleer' flag is not — an amount-only match is on screen unflagged",
+          severity: "gate-unavailable",
+          context: { userId, txId, invoiceId, error: reasonErr.message },
+        });
+      }
     }
+
 
     confirmed.push({ transactionId: txId, invoiceId, invoiceNumber: inv.invoice_number, amount: m.transaction.amount ?? 0, tier, paymentDate: m.transaction.date || null });
     await logAuditAction({

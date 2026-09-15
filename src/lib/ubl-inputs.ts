@@ -33,6 +33,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { UblInvoiceHeader, UblInvoiceLine } from "./ubl-export";
+// [CREDITNOTA-EXTERN] The typed reference of a standalone creditnota, trimmed the one way.
+import { creditReferenceOf } from "./creditnota";
 
 /**
  * The invoice columns an e-factuur needs. One string literal, because a template literal or an
@@ -93,6 +95,8 @@ export const UBL_PROFILE_SELECT =
 
 /** One `invoices` row, as much of it as the generator's header needs. */
 export type UblInvoiceRow = {
+  // [CREDITNOTA-EXTERN] The row's own id: what originalInvoiceRef() reads the typed reference by.
+  id?: string | null;
   invoice_number: string | null;
   invoice_date: string | null;
   due_date: string | null;
@@ -125,16 +129,36 @@ export type UblOriginalRef = {
  */
 export async function originalInvoiceRef(
   supabase: SupabaseClient,
-  row: Pick<UblInvoiceRow, "invoice_type" | "original_invoice_id">,
+  row: Pick<UblInvoiceRow, "id" | "invoice_type" | "original_invoice_id">,
 ): Promise<UblOriginalRef | null> {
-  if (row.invoice_type !== "creditnota" || !row.original_invoice_id) return null;
-  const { data } = await supabase
+  if (row.invoice_type !== "creditnota") return null;
+  if (row.original_invoice_id) {
+    const { data } = await supabase
+      .from("invoices")
+      .select("invoice_number, invoice_date")
+      .eq("id", row.original_invoice_id)
+      .maybeSingle();
+    if (!data?.invoice_number) return null;
+    return { original_invoice_number: data.invoice_number, original_invoice_date: data.invoice_date ?? null };
+  }
+  // [CREDITNOTA-EXTERN] A standalone creditnota carries its reference itself — the number and
+  // date the owner typed for an invoice issued outside BoekBrug. Read apart, untyped: the two
+  // columns are newer than the generated types and than some installations, and a missing column
+  // costs the BillingReference, never the e-factuur (best-effort, like the linked read above).
+  if (!row.id) return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: typed, error } = await (supabase as any)
     .from("invoices")
-    .select("invoice_number, invoice_date")
-    .eq("id", row.original_invoice_id)
+    .select("credited_invoice_number, credited_invoice_date")
+    .eq("id", row.id)
     .maybeSingle();
-  if (!data?.invoice_number) return null;
-  return { original_invoice_number: data.invoice_number, original_invoice_date: data.invoice_date ?? null };
+  if (error) return null;
+  const ref = creditReferenceOf({
+    creditedNumber: (typed as { credited_invoice_number?: string | null } | null)?.credited_invoice_number,
+    creditedDate: (typed as { credited_invoice_date?: string | null } | null)?.credited_invoice_date,
+  });
+  if (!ref.originalNumber) return null;
+  return { original_invoice_number: ref.originalNumber, original_invoice_date: ref.originalDate };
 }
 
 /** One `invoice_lines` row. The optional group is optional here too — see the SELECT above. */

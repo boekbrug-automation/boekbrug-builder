@@ -13,6 +13,7 @@ import TurnoverInsights from './TurnoverInsights'
 // has no such file, and daily_turnover.source has allowed 'manual' since the table was created with
 // nothing ever writing it. See the header of HandmatigeDag.tsx for what that cost him.
 import HandmatigeDag from './HandmatigeDag'
+import AfrekeningImport from './AfrekeningImport'
 // [DESIGN] Palette and radius come from the shared source now
 // (src/lib/design/tokens.ts). This file used to declare its own copy; see the
 // header of tokens.ts for why the copies had to go — two of the values in them
@@ -343,6 +344,11 @@ export default function DagomzetImportClient(
             insights panel above through the same refreshTick the import commit uses, so the day
             appears in the figures immediately rather than after a reload. */}
         <HandmatigeDag korActive={korActive} cardPayouts={cardPayouts} onSaved={() => setRefreshTick((n) => n + 1)} />
+        {/* [AFREKENING-DEUR] Hoek 2 van de driehoek, die geen deur had. De Z-bon hierboven is de
+            kassa, dit is de pinautomaat zelf, en de bank is de derde. /api/eft/import bestond
+            sinds juli en geen scherm kon hem bereiken — een driehoek met een onbereikbare hoek
+            sluit niet. Zelfde ritme als de import erboven: lezen, laten zien, pas dan bewaren. */}
+        <AfrekeningImport onCommitted={() => setRefreshTick((n) => n + 1)} />
       </div>
     </div>
   )

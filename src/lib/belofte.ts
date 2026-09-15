@@ -55,12 +55,23 @@ export const BELOFTE_MINI = "Niets kwijtraken. De rest doen wij." as const;
  * De geruststelling onder een knop.
  *
  * Elk deel hiervan is een contractuele toezegging, geen marketingzin: "gratis" en "nooit
- * automatisch afgeschreven" staan in voorwaarden §5.2, en "geen proefperiode" is de reden
- * dat `trial_ends_at` bewust NIET in billing_subscription.sql staat. Verandert een van deze
- * drie, dan verandert er een contract mee.
+ * automatisch afgeschreven" staan in voorwaarden §5.2, en dat er niets wordt afgeschreven is de
+ * reden dat `trial_ends_at` bewust NIET in billing_subscription.sql staat. Verandert een van
+ * deze drie, dan verandert er een contract mee.
+
+ * ── [WELKOM-90] Waarom "geen proefperiode die afloopt" hier weg is ──────────────────────────
+ *
+ * Omdat het sinds de welkomstperiode niet meer waar is: elk nieuw account heeft negentig dagen
+ * de Plus-grenzen. De toezegging die eronder zat is dat wel, en die staat er nu voluit — de
+ * periode wordt GEEN abonnement en er wordt niets afgeschreven; na negentig dagen geldt het
+ * gratis plan, en alles wat er staat blijft leesbaar, doorzoekbaar en exporteerbaar.
+ *
+ * De oude zin is niet "verzacht": hij is vervangen door de zin die klopt. Een belofte die
+ * blijft staan nadat het product veranderde, is precies het soort onwaarheid waar dit bestand
+ * tegen bestaat.
  */
 export const BELOFTE_GERUST =
-  "Gratis · geen proefperiode die afloopt · nooit automatisch afgeschreven" as const;
+  "Je eerste 90 dagen met alles erop · daarna gratis verder · nooit automatisch afgeschreven" as const;
 
 /**
  * Wat de gebruiker zelf moet doen — de enige taak die overblijft. Drie stappen, want meer
@@ -94,6 +105,20 @@ export const BELOFTE_STAPPEN: readonly { kop: string; tekst: string }[] = [
  *
  * En het brak de regel uit belofte-en.ts: de Engelse pagina mag nooit MEER zeggen dan de
  * Nederlandse. Nu staat het op één plek, in beide talen, en verhuist het samen.
+ *
+ * ── [BELOFTE-WAAR] Waarom de slotzin veranderde, en waarom de belofte NIET breder werd ──
+ *
+ * Er stond: "Dat is het enige werk dat deze app doet." Dat was waar toen het er kwam te staan en
+ * is het niet meer. De app draait inmiddels ook het werk zelf (werkorders, ritten, klussen — elf
+ * vakken met hun eigen woorden), leest niet alleen maar verwerkt (dubbelen, btw-splitsing,
+ * leveranciersgeheugen, bankafletting), en rekent per kwartaal een gereedheidsoordeel uit dat de
+ * boekhouder per klant op zijn bord ziet. Een zin die zegt dat dit alles niet bestaat, is geen
+ * bescheiden belofte maar een onware.
+ *
+ * De verleiding is dan om de belofte te VERBREDEN — "werk, geld én administratie". Dat is precies
+ * de featurevergelijking die de rest van dit bestand weigert te voeren, en die BoekBrug verliest.
+ * "Alles wat deze app doet, dient die ene zin" houdt de belofte even smal en maakt de breedte
+ * ondergeschikt in plaats van zichtbaar: het is geen opsomming, het is een rangorde.
  */
 export const PROBLEEM_KOP = "Het probleem" as const;
 export const PROBLEEM_1 =
@@ -103,7 +128,7 @@ export const PROBLEEM_1 =
 export const PROBLEEM_2_VET = "De oplossing is niet dat jij leert boekhouden.";
 export const PROBLEEM_2 =
   " Het is dat er niets verdwijnt tussen het moment dat je een papiertje krijgt en het moment " +
-  "dat je boekhouder het nodig heeft. Dat is het enige werk dat deze app doet.";
+  "dat je boekhouder het nodig heeft. Alles wat deze app doet, dient die ene zin.";
 
 /**
  * De belofte richting de BOEKHOUDER. Een ander mens met een ander probleem: hij wil geen

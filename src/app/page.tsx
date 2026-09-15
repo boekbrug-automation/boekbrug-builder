@@ -59,9 +59,31 @@ const jsonLd = {
   ],
 }
 
+// [BELOFTE-WAAR] Vijf kaarten, en twee ervan zeiden iets anders dan de app doet.
+//
+// "Scan en klaar — de AI leest de leverancier, het bedrag en de BTW voor je uit" verkocht dit
+// product als een OCR-scanner. Dat is de drukste hoek van de markt en het is niet waar: lezen is
+// de eerste van acht stappen, en de zeven daarna zijn het verschil. Er staat nu wat er gebeurt,
+// in de volgorde waarin het gebeurt, met de laatste stap als de belangrijkste — wij vragen alleen
+// wat niet zeker is. Elke stap in die zin bestaat in de code; er staat geen enkele die nog moet
+// komen.
+//
+// En er ontbrak een hele kaart. Elf vakken hebben hun eigen werklaag met hun eigen woord
+// (werkorder, rit, klus, opdracht, reparatie, les) — de kapper bewust niet, want een knipbeurt is
+// bij de Kassa al afgerekend. Een monteur die deze pagina las, zag daar niets van terug en moest
+// concluderen dat dit een boekhoudpakket is dat zijn werk niet kent.
 const features = [
   { emoji: '🧾', title: 'Facturen die kloppen', body: 'Maak snel een factuur die klopt met de Nederlandse regels. Download hem als PDF.' },
-  { emoji: '📄', title: 'Scan en klaar', body: 'Upload een foto of PDF. De AI leest de leverancier, het bedrag en de BTW voor je uit.' },
+  {
+    emoji: '📄',
+    title: 'Verwerkt, niet alleen gelezen',
+    body: 'Wij lezen je bon, herkennen de leverancier, controleren de btw, zoeken dubbele facturen en koppelen de betaling. Je hoort alleen van ons wat niet zeker is.',
+  },
+  {
+    emoji: '🔧',
+    title: 'Ook je werk zelf',
+    body: 'Werkorders, ritten, klussen of schoonmaakrondes — met de woorden van jouw vak. Je uren, onderdelen en kosten worden de factuur.',
+  },
   { emoji: '📊', title: 'BTW altijd bij', body: 'Je omzet en BTW worden per kwartaal opgeteld. Zo is je aangifte zo klaar.' },
   { emoji: '🤝', title: 'Eén lijn met je boekhouder', body: 'Deel je facturen met je boekhouder. Geen mappen vol PDF’s meer mailen.' },
 ]

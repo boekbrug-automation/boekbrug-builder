@@ -267,6 +267,10 @@ async function runScan(req: NextRequest) {
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildContent(mime, base64) }],
       }),
+      // [LEZER-KLOK] This route's own ceiling is 30 s, and a stalled connection would spend all
+      // of it and then be killed — so the visitor gets a platform error page instead of the
+      // sentence below. Abort first, with room left to answer.
+      signal: AbortSignal.timeout(22_000),
     })
 
     if (!res.ok) {

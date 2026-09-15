@@ -225,10 +225,18 @@ console.log("\n— [COUNT-BASIS] de tellingen beschrijven de set waar de cijfers
 
   // Kasstelsel: dezelfde getallen betekenen iets anders, en de zin zegt dat nu ook.
   const cash = buildAangifte(input, compl({ incomingInvoiceCount: 10, outgoingInvoiceCount: 3, scheme: "kas" }), "Q1 2026");
-  check("kas: 5b zegt BETAALD, niet 'ingevoerd'",
-    /die je in dit kwartaal hebt BETAALD \(kasstelsel\)/.test(note(cash, /Voorbelasting/)));
-  check("kas: 5b legt uit wat er dan NIET meetelt",
-    /Een onbetaalde inkoopfactuur telt pas mee zodra je hem betaalt\./.test(note(cash, /Voorbelasting/)));
+  // [KAS-VOORBELASTING] 5b is dated by the purchase invoice on BOTH schemes, so the sentence that
+  // said "die je hebt BETAALD" described a rule the Belastingdienst does not have. What the kas
+  // owner does get is the one line that says the two sides are dated differently.
+  check("kas: 5b noemt dezelfde ingevoerde inkoopfacturen als het factuurstelsel",
+    /Voorbelasting \(5b\) telt alleen 10 ingevoerde inkoopfactu/.test(note(cash, /Voorbelasting/)));
+  check("kas: 5b zegt nergens meer dat je hem eerst moet betalen",
+    !/BETAALD \(kasstelsel\)/.test(note(cash, /Voorbelasting/)));
+  check("kas: de aangifte legt uit dat alleen de omzet-BTW verschuift",
+    /alleen de BTW over je omzet naar de betaaldatum/.test(note(cash, /kasstelsel verschuift/)) &&
+    /voorbelasting trek je af in het kwartaal van de inkoopfactuur/.test(note(cash, /kasstelsel verschuift/)));
+  check("factuur: die uitleg staat er niet — er verschuift niets",
+    !acc.notes.some((n) => /kasstelsel verschuift/.test(n)));
   check("kas: 5a noemt de betaalde verkoopfacturen",
     /3 in dit kwartaal betaalde verkoopfactu/.test(note(cash, /Verkoop-BTW/)));
   check("kas verandert geen enkel BEDRAG — alleen de zin",
