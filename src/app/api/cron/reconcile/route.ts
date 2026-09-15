@@ -19,21 +19,38 @@ import * as Sentry from "@sentry/nextjs";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { fetchAllRows } from "@/lib/supabase-paginate";
 import { timingSafeEqualStr } from "@/lib/timing-safe";
-import { runBankAutoConfirm } from "@/lib/bank-auto-confirm";
-import { reconcileCashSettlements } from "@/lib/cash-settle";
+// [RECONCILE-VOLGORDE] The pass list, its order and the authority each pass writes with are read
+// from ONE owner, which the "Matchen met bank & kas" button reads too. This cron does not name its
+// own passes: it walks passesFor("cron"). What stays here is what this cron alone decides — which
+// failures it isolates, and which of them are worth telling the owner about.
+import { passesFor, type ReconcilePassId, type AutoConfirmed } from "@/lib/reconcile-sequence";
 // [KAS-ZACHT] A removed cash movement counts in no total — one definition, see cash-live.ts.
 import { liveCashEntries } from "@/lib/cash-live";
-import { applyLearnedBankCategories } from "@/lib/bank-auto-categorize";
 import { createNotification } from "@/lib/notifications";
 import { telWoord } from "@/lib/nl-plural";
 // [CRON-HARTSLAG] Vastleggen DAT deze cron draaide — zie src/lib/cron-heartbeat.ts.
 import { beginCronRun, finishCronRun } from "@/lib/cron-heartbeat";
 // [AUTO-INCASSO] Book the invoices the bank collects on its own — see src/lib/incasso-settle.ts.
-import { incassoSupported, settleIncassoForUser, proposeIncassoMandates, markIncassoSuggested } from "@/lib/incasso-settle";
+// settleIncassoForUser and proposeIncassoMandates are NOT imported here — they are passes, and a
+// pass is invoked through the sequence. incassoSupported answers a discovery question (which users
+// are worth visiting at all) and markIncassoSuggested is this cron's own follow-through on its own
+// notification; neither is a reconcile pass.
+import { incassoSupported, markIncassoSuggested } from "@/lib/incasso-settle";
 import { amsterdamToday, formatEuroNL } from "@/lib/format-nl";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
+
+// [RECONCILE-VOLGORDE] WHICH pass failures this cron survives is the CRON's decision, not the
+// sequence's — the button answers the same failures a different way, and the measurement that led
+// to this file said so explicitly: do not unify failure handling. A pass NOT listed here fails the
+// whole user for this run (the per-user catch below counts it and Sentry's it), which is exactly
+// what the bank and cash passes did before this list existed.
+const CRON_ISOLATED_PASSES: ReadonlySet<ReconcilePassId> = new Set<ReconcilePassId>([
+  "auto-categorize",
+  "incasso-settle",
+  "incasso-propose",
+]);
 
 export async function GET(req: NextRequest) {
   // [CRON-HARTSLAG] Het startmoment, zodat een afgebroken run herkenbaar blijft.
@@ -216,85 +233,115 @@ export async function GET(req: NextRequest) {
       break;
     }
     try {
-      const confirmed = await runBankAutoConfirm({ payClient: pipeline, pipeline, userId: uid });
-      await reconcileCashSettlements(pipeline, uid);
-      // [BANK-AUTO-CATEGORIZE] Code fresh bank lines from the owner's learned memory (confident
-      // only) so uncategorized money shrinks on its own between logins. A failure here is no longer
-      // swallowed silently — it is logged + Sentry'd (previously a persistently-failing user's
-      // auto-categorization could stop forever with no trace).
-      let categorized: Awaited<ReturnType<typeof applyLearnedBankCategories>> = [];
-      try {
-        categorized = await applyLearnedBankCategories({ pipeline, userId: uid });
-      } catch (ce) {
-        console.error("[CRON-RECONCILE] auto-categorize failed (non-fatal)", { uid, error: ce instanceof Error ? ce.message : String(ce) });
-        Sentry.captureException(ce instanceof Error ? ce : new Error(String(ce)), { tags: { cron: "reconcile", phase: "auto-categorize" }, extra: { uid } });
-      }
-      // [AUTOCAT-NOTIFY] An automatic category lands in the P&L IMMEDIATELY (the engine counts any
-      // non-null category). Push a single "controleer" nudge so a machine coding is never applied to
-      // the owner's books with zero signal — the review tab (?scope=review) is otherwise never linked.
-      if (categorized.length > 0) {
-        await createNotification({
-          userId: uid,
-          type: "status",
-          title: `${telWoord(categorized.length, "banktransactie", "banktransacties")} automatisch gecategoriseerd`,
-          body: "We hebben deze op basis van eerdere keuzes ingedeeld. Controleer ze even — ze tellen al mee in je cijfers.",
-          link: "/dashboard/bank/categoriseren?scope=review",
-        }).catch((ne) => console.error("[CRON-RECONCILE] autocat notify failed", { uid, error: ne instanceof Error ? ne.message : String(ne) }));
-      }
-      // [AUTO-INCASSO] Book what the bank collected on its own. It runs AFTER the bank pass on
-      // purpose: a real bank line is evidence and this is an assumption, so wherever both could
-      // settle the same invoice, the evidence gets there first and the assumption finds it paid.
-      //
-      // Never fatal to the user's reconcile — a failed pass leaves the invoices open, which is the
-      // state they are in today, and the next hour tries again.
-      try {
-        const incasso = await settleIncassoForUser(pipeline, pipeline, uid, amsterdamToday());
-        if (incasso.booked.length > 0) {
-          incassoBooked += incasso.booked.length;
-          const sum = incasso.booked.reduce((s, b) => s + b.amount, 0);
-          // The owner is TOLD. This is the one pass in the reconcile that books a payment nobody
-          // observed, so it may never be the quiet one — "we marked five invoices paid" has to
-          // reach the person whose books they are, with the amount, so a wrong one is catchable.
-          await createNotification({
-            userId: uid,
-            type: "payment",
-            title: `${telWoord(incasso.booked.length, "factuur")} automatisch afgeschreven`,
-            body: `${formatEuroNL(sum)} is bij je incasso-leveranciers afgeschreven. We hebben ze op betaald gezet — kloppen ze niet? Zet ze terug op openstaand.`,
-            link: "/dashboard/incoming/manage?filter=paid",
-          }).catch((ne) => console.error("[AUTO-INCASSO] notify failed", { uid, error: ne instanceof Error ? ne.message : String(ne) }));
-        }
-      } catch (ie) {
-        console.error("[AUTO-INCASSO] settle failed (non-fatal)", { uid, error: ie instanceof Error ? ie.message : String(ie) });
-        Sentry.captureException(ie instanceof Error ? ie : new Error(String(ie)), { tags: { cron: "reconcile", phase: "auto-incasso" }, extra: { uid } });
-      }
+      // [RECONCILE-VOLGORDE] Both clients are the service-role pipeline here, and that is not a
+      // shortcut: this cron runs unattended, for every user, with no session in existence — there
+      // is no actor client to be had. The button hands the same `actorPay` role its SESSION client,
+      // which is the whole reason the role is named after what it DOES rather than after a library.
+      const ctx = { actorPay: pipeline, service: pipeline, userId: uid, today: amsterdamToday() };
+      let confirmed: AutoConfirmed[] = [];
 
-      // [DD-SIGNAL] …and the half where the app notices on its own. The bank statement NAMES a
-      // SEPA incasso — MT940's NDDT, CAMT's <MndtId>, ING's "IC", Rabobank's Machtigingskenmerk —
-      // so a supplier that has collected twice does not need the owner to remember the mandate.
-      //
-      // It PROPOSES. Turning it on changes how that supplier's invoices are booked from then on,
-      // and this app's rule for that step is the one at the top of bank-matching.ts: the system
-      // prepares, the human confirms. Asked once per supplier (incasso_suggested_at) — an hourly
-      // repeat is a notification the owner switches off, taking the ones that matter with it.
-      try {
-        const proposals = await proposeIncassoMandates(pipeline, uid);
-        if (proposals.length > 0) {
-          const names = proposals.slice(0, 3).map((p) => p.name).join(", ");
-          const more = proposals.length > 3 ? ` en ${proposals.length - 3} andere` : "";
-          await createNotification({
-            userId: uid,
-            type: "status",
-            title: proposals.length === 1 ? `${proposals[0].name} schrijft automatisch af` : `${proposals.length} leveranciers schrijven automatisch af`,
-            body: `Dat zien we op je bankafschrift bij ${names}${more}. Zet het aan, dan vragen we je niet meer om deze facturen te betalen — en zetten we ze na de vervaldatum vanzelf op betaald.`,
-            link: "/dashboard/incoming/manage",
-          }).catch((ne) => console.error("[DD-SIGNAL] proposal notify failed", { uid, error: ne instanceof Error ? ne.message : String(ne) }));
-          // Only AFTER the notification went out: stamping first and then failing to send would
-          // lose the proposal for good, since the question is asked exactly once.
-          await markIncassoSuggested(pipeline, uid, proposals, new Date().toISOString());
-          incassoProposed += proposals.length;
+      for (const pass of passesFor("cron")) {
+        try {
+          const r = await pass.run(ctx);
+          switch (r.id) {
+            case "bank-auto-confirm":
+              confirmed = r.booked;
+              break;
+            case "cash-settle":
+              // Idempotent + self-healing, and it reports its own bail through its summary; this
+              // cron has never read that summary and does not start now.
+              break;
+            case "auto-categorize":
+              // [BANK-AUTO-CATEGORIZE] Code fresh bank lines from the owner's learned memory
+              // (confident only) so uncategorized money shrinks on its own between logins.
+              //
+              // [AUTOCAT-NOTIFY] An automatic category lands in the P&L IMMEDIATELY (the engine
+              // counts any non-null category). Push a single "controleer" nudge so a machine coding
+              // is never applied to the owner's books with zero signal — the review tab
+              // (?scope=review) is otherwise never linked.
+              if (r.categorized.length > 0) {
+                await createNotification({
+                  userId: uid,
+                  type: "status",
+                  title: `${telWoord(r.categorized.length, "banktransactie", "banktransacties")} automatisch gecategoriseerd`,
+                  body: "We hebben deze op basis van eerdere keuzes ingedeeld. Controleer ze even — ze tellen al mee in je cijfers.",
+                  link: "/dashboard/bank/categoriseren?scope=review",
+                }).catch((ne) => console.error("[CRON-RECONCILE] autocat notify failed", { uid, error: ne instanceof Error ? ne.message : String(ne) }));
+              }
+              break;
+            case "incasso-settle":
+              // [AUTO-INCASSO] What the bank collected on its own. Why it runs AFTER the bank pass,
+              // and why it is cron-only, is written where the order is decided — see the pass's
+              // `why` in reconcile-sequence.ts.
+              if (r.incasso.booked.length > 0) {
+                incassoBooked += r.incasso.booked.length;
+                const sum = r.incasso.booked.reduce((s, b) => s + b.amount, 0);
+                // The owner is TOLD. This is the one pass in the reconcile that books a payment
+                // nobody observed, so it may never be the quiet one — "we marked five invoices
+                // paid" has to reach the person whose books they are, with the amount, so a wrong
+                // one is catchable.
+                await createNotification({
+                  userId: uid,
+                  type: "payment",
+                  title: `${telWoord(r.incasso.booked.length, "factuur")} automatisch afgeschreven`,
+                  body: `${formatEuroNL(sum)} is bij je incasso-leveranciers afgeschreven. We hebben ze op betaald gezet — kloppen ze niet? Zet ze terug op openstaand.`,
+                  link: "/dashboard/incoming/manage?filter=paid",
+                }).catch((ne) => console.error("[AUTO-INCASSO] notify failed", { uid, error: ne instanceof Error ? ne.message : String(ne) }));
+              }
+              break;
+            case "incasso-propose":
+              // [DD-SIGNAL] …and the half where the app notices on its own. The bank statement
+              // NAMES a SEPA incasso — MT940's NDDT, CAMT's <MndtId>, ING's "IC", Rabobank's
+              // Machtigingskenmerk — so a supplier that has collected twice does not need the owner
+              // to remember the mandate.
+              //
+              // It PROPOSES. Turning it on changes how that supplier's invoices are booked from
+              // then on, and this app's rule for that step is the one at the top of
+              // bank-matching.ts: the system prepares, the human confirms. Asked once per supplier
+              // (incasso_suggested_at) — an hourly repeat is a notification the owner switches off,
+              // taking the ones that matter with it.
+              if (r.proposals.length > 0) {
+                const names = r.proposals.slice(0, 3).map((p) => p.name).join(", ");
+                const more = r.proposals.length > 3 ? ` en ${r.proposals.length - 3} andere` : "";
+                await createNotification({
+                  userId: uid,
+                  type: "status",
+                  title: r.proposals.length === 1 ? `${r.proposals[0].name} schrijft automatisch af` : `${r.proposals.length} leveranciers schrijven automatisch af`,
+                  body: `Dat zien we op je bankafschrift bij ${names}${more}. Zet het aan, dan vragen we je niet meer om deze facturen te betalen — en zetten we ze na de vervaldatum vanzelf op betaald.`,
+                  link: "/dashboard/incoming/manage",
+                }).catch((ne) => console.error("[DD-SIGNAL] proposal notify failed", { uid, error: ne instanceof Error ? ne.message : String(ne) }));
+                // Only AFTER the notification went out: stamping first and then failing to send
+                // would lose the proposal for good, since the question is asked exactly once. The
+                // stamp is this cron's follow-through on its OWN notification, not a pass — which
+                // is why it is here and not in the sequence.
+                await markIncassoSuggested(pipeline, uid, r.proposals, new Date().toISOString());
+                incassoProposed += r.proposals.length;
+              }
+              break;
+          }
+        } catch (passErr) {
+          // [RECONCILE-VOLGORDE] Failure posture is this cron's own, unchanged, and deliberately
+          // NOT shared with the button — which answers a failure by naming it in a `failed[]` the
+          // browser reads back. The bank and cash passes are this run's spine: everything after
+          // them reasons about a picture they were supposed to settle, so a failure there fails the
+          // whole user and the next hour tries again. The three after them are isolated, each with
+          // the log tag and Sentry phase it already had.
+          if (!CRON_ISOLATED_PASSES.has(pass.id)) throw passErr;
+          const err = passErr instanceof Error ? passErr : new Error(String(passErr));
+          if (pass.id === "auto-categorize") {
+            // Previously a persistently-failing user's auto-categorization could stop forever with
+            // no trace; it is logged + Sentry'd instead.
+            console.error("[CRON-RECONCILE] auto-categorize failed (non-fatal)", { uid, error: err.message });
+            Sentry.captureException(err, { tags: { cron: "reconcile", phase: "auto-categorize" }, extra: { uid } });
+          } else if (pass.id === "incasso-settle") {
+            // Never fatal to the user's reconcile — a failed pass leaves the invoices open, which
+            // is the state they are in today, and the next hour tries again.
+            console.error("[AUTO-INCASSO] settle failed (non-fatal)", { uid, error: err.message });
+            Sentry.captureException(err, { tags: { cron: "reconcile", phase: "auto-incasso" }, extra: { uid } });
+          } else {
+            console.error("[DD-SIGNAL] mandate proposal failed (non-fatal)", { uid, error: err.message });
+          }
         }
-      } catch (pe) {
-        console.error("[DD-SIGNAL] mandate proposal failed (non-fatal)", { uid, error: pe instanceof Error ? pe.message : String(pe) });
       }
       usersProcessed += 1;
       // [JET-GAP0] The "automatisch gekoppeld" bell now lives INSIDE runBankAutoConfirm, so every
