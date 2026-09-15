@@ -136,6 +136,24 @@ BEGIN
   IF v_acc_status = 'verwerkt' THEN
     RAISE EXCEPTION '[BANK-CONFIRM] invoice locked by accountant (verwerkt)' USING ERRCODE = '55000';
   END IF;
+  -- [NOOIT-BETAALBAAR] The same never-payable set that isPayableInvoiceState and book_bank_batch
+  -- already refuse: a draft was never issued, an archived invoice is out of the books, and
+  -- 'processing' is the verify queue, where the number and the amount are still an unread OCR
+  -- reading. Those three facts are about the INVOICE. They say nothing about how much of a bank
+  -- line a function spends -- which is the only thing that distinguishes these three doors from
+  -- each other -- so the rule is identical on all three and does not touch their semantics.
+  --
+  -- It sits HERE: after the row is locked and read, and before the first write. A refusal must
+  -- never leave a partial allocation behind.
+  --
+  -- The wording deliberately carries none of the six substrings the callers triage on
+  -- ("verwerkt", "already fully paid", "already covered", "fully applied", "no longer payable",
+  -- "tie no longer exact"). A message containing one would be read as a different refusal, with a
+  -- different dialog, about money.
+  IF v_inv_status IN ('draft', 'archived', 'processing') THEN
+    RAISE EXCEPTION '[NOOIT-BETAALBAAR] invoice state % cannot receive a bank payment', v_inv_status
+      USING ERRCODE = '55000';
+  END IF;
   IF v_total <= 0 THEN
     RAISE EXCEPTION '[BANK-CONFIRM] invoice has no total to settle' USING ERRCODE = '55000';
   END IF;

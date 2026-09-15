@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 153 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 154 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 17 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -131,6 +131,9 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('bank_match_rejections.sql', 'policy', 'bank_match_rejections_insert_own', 'bank_match_rejections', 'public'),
   ('bank_match_rejections.sql', 'policy', 'bank_match_rejections_select_own', 'bank_match_rejections', 'public'),
   ('bank_match_rejections.sql', 'table', 'bank_match_rejections', null, 'public'),
+  ('bank_rpc_never_payable_states.sql', 'function', 'allocate_bank_payment', null, 'public'),
+  ('bank_rpc_never_payable_states.sql', 'function', 'apply_bank_payment', null, 'public'),
+  ('bank_rpc_never_payable_states.sql', 'function', 'confirm_bank_payment', null, 'public'),
   ('bank_statement_periods.sql', 'index', 'idx_bsp_user_iban_start', null, 'public'),
   ('bank_statement_periods.sql', 'policy', 'bsp_owner_read', 'bank_statement_periods', 'public'),
   ('bank_statement_periods.sql', 'table', 'bank_statement_periods', null, 'public'),
@@ -567,11 +570,25 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 
 -- ── WAT DEEL 1 OVER DEZE FUNCTIES WÉL EN NIET ZEGT ──────────────────
 --
---   9 functies worden door meer dan één migratie geschreven. Voor die functies zegt TOEGEPAST: de
+--   12 functies worden door meer dan één migratie geschreven. Voor die functies zegt TOEGEPAST: de
 --   body in de database bevat elke kolomverwijzing die de map er unaniem in verwacht. Het zegt NIET
 --   welk van die bestanden hem daar gezet heeft — en dat is niet vast te stellen, want een CREATE OR
 --   REPLACE laat geen spoor van zijn herkomst achter. OPEN betekent hier dus: de functie in de
 --   database loopt achter op de map, en de migraties hieronder zijn samen het antwoord.
+--
+--   allocate_bank_payment
+--     · allocate_bank_payment.sql
+--     · bank_rpc_never_payable_states.sql
+--     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
+--     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
+--     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
+--
+--   apply_bank_payment
+--     · bank_rpc_never_payable_states.sql
+--     · invoice_partial_payments.sql
+--     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
+--     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
+--     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
 --
 --   apply_manual_payment
 --     · invoice_manual_payment_idempotency_scope.sql
@@ -583,6 +600,13 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --   book_bank_batch
 --     · bank_confirm_atomic.sql
 --     · book_bank_batch_atomic.sql
+--     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
+--     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
+--     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
+--
+--   confirm_bank_payment
+--     · bank_confirm_atomic.sql
+--     · bank_rpc_never_payable_states.sql
 --     GEEN INHOUDSMETING: deze definities delen geen enkele NEW./OLD.-kolomverwijzing, dus er is
 --     niets dat de map unaniem in deze functie verwacht. Deel 1 valt hier terug op het bestaan van
 --     de functie, en dat bewijst alleen dat de EERSTE van deze migraties gedraaid heeft.
@@ -638,7 +662,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 170
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 171
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
