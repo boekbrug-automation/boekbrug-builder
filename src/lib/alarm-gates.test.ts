@@ -21,7 +21,20 @@ import { readFileSync } from "node:fs";
 
 /** The failures whose own words say the state must not exist. Each must go through the channel. */
 const MUST_ALARM: Array<{ file: string; needle: string }> = [
-  { file: "src/lib/bank-auto-confirm.ts", needle: "pay rollback FAILED" },
+  // [EEN-GELDMUTATIE] This entry used to read "pay rollback FAILED" — the alarm on the hand-written
+  // compensating update this pass performed when its second write failed. There is no compensator
+  // any more: the booking is one confirm_bank_payment transaction that commits or rolls back whole,
+  // so the state that alarm watched for cannot occur. The gate lost its subject for the right
+  // reason, and it is re-aimed rather than dropped, because the file still has two states whose own
+  // words say they must not exist:
+  //   · the payment door refusing a write this pass had already re-verified under isEligible — the
+  //     six contracted refusals are triaged out as ordinary skips first, so anything reaching this
+  //     is a database saying no to money for a reason nothing in the code anticipated;
+  //   · the booking committed while the "controleer" badge did not — the one deliberately
+  //     out-of-transaction write the change introduced, and the only way an amount-only match can
+  //     reach the screen looking as certain as a reference match.
+  { file: "src/lib/bank-auto-confirm.ts", needle: "the payment door refused an auto-confirm" },
+  { file: "src/lib/bank-auto-confirm.ts", needle: "the 'controleer' flag is not" },
   { file: "src/app/api/bank/delete-statement/route.ts", needle: "unhealed amount_paid drift" },
   { file: "src/app/api/cron/reminders/route.ts", needle: "reminders are DISABLED" },
   { file: "src/lib/iban-change.ts", needle: "supplier lookup failed" },
