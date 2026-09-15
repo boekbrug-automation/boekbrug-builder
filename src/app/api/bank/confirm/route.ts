@@ -138,6 +138,36 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "batch_tie_broken", detail: batchErr.message }, { status: 409 });
       }
       if (msg.includes("no longer payable")) {
+        // [BOEKHOUDER-DEUR] book_bank_batch counts FOUR disjoint conditions into one number and
+        // raises one string carrying only that count — not owned, already paid, a draft/archived/
+        // processing row, or the accountant's lock. None of the four words it can raise contains
+        // "verwerkt", so the test above is dead on this path, and the accountant lock was reported
+        // to the owner as "already paid": the wrong sentence, and the dedicated dialog never opened.
+        //
+        // The pre-check twenty lines up tells these four apart perfectly when it reads the rows
+        // itself; this branch only runs when the state MOVED between that read and the RPC's lock.
+        // So read again and say which it was. A failed re-read falls through to the old answer —
+        // being unable to explain a refusal may never turn it into a success.
+        let locked: { invoice_number: string | null } | undefined;
+        try {
+          const after = await fetchAllRowsForIds<{ invoice_number: string | null; accountant_status: string | null }, string>(
+            invoiceIds,
+            (chunk, from, to) =>
+              pipeline
+                .from("invoices")
+                .select("invoice_number, accountant_status")
+                .in("id", chunk)
+                .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
+                .order("id", { ascending: true })
+                .range(from, to),
+          );
+          locked = after.find((i) => i.accountant_status === "verwerkt");
+        } catch {
+          locked = undefined;
+        }
+        if (locked) {
+          return NextResponse.json({ error: "verwerkt", invoiceNumber: locked.invoice_number }, { status: 409 });
+        }
         return NextResponse.json({ error: "invoice_already_paid", detail: batchErr.message }, { status: 409 });
       }
       console.error("[SOM-KLOPT-ÉÉN] book_bank_batch refused", { userId: user.id, transactionId, error: batchErr.message });

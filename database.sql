@@ -320,7 +320,13 @@ CREATE TABLE public.invoices (
   client_btw_number text,
   updated_at timestamp with time zone DEFAULT now(),
   search_vector tsvector,
-  accountant_status text,
+  -- [VERWERKT-WOORDENLIJST] Only 'verwerkt' locks money; NULL and the other three are equally open
+  -- to every guard (all written as "= 'verwerkt'", never "IS NOT NULL"). The constraint stood in
+  -- production and in no migration, so a rebuild from this repo accepted any string in the column
+  -- every payment guard reads — see invoice_accountant_status_vocabulary.sql.
+  accountant_status text
+    CHECK (accountant_status IS NULL OR accountant_status = ANY (ARRAY[
+      'te_verwerken'::text, 'in_behandeling'::text, 'verwerkt'::text, 'vraag'::text])),
   marked_paid_at timestamp without time zone,
   source text
     CHECK (source = ANY (ARRAY['created'::text, 'email'::text, 'upload'::text, 'camera'::text])),

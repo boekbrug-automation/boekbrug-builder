@@ -1195,9 +1195,14 @@ test("[FACTUURVRAAG] the counters that were reading zero now have a writer", () 
   // The DB trigger explicitly permits an accountant to move accountant_status — the permission was
   // granted and the write path never built, so the single most common bookkeeper question had no
   // home in the app and its counters read zero forever.
+  //
+  // [BOEKHOUDER-DEUR] The write moved. accountant_status now has ONE path — the server door — and
+  // the database refuses this column from any session client, so the route's own UPDATE could no
+  // longer work. What this gate cares about is unchanged and is asserted the same way: that the
+  // route still SETS the status those three surfaces count, rather than only storing the text.
   const route = code("src/app/api/accountant/invoice-question/route.ts");
   assert.match(
-    route, /\.from\('invoices'\)\s*\.update\(\{ accountant_status: VRAAG_STATUS \}\)/,
+    route, /setAccountantStatus\(\{[\s\S]{0,300}?status: VRAAG_STATUS,/,
     "the route must actually set the status the three surfaces count",
   );
   // And the TEXT, without which a 'vraag' is the problem this feature exists to replace: the client
@@ -1205,8 +1210,17 @@ test("[FACTUURVRAAG] the counters that were reading zero now have a writer", () 
   assert.match(route, /subject_type: 'invoice'/, "the question is stored against the invoice");
   assert.match(route, /vraag_text: question/, "with the accountant's actual words");
   // Text first, status second — a status with no text is worse than no status.
+  //
+  // The order is measured against the DOOR CALL, because the literal `accountant_status:` is no
+  // longer in this file: the column is written inside src/lib/accountant-status-door.ts. Both
+  // positions are asserted found first — an indexOf that returns -1 would make this comparison
+  // true for the wrong reason, which is exactly how a gate passes on the day it matters.
+  const textAt = route.indexOf("vraag_text: question");
+  const statusAt = route.indexOf("setAccountantStatus({");
+  assert.ok(textAt >= 0, "the question text write must be findable");
+  assert.ok(statusAt >= 0, "the status write must go through the door, and be findable");
   assert.ok(
-    route.indexOf("vraag_text: question") < route.indexOf("accountant_status: VRAAG_STATUS"),
+    textAt < statusAt,
     "the text must be written BEFORE the status, so a half-failure never leaves a question the " +
       "client can see the existence of but not the content of",
   );
@@ -33780,3 +33794,184 @@ test("[KVK-OPTIONEEL] a missing key is a normal state, and a bad answer is never
   assert.strictEqual(metBeide.reading, "found");
   if (metBeide.reading === "found") assert.strictEqual(metBeide.company.address, "Tilburgseweg 42");
 });
+// ─── [VERWERKT-WOORDENLIJST] The lock's vocabulary, reproducible from this repository ─────────
+//
+// invoices.accountant_status = 'verwerkt' is the hardest money refusal this app has. Which STRINGS
+// the column may hold therefore decides which strings release it — every guard compares by
+// equality, so a value the vocabulary does not know is a value that never locks.
+//
+// That vocabulary lived in production and in NOTHING here: the CHECK constraint appeared in no
+// migration, and database.sql declared the column bare. A database rebuilt from this repository
+// accepted any string at all in the column eleven SQL guards and eighteen TypeScript sites read.
+//
+// So the vocabulary is now declared in three places, and this gate's job is that they cannot drift
+// apart: the migration that installs the constraint, the repo schema that claims to BE the
+// database, and the TypeScript union that renders the four values on screen. The set is DERIVED
+// from each of the three and compared — not restated here, which would make this file a fourth
+// declaration able to disagree with all of them.
+test("[VERWERKT-WOORDENLIJST] the accountant_status vocabulary says the same thing in all three places", () => {
+  // SQL comments are not stripped by code() — it only knows JS. A vocabulary listed in a comment
+  // must not be able to satisfy a gate about the vocabulary in force.
+  const liveSql = (path: string) =>
+    readFileSync(path, "utf8").split("\n").map((l) => l.replace(/--.*$/, "")).join("\n");
+
+  /** The quoted values inside the CHECK that follows the constraint's name. Cut on real SQL. */
+  const vocabularyOf = (sql: string, where: string): string[] => {
+    const at = sql.indexOf("accountant_status");
+    assert.ok(at > 0, `${where}: the column is not declared here at all`);
+    const check = sql.indexOf("CHECK", at);
+    assert.ok(check > at, `${where}: the column carries no CHECK — the vocabulary is unconstrained`);
+    // Balance from the CHECK's own opening paren, so a later constraint cannot be swept in.
+    const open = sql.indexOf("(", check);
+    let depth = 0, end = -1;
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "(") depth++;
+      else if (sql[i] === ")" && --depth === 0) { end = i; break; }
+    }
+    assert.ok(end > open, `${where}: the CHECK never closes`);
+    return [...sql.slice(open, end).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  };
+
+  const fromMigration = vocabularyOf(
+    liveSql("supabase/migrations/invoice_accountant_status_vocabulary.sql"), "the migration");
+  const fromSchema = vocabularyOf(liveSql("database.sql"), "database.sql");
+
+  // The TypeScript side: the union that types the column for every screen that renders it.
+  const tree = code("src/lib/bridge-tree.ts");
+  const union = /accountant_status:\s*((?:'[a-z_]+'\s*\|\s*)+null)/.exec(tree);
+  assert.ok(union, "bridge-tree.ts no longer types accountant_status as a union of literals");
+  const fromTypes = [...union[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+
+  assert.deepStrictEqual(fromMigration, fromSchema,
+    "the migration and database.sql declare different accountant_status vocabularies — a database " +
+    "rebuilt from this repo would not be the database the migration installs");
+  assert.deepStrictEqual(fromMigration, fromTypes,
+    "the SQL vocabulary and the TypeScript union disagree. One of them is rendering or accepting a " +
+    "value the other has never heard of, on the column that decides whether money may move");
+
+  // Four values, and the one that matters. Renaming 'verwerkt' would silently stop every guard in
+  // the app from locking anything — they all test this literal, none tests "is not null".
+  // The FOURTH declaration, and the reason it belongs in this comparison: accountant_subject_status
+  // is the per-accountant store of the same assertion — same four words, its own table, and an RLS
+  // policy that pins accountant_id to auth.uid(). The two stores hold one vocabulary between them,
+  // so a word added to one and not the other is a word that means something in one place and
+  // nothing in the other, on the same fact.
+  const subjectTable = liveSql("database.sql").slice(liveSql("database.sql").indexOf("accountant_subject_status"));
+  const subjStatus = /status text NOT NULL DEFAULT[\s\S]{0,80}?CHECK \(status = ANY \(ARRAY\[([^\]]+)\]/.exec(subjectTable);
+  assert.ok(subjStatus, "accountant_subject_status.status no longer carries its vocabulary CHECK");
+  const fromSubjectStore = [...subjStatus[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  assert.deepStrictEqual(fromSubjectStore, fromMigration,
+    "the invoice column and accountant_subject_status hold different vocabularies for the same " +
+    "assertion — the store that records WHO asserted it and the store that LOCKS money would then " +
+    "be describing different things");
+
+  assert.equal(fromMigration.length, 4, `the vocabulary changed size: ${fromMigration.join(", ")}`);
+  assert.ok(fromMigration.includes("verwerkt"),
+    "'verwerkt' left the vocabulary — every money guard compares against that literal, so nothing " +
+    "would lock and no test anywhere else would notice");
+
+  // The constraint must be installed by NAME, or the migration reproduces nothing on a live
+  // database that already carries the old one.
+  const mig = liveSql("supabase/migrations/invoice_accountant_status_vocabulary.sql");
+  assert.match(mig, /ADD CONSTRAINT invoices_accountant_status_check/,
+    "the migration no longer installs the constraint under the name production uses");
+  assert.match(mig, /DROP CONSTRAINT IF EXISTS invoices_accountant_status_check/,
+    "without the idempotent drop this migration fails on every database that already has it");
+});
+// ─── [BOEKHOUDER-DEUR] One write path for the lock, and its actor ─────────────────────────────
+//
+// The database half of this is proved against a real PostgreSQL in
+// tests/sql/accountant_status_door.test.sql: no session may write accountant_status or
+// accountant_id, the server door may, and the deliberate undo still works while the freeze stands.
+// That is the enforcement. What this gate adds is the thing a database cannot see — that no SECOND
+// writer has appeared in the application, quietly trying a write the database will refuse.
+//
+// Derived, never listed: it walks src/ for the write itself, the same shape [EEN-SCHRIJFPAD] uses.
+// A new door is in this set the moment it is written, whether or not anybody remembered this file.
+test("[BOEKHOUDER-DEUR] only the door writes accountant_status or its actor", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = `${dir}/${entry}`;
+      if (statSync(full).isDirectory()) out.push(...walk(full));
+      else if (/\.tsx?$/.test(full) && !full.includes(".test.")) out.push(full);
+    }
+    return out;
+  };
+
+  // One entry, and it is the door. The generated types are NOT here: they declare the columns and
+  // perform no write, so the nearest-preceding-.from rule never reaches them — and the stale half
+  // of this gate said so when they were listed anyway.
+  const EXCUSED: Readonly<Record<string, string>> = {
+    "src/lib/accountant-status-door.ts":
+      "the door — the one place that writes these two columns, and the only client the database " +
+      "accepts them from",
+  };
+
+  const writers: string[] = [];
+  for (const file of walk("src")) {
+    const c = code(file);
+    for (const m of c.matchAll(/\.(?:update|insert|upsert)\(\s*\{/g)) {
+      // The table is the NEAREST PRECEDING .from(). accountant_id is a real column of
+      // accountant_subject_status, accountant_clients and invitations too — without this, seven
+      // files that write their OWN accountant_id were reported as writers of the invoice's.
+      const before = [...c.slice(0, m.index ?? 0).matchAll(/\.from\(\s*["']([a-z_]+)["']\s*\)/g)];
+      if (before[before.length - 1]?.[1] !== "invoices") continue;
+      const open = c.indexOf("{", m.index ?? 0);
+      let depth = 0, body = c.slice(open, open + 4000);
+      for (let i = 0; i < body.length; i++) {
+        if (body[i] === "{") depth++;
+        else if (body[i] === "}" && --depth === 0) { body = body.slice(0, i + 1); break; }
+      }
+      if (/\baccountant_(?:status|id)\s*:/.test(body)) { writers.push(file); break; }
+    }
+  }
+
+  const extra = writers.filter((f) => !(f in EXCUSED)).sort();
+  assert.deepStrictEqual(extra, [],
+    "a second writer of accountant_status appeared. That column is the app's hardest money " +
+    "refusal and carries who asserted it; it has one write path (setAccountantStatus) and the " +
+    "database refuses every session client, so this write cannot work — go through the door.");
+
+  // And the excuse list may not rot: an entry for a file that no longer writes it is a reason
+  // nobody will re-read, standing next to reasons that still hold.
+  const stale = Object.keys(EXCUSED).filter((f) => !writers.includes(f)).sort();
+  assert.deepStrictEqual(stale, [],
+    "these files are excused from a rule they no longer break — remove them from EXCUSED");
+
+  // The two callers that had their own write now go through the door. Named, because a door with
+  // no callers is the failure [REGEL-DEUR] exists to catch.
+  for (const caller of [
+    "src/app/api/accountant/invoice-status/route.ts",
+    "src/app/api/accountant/invoice-question/route.ts",
+  ]) {
+    assert.match(code(caller), /setAccountantStatus\(/, `${caller} no longer goes through the door`);
+  }
+  // The quarter screen asks the route rather than the table.
+  const scherm = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+  assert.match(scherm, /fetch\('\/api\/accountant\/invoice-status'/,
+    "the accountant's quarter screen no longer calls the door's route");
+});
+
+test("[BOEKHOUDER-DEUR] a batch refused for the accountant's lock does not report 'already paid'", () => {
+  // book_bank_batch counts four disjoint conditions into one number and raises one string — none of
+  // whose four possible messages contains the word the callers triage on. So the 'verwerkt' test on
+  // this path was dead, and the lock reached the owner as "already paid": the wrong sentence, and
+  // the dialog that exists for it never opened.
+  const route = code("src/app/api/bank/confirm/route.ts");
+  const from = route.indexOf('msg.includes("no longer payable")');
+  assert.ok(from > 0, "the batch refusal branch is gone — this gate is measuring nothing");
+  const to = route.indexOf('error: "invoice_already_paid"', from);
+  assert.ok(to > from, "the branch no longer ends in the fallback it is allowed to reach LAST");
+  const branch = route.slice(from, to);
+
+  assert.match(branch, /accountant_status/,
+    "the branch stopped looking at the accountant lock, so it answers 'already paid' for it again");
+  assert.match(branch, /error: "verwerkt"/,
+    "the branch can no longer answer 'verwerkt' — the owner is told the wrong thing and the " +
+    "dedicated dialog stays shut");
+  // The re-read must be able to fail without turning a refusal into a success.
+  assert.match(branch, /catch/,
+    "a failed re-read is not handled; being unable to explain a refusal may never drop it");
+});
+
