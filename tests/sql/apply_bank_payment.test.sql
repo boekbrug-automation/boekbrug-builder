@@ -1,4 +1,4 @@
--- migrations: invoice_partial_payments.sql
+-- migrations: invoice_partial_payments.sql, bank_rpc_never_payable_states.sql
 -- =====================================================================
 -- [SEAM] apply_bank_payment, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)
@@ -213,3 +213,46 @@ END $$;
 
 \echo ''
 \echo '✅ apply_bank_payment: every assertion held against a real PostgreSQL.'
+
+\echo ''
+\echo '— [NOOIT-BETAALBAAR] a state that is not a bill to pay is refused, and nothing is written —'
+DO $$
+DECLARE u   uuid := '11111111-1111-1111-1111-111111111111';
+        tx  uuid := '22222222-2222-2222-2222-222222222222';
+        inv uuid := '33333333-3333-3333-3333-333333333333';
+        st  text;
+        msg text;
+        code text;
+BEGIN
+  -- All three never-payable states, one at a time. Each asserts THREE things, because a refusal
+  -- that still moved money would pass a test that only looked at the exception.
+  FOREACH st IN ARRAY ARRAY['draft', 'archived', 'processing'] LOOP
+    TRUNCATE public.bank_tx_invoices, public.bank_transactions, public.invoices;
+    INSERT INTO public.bank_transactions (id, user_id, amount, date, status, invoice_id)
+    VALUES (tx, u, -1210, DATE '2026-08-07', 'pending', NULL);
+    INSERT INTO public.invoices (id, receiver_id, direction, status, invoice_type, total_inc_btw, amount_paid)
+    VALUES (inv, u, 'incoming', 'received', 'factuur', 1210, 0);
+    UPDATE public.invoices SET status = st WHERE id = inv;
+    msg := NULL; code := NULL;
+    BEGIN
+      PERFORM public.apply_bank_payment(u, tx, inv, 1210, DATE '2026-08-07');
+    EXCEPTION WHEN OTHERS THEN
+      GET STACKED DIAGNOSTICS msg = MESSAGE_TEXT, code = RETURNED_SQLSTATE;
+    END;
+    PERFORM public.t_is(format('%s is refused', st), (msg IS NOT NULL)::text, 'true');
+    PERFORM public.t_is(format('%s · refused as a business rule', st), code, '55000');
+    -- The refusal happened BEFORE any write: the invoice is untouched and no allocation exists.
+    PERFORM public.t_is(format('%s · the invoice did not move', st),
+      (SELECT status || '/' || coalesce(amount_paid, 0)::text FROM public.invoices WHERE id = inv),
+      st || '/0');
+    PERFORM public.t_eq(format('%s · no allocation row was written', st),
+      (SELECT count(*) FROM public.bank_tx_invoices WHERE invoice_id = inv), 0);
+    PERFORM public.t_is(format('%s · the bank line is still pending', st),
+      (SELECT status FROM public.bank_transactions WHERE id = tx), 'pending');
+    -- And the wording: none of the six substrings the callers triage on.
+    PERFORM public.t_is(format('%s · the refusal names no other refusal', st),
+      (msg ILIKE '%verwerkt%' OR msg ILIKE '%already fully paid%' OR msg ILIKE '%already covered%'
+       OR msg ILIKE '%fully applied%' OR msg ILIKE '%no longer payable%'
+       OR msg ILIKE '%tie no longer exact%')::text, 'false');
+  END LOOP;
+END $$;

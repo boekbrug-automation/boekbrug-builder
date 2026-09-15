@@ -33975,3 +33975,102 @@ test("[BOEKHOUDER-DEUR] a batch refused for the accountant's lock does not repor
     "a failed re-read is not handled; being unable to explain a refusal may never drop it");
 });
 
+
+// ─── [NOOIT-BETAALBAAR] The three bank doors refuse the states that are not a bill to pay ──────
+//
+// The contract is DECLARED here, once, and everything below is derived from it. A gate that only
+// grepped for `IN ('draft', 'archived', 'processing')` would pass on a guard that sits after the
+// write, or in a function that never runs it, or with a refusal worded as one of the six messages
+// the callers triage on — all three of which are the ways this could be true in the file and false
+// in the database.
+const NEVER_PAYABLE = ["draft", "archived", "processing"] as const;
+
+/** The substrings the bank callers switch on. A new refusal may contain none of them. */
+const TRIAGED_SUBSTRINGS = [
+  "verwerkt", "already fully paid", "already covered",
+  "fully applied", "no longer payable", "tie no longer exact",
+];
+
+/** The three doors, and the file that declared each one before the owning migration existed. */
+const BANK_DOORS = [
+  { fn: "apply_bank_payment", origin: "supabase/migrations/invoice_partial_payments.sql" },
+  { fn: "confirm_bank_payment", origin: "supabase/migrations/bank_confirm_atomic.sql" },
+  { fn: "allocate_bank_payment", origin: "supabase/migrations/allocate_bank_payment.sql" },
+] as const;
+
+const OWNING_MIGRATION = "supabase/migrations/bank_rpc_never_payable_states.sql";
+
+/** SQL, with `--` comments stripped. code() strips JS comments only; a marker left in an SQL
+ *  comment is not in the string being cut, and indexOf then returns -1. */
+function sqlNoComments(path: string): string {
+  return readFileSync(path, "utf8").split("\n").map((l) => l.replace(/--.*$/, "")).join("\n");
+}
+
+/** The body of one CREATE OR REPLACE FUNCTION, cut on real code and asserted found. */
+function functionBody(sql: string, fn: string): string {
+  const start = sql.indexOf(`CREATE OR REPLACE FUNCTION public.${fn}(`);
+  assert.ok(start > -1, `${fn} is not declared here`);
+  const bodyOpen = sql.indexOf("AS $$", start);
+  assert.ok(bodyOpen > start, `${fn} has no body`);
+  const end = sql.indexOf("$$;", bodyOpen + 5);
+  assert.ok(end > bodyOpen, `${fn}'s body is not closed — the window would run to end of file`);
+  return sql.slice(bodyOpen, end);
+}
+
+test("[NOOIT-BETAALBAAR] all three bank doors refuse the same never-payable states, before they write", () => {
+  const owning = sqlNoComments(OWNING_MIGRATION);
+
+  for (const { fn, origin } of BANK_DOORS) {
+    for (const [where, sql] of [["the owning migration", owning], ["its original file", sqlNoComments(origin)]] as const) {
+      const body = functionBody(sql, fn);
+
+      // 1 — the guard exists, and lists EXACTLY the declared set. Derived, not pattern-matched:
+      //     the states are read back out of the guard and compared to the contract above, so a
+      //     fourth state added or one silently dropped fails here rather than passing a regex.
+      const guard = body.match(/IF\s+v_inv_status\s+IN\s*\(([^)]*)\)\s*THEN/);
+      assert.ok(guard, `${fn} in ${where} has no never-payable guard on v_inv_status`);
+      const listed = [...guard![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+      assert.deepStrictEqual(listed, [...NEVER_PAYABLE].sort(),
+        `${fn} in ${where} guards a different set than the declared contract`);
+
+      // 2 — REACHABLE, and on the right side of the money. The guard must come before the first
+      //     write in the body; a guard after the first UPDATE refuses a payment it already made.
+      const guardAt = body.indexOf(guard![0]);
+      const firstWrite = Math.min(
+        ...["UPDATE public.invoices", "UPDATE public.bank_transactions", "INSERT INTO public.bank_tx_invoices"]
+          .map((w) => { const i = body.indexOf(w); return i === -1 ? Number.MAX_SAFE_INTEGER : i; }),
+      );
+      assert.ok(firstWrite < Number.MAX_SAFE_INTEGER, `${fn} in ${where} writes nothing — the cut is wrong`);
+      assert.ok(guardAt > -1 && guardAt < firstWrite,
+        `${fn} in ${where} guards AFTER its first write — it would refuse a payment it already made`);
+
+      // 3 — and it raises. A guard that falls through is not a guard.
+      const afterGuard = body.slice(guardAt, guardAt + 400);
+      assert.match(afterGuard, /RAISE EXCEPTION/,
+        `${fn} in ${where} tests the state and does not refuse it`);
+      assert.match(afterGuard, /ERRCODE = '55000'/,
+        `${fn} in ${where} refuses with the wrong class — the callers triage business refusals on 55000`);
+
+      // 4 — the wording says nothing the callers read as a DIFFERENT refusal.
+      const message = afterGuard.slice(afterGuard.indexOf("RAISE EXCEPTION"), afterGuard.indexOf("USING"));
+      for (const s of TRIAGED_SUBSTRINGS) {
+        assert.ok(!message.toLowerCase().includes(s),
+          `${fn} in ${where} words its refusal with "${s}" — a caller would triage it as that other refusal`);
+      }
+    }
+
+    // 5 — the two copies are the same function. This is the failure book_bank_batch already has:
+    //     two declarations, one of them quietly stale, and apply order deciding which is true.
+    assert.strictEqual(
+      functionBody(owning, fn), functionBody(sqlNoComments(origin), fn),
+      `${fn} differs between ${OWNING_MIGRATION} and ${origin} — one of the two copies is stale`,
+    );
+  }
+
+  // 6 — the owning migration owns all three and nothing else. It must not have picked up
+  //     book_bank_batch, which is deliberately out of this change's scope.
+  assert.strictEqual((owning.match(/CREATE OR REPLACE FUNCTION public\./g) ?? []).length, BANK_DOORS.length,
+    "the owning migration declares a different number of functions than the three doors");
+  assert.doesNotMatch(owning, /book_bank_batch/,
+    "the owning migration touches book_bank_batch — that drift is a separate item, not this one");
+});
