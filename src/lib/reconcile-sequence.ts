@@ -174,11 +174,16 @@ export const RECONCILE_PASSES: readonly ReconcilePass[] = [
     runsIn: ["cron"],
     why:
       "Books a payment nobody observed — the bank collected it under a mandate — so it is the one pass " +
-      "here that settles invoices on an assumption. It runs unattended, in an hourly pass whose " +
-      "authority is service-role because there is no session at all. Putting it on the button would " +
-      "mean choosing a NEW authority for it (the session client, or a service-role escalation on a " +
-      "human tap); both change authorization semantics, so neither is this slice's to choose. Declared " +
-      "cron-only here, where the difference is visible, instead of missing from a list nobody compared.",
+      "here that settles invoices on an assumption. In THIS orchestrator it runs unattended, so its " +
+      "actor client is the service-role one: there is no session to be had. " +
+      "It is NOT cron-only in the app, and the first version of this note wrongly said that putting it " +
+      "on a button would need a new authority. It would not: /api/supplier/incasso already runs this " +
+      "exact pass from a human POST with the SESSION client as payClient, deliberately and with its " +
+      "own reason written down — so the owner can see the catch-up immediately instead of waiting an " +
+      "hour. So both authorities already exist in production, at two different doors. " +
+      "What does NOT exist is a contract saying WHICH door may use WHICH authority, and that is why " +
+      "this pass stays off the reconcile button for now: adding a third caller without that contract " +
+      "would be guessing, not a declared difference. Recorded as backlog, not settled here.",
     async run(ctx) {
       return { id: "incasso-settle", incasso: await settleIncassoForUser(ctx.service, ctx.actorPay, ctx.userId, ctx.today) };
     },
