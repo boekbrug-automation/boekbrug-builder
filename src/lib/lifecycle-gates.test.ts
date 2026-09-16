@@ -34198,6 +34198,110 @@ test("[NOOIT-BETAALBAAR] all three bank doors refuse the same never-payable stat
   }
 });
 
+// ─── [NOOIT-BETAALBAAR] The FOURTH door — the one the other three said already refused this ──────
+//
+// The three guards above each carry a comment reading "the same never-payable set that
+// isPayableInvoiceState and book_bank_batch already refuse". Measured against pg_proc, only half of
+// that was true:
+//
+//   · PRODUCTION's book_bank_batch DOES refuse it — prosrc md5 52f2d60a072f6f61b8e248831b53bd9a,
+//     the predicate at offset 1197, after the line's FOR UPDATE (766) and before the first write
+//     (2524);
+//   · NEITHER declaring file in this repository ever carried the line. `git log -S` over both finds
+//     nothing.
+//
+// So this was never "a door missing a guard". Re-applying either file to production would have
+// REMOVED a live money guard from the door that books whole batches — silently, because both copies
+// agreed with each other and nothing compared them to the database. The gate above cannot catch
+// that: it deliberately scopes itself to three doors and even asserts the owning migration does not
+// mention book_bank_batch.
+//
+// This door's SHAPE is genuinely different and the assertions follow the shape rather than forcing
+// it into the other one:
+//
+//   · it decides over a SET, not a scalar — one `count(*)` over unnest(p_invoice_ids) under the
+//     lock, and any bad row aborts the whole batch. There is no v_inv_status here to match on.
+//   · its refusal MUST carry "no longer payable". For the three scalar doors that substring is
+//     forbidden (a caller would read it as a different refusal); here it is the contract —
+//     bank-auto-confirm.ts:519-522 triages exactly this wording as an expected skip, and a rewording
+//     would turn every ordinary batch refusal into a reported data-integrity fault.
+//
+// Its two copies are compared with comments stripped AND per-line trailing whitespace trimmed,
+// because the two files' end-of-line comments differ by design and `sqlNoComments` leaves their
+// whitespace behind. That normalisation cannot hide the thing this guards: a predicate present in
+// one copy and absent from the other.
+
+const BATCH_DOOR = "book_bank_batch";
+const BATCH_FILES = [
+  "supabase/migrations/bank_confirm_atomic.sql",
+  "supabase/migrations/book_bank_batch_atomic.sql",
+] as const;
+
+/** Comments stripped, then every blank line dropped and trailing whitespace trimmed — see the note
+ *  above. `sqlNoComments` blanks a full-line comment rather than deleting the line, so two copies
+ *  that differ only in commentary differ by a run of empty lines. Measured on these two files: with
+ *  this normalisation they are equal, and the count of differing NON-BLANK lines is 0 — so nothing
+ *  it removes could be a predicate. */
+function sqlBodyTrimmed(path: string, fn: string): string {
+  return functionBody(sqlNoComments(path), fn)
+    .split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.length > 0).join("\n");
+}
+
+test("[NOOIT-BETAALBAAR] the batch door refuses the same set, in its own shape, before it writes", () => {
+  for (const file of BATCH_FILES) {
+    const body = functionBody(sqlNoComments(file), BATCH_DOOR);
+
+    // 1 — the guard exists and lists EXACTLY the declared set, read back out of the predicate
+    //     rather than pattern-matched, so a fourth state or a dropped one fails here.
+    const guard = body.match(/OR\s+i\.status\s+IN\s*\(([^)]*)\)/);
+    assert.ok(guard, `${BATCH_DOOR} in ${file} has no never-payable predicate on i.status`);
+    const listed = [...guard![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    assert.deepStrictEqual(listed, [...NEVER_PAYABLE].sort(),
+      `${BATCH_DOOR} in ${file} guards a different set than the declared contract`);
+
+    // 2 — under the lock, and before the money. Both bounds are cut on real code.
+    const lockAt = body.indexOf("FOR UPDATE");
+    const guardAt = body.indexOf(guard![0]);
+    const firstWrite = Math.min(
+      ...["UPDATE public.invoices", "UPDATE public.bank_transactions", "INSERT INTO public.bank_tx_invoices"]
+        .map((w) => { const i = body.indexOf(w); return i === -1 ? Number.MAX_SAFE_INTEGER : i; }),
+    );
+    assert.ok(lockAt > -1, `${BATCH_DOOR} in ${file} takes no row lock`);
+    assert.ok(firstWrite < Number.MAX_SAFE_INTEGER, `${BATCH_DOOR} in ${file} writes nothing — the cut is wrong`);
+    assert.ok(lockAt < guardAt, `${BATCH_DOOR} in ${file} guards BEFORE it locks — the state it read can move`);
+    assert.ok(guardAt < firstWrite,
+      `${BATCH_DOOR} in ${file} guards AFTER its first write — it would refuse a batch it already booked`);
+
+    // 3 — and the count it feeds actually refuses, with the class the callers triage on.
+    const refusal = body.slice(guardAt, guardAt + 600);
+    assert.match(refusal, /IF v_bad > 0 THEN[\s\S]*?RAISE EXCEPTION/,
+      `${BATCH_DOOR} in ${file} counts the bad rows and does not refuse them`);
+    assert.match(refusal, /ERRCODE = '55000'/,
+      `${BATCH_DOOR} in ${file} refuses with the wrong class`);
+
+    // 4 — the INVERSE of the three-door rule, and deliberately so: this wording IS the contract.
+    assert.match(refusal, /no longer payable/,
+      `${BATCH_DOOR} in ${file} reworded its refusal — bank-auto-confirm triages "no longer payable" ` +
+        `as an expected skip, so a new wording turns every ordinary batch refusal into a reported fault`);
+  }
+
+  // 5 — the two copies are the same function. Neither may carry the predicate alone.
+  assert.strictEqual(
+    sqlBodyTrimmed(BATCH_FILES[0], BATCH_DOOR), sqlBodyTrimmed(BATCH_FILES[1], BATCH_DOOR),
+    `${BATCH_DOOR} differs between ${BATCH_FILES[0]} and ${BATCH_FILES[1]} — apply order would decide which is real`,
+  );
+
+  // 6 — and there are EXACTLY these two copies. A third would silently win on apply order.
+  const MIGRATION_DIR = "supabase/migrations";
+  const declaring = readdirSync(MIGRATION_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => sqlNoComments(join(MIGRATION_DIR, f)).includes(`CREATE OR REPLACE FUNCTION public.${BATCH_DOOR}(`))
+    .map((f) => `${MIGRATION_DIR}/${f}`)
+    .sort();
+  assert.deepStrictEqual(declaring, [...BATCH_FILES].sort(),
+    `${BATCH_DOOR} is declared in ${declaring.length} migration(s) — ${declaring.join(", ")}`);
+});
+
 // ─── [RECONCILE-VOLGORDE] The reconcile circle has one owner, and the two orchestrators obey it ──
 //
 // Measured before this existed: /api/cron/reconcile ran five passes and POST /api/reconcile/run ran
