@@ -85,6 +85,19 @@ interface Probe {
  * Wat hier NIET thuishoort: een object dat gewoon ontbreekt. Dat hoort OPEN te heten.
  */
 const NIETS_BEWIJZEND: Record<string, { object: string; reden: string }[]> = {
+  "bank_transactions_column_grant.sql": [
+    {
+      object: "bank_transactions_update_own",
+      reden:
+        "Deze policy BESTOND al — ze komt uit de oorspronkelijke dashboard-opzet en staat in geen " +
+        "enkele migratie, net als de basispolicies van invoices. De migratie maakt haar opnieuw " +
+        "aan omdat ze de hele vorm wil opschrijven die ze achterlaat, niet omdat ze nieuw is. Haar " +
+        "bestaan bewijst dus niets: op productie is het antwoord 'ja, die staat er' ook op de dag " +
+        "VOORDAT deze migratie ooit draaide. Wat wél alleen door deze migratie waar wordt, is de " +
+        "STAND eronder — het kolom-recht en de verdwenen delete-policy — en die staat in " +
+        "STAND_CONTROLE.",
+    },
+  ],
   "documents_content_hash_unique.sql": [
     {
       object: "document_is_referenced",
@@ -198,6 +211,27 @@ const GELIJKE_BODY_NIEUWSTE: Record<string, { nieuwste: string; kopieen: string[
 };
 
 const STAND_CONTROLE: Record<string, Stand> = {
+  "bank_transactions_column_grant.sql": {
+    soort: "controle",
+    vraag:
+      "authenticated mag op bank_transactions nog precies de drie categorie-kolommen UPDATEN en " +
+      "geen enkele regel meer verwijderen",
+    // Drie onafhankelijke helften, want elke helft afzonderlijk is met de hand terug te draaien
+    // zonder dat de andere twee het zien: het recht kan te RUIM staan (een table-wide GRANT zet
+    // elke kolom terug), te KRAP (de REVOKE liep, de GRANT niet — dan valt /api/bank/categorize
+    // om met 42501), en de delete-policy kan opnieuw zijn aangemaakt.
+    sql: `(select count(*) from information_schema.column_privileges
+             where table_schema = 'public' and table_name = 'bank_transactions'
+               and grantee = 'authenticated' and privilege_type = 'UPDATE') = 3
+          and not exists (
+            select 1 from information_schema.column_privileges
+             where table_schema = 'public' and table_name = 'bank_transactions'
+               and grantee = 'authenticated' and privilege_type = 'UPDATE'
+               and column_name not in ('category', 'category_source', 'category_confirmed'))
+          and not exists (
+            select 1 from pg_policy
+             where polrelid = 'public.bank_transactions'::regclass and polcmd = 'd')`,
+  },
   "drop_supplier_rows_that_are_misreadings.sql": {
     soort: "controle",
     vraag: "geen leveranciersrij houdt nog een nummer vast dat geen rekeningnummer is terwijl niets ernaar wijst",
