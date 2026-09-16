@@ -277,6 +277,31 @@ little today and would cost a promise that is currently one of the sharpest thin
 **Nothing in Stripe, the Terms or the published prices has been touched.** `PLUS_PRICE_EUR` is
 already 19.99 and was not changed by this work.
 
+## 8. DEPLOYMENT ORDER — the migration goes FIRST
+
+`supabase/migrations/usage_counters_internal_metrics.sql` is **not applied on production**
+(verified 16 September 2026: `usage_counters_select_own` still reads
+`user_id = (SELECT auth.uid())` with no metric filter).
+
+**Apply it before the code deploys, not after.** The order is load-bearing and here is exactly why:
+
+the per-account share writes an `internal.aiSpendDay` row on **every** AI call from the moment the
+code is live — the threshold is 0, which means count, not count-nothing. Without the policy in
+place, those rows fall under the existing select-own policy, and any logged-in owner could read our
+cost model in micro-euros off their own account.
+
+Deploying in the other order does no lasting damage — applying the migration afterwards closes the
+window and the rows stay where they are — but the window is real and it is avoidable by doing one
+thing before the other.
+
+The migration itself deletes nothing, is idempotent, and changes exactly one thing: what a
+logged-in browser may SELECT. `service_role` reads and writes these rows as before, which is the
+only way they are ever written.
+
+Nothing else in this work needs a migration.
+
+---
+
 ## 8. What was measured, and where it came from
 
 Production project `cedrndplmydqcmbszfmp`, read-only, 16 September 2026.
