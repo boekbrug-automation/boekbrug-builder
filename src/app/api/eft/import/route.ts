@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
   let text: string;
   try {
     const base64 = Buffer.from(await file.arrayBuffer()).toString("base64");
-    text = await transcribeEftReceipt(base64, file.type || "image/jpeg", file.name || "afrekening");
+    text = await transcribeEftReceipt(user.id, base64, file.type || "image/jpeg", file.name || "afrekening");
   } catch {
     // [FAIR-USE] Niet gelezen, dus niet geteld.
     await gate.release();

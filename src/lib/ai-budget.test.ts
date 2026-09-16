@@ -29,6 +29,8 @@ import {
   estimateCostMicros,
   actualCostMicros,
   settlementMicros,
+  accountSharePeriod,
+  accountShareMicros,
   MICROS_PER_KTOK,
   TOKEN_ESTIMATE,
   type ClaudeUsage,
@@ -267,4 +269,72 @@ test("[COST-GUARD] the e-mail sync holds on a blown fuse instead of burying the 
   const loopHead = sync.split("\n").find((l) => l.includes("of classified) {"));
   assert.ok(loopHead, "the PHASE 2 loop still walks the classified attachments");
   assert.match(loopHead!, /budgetOutage/, "a flag the loop never unpacks is a guard that never runs");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [EIGEN-AANDEEL] The per-account share.
+//
+// The fuse above is global, so it is deliberately blind to WHO is spending. This half is the
+// opposite question, and the properties worth pinning are the ones where being wrong is silent:
+//
+//   1. The share's day is the SAME day the global fuse uses. Two different notions of "today"
+//      would refuse an account on a day the fuse thinks is already over, and nothing would say so.
+//   2. It ships at 0 — count, never limit. Mechanism and threshold are separate decisions.
+//   3. Junk in the environment does not become a ceiling. A malformed AI_DAILY_SHARE_EUR must read
+//      as "not configured", never as a very small number that locks every account out.
+//   4. The two settlements ask their own question. The share can be recorded while the global
+//      guard was unreachable, and then the account's day is holding an estimate the global tab
+//      never took — deriving both from one flag leaves that account over-charged until midnight.
+
+test("[EIGEN-AANDEEL] the share's day is the fuse's day", () => {
+  // ai_budget_consume() keys on (now() AT TIME ZONE 'UTC')::date. This must be the same instant.
+  const justBeforeMidnightUtc = new Date("2026-09-16T23:59:59.999Z");
+  const justAfter = new Date("2026-09-17T00:00:00.000Z");
+  assert.equal(accountSharePeriod(justBeforeMidnightUtc), "2026-09-16");
+  assert.equal(accountSharePeriod(justAfter), "2026-09-17");
+
+  // A local-time implementation would get this wrong in either direction depending on the server's
+  // zone; the assertion above is only meaningful because this one pins the format too.
+  assert.match(accountSharePeriod(justAfter), /^\d{4}-\d{2}-\d{2}$/);
+  // And it must NOT be the fair-use month key — that is a different counter in the same table.
+  assert.notEqual(accountSharePeriod(justAfter).length, "2026-09".length);
+});
+
+test("[EIGEN-AANDEEL] the share ships counting, not limiting", () => {
+  const saved = process.env.AI_DAILY_SHARE_EUR;
+  try {
+    delete process.env.AI_DAILY_SHARE_EUR;
+    assert.equal(accountShareMicros(), 0, "unset means count, do not limit — the number is the owner's");
+
+    process.env.AI_DAILY_SHARE_EUR = "";
+    assert.equal(accountShareMicros(), 0, "empty is the same as unset, not a ceiling of zero euros");
+
+    process.env.AI_DAILY_SHARE_EUR = "1.50";
+    assert.equal(accountShareMicros(), 1_500_000);
+
+    // 3. Junk fails to "no ceiling", never to a tiny one. The opposite default would refuse every
+    //    paying account on a typo, and the log line would blame the account.
+    for (const junk of ["abc", "-1", "NaN", "1,50"]) {
+      process.env.AI_DAILY_SHARE_EUR = junk;
+      assert.equal(accountShareMicros(), 0, `"${junk}" must read as unconfigured, not as a ceiling`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.AI_DAILY_SHARE_EUR;
+    else process.env.AI_DAILY_SHARE_EUR = saved;
+  }
+});
+
+test("[EIGEN-AANDEEL] the two settlements are asked separately", () => {
+  // The case that matters: the share was charged, the global guard was not reachable. The global
+  // tab has nothing to correct — and the account's day must still be corrected, or it carries the
+  // full conservative estimate for a failure that was ours.
+  const reserved = { reservedMicros: estimateCostMicros(TOKEN_ESTIMATE.imageDocument, 2000), recorded: false };
+  assert.equal(settlementMicros(reserved, WARM), 0, "nothing was charged globally → nothing to settle");
+  assert.ok(
+    settlementMicros({ ...reserved, recorded: true }, WARM) < 0,
+    "the same usage, against a reservation that WAS recorded, is a real refund",
+  );
+
+  // And the mirror: a refused call recorded nothing on either counter, so neither may be settled.
+  assert.equal(settlementMicros({ reservedMicros: 0, recorded: true }, WARM), 0);
 });

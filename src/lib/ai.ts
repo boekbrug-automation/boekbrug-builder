@@ -857,6 +857,11 @@ function cacheableSystem(systemPrompt: string): Array<{
 }
 
 async function callClaude(
+  // [EIGEN-AANDEEL] Whose day this call is charged to. FIRST and REQUIRED, with `null` as the
+  // explicit "no account" — the login-free scanner is the only honest null, and it does not come
+  // through here. Required rather than optional so a new call site cannot reach Anthropic without
+  // answering the question; an optional parameter would have made forgetting it the default.
+  userId: string | null,
   prompt: string,
   systemPrompt: string,
   model: string = CLAUDE_MODEL
@@ -867,6 +872,7 @@ async function callClaude(
     inputTokens: TOKEN_ESTIMATE.shortText + Math.ceil((prompt.length + systemPrompt.length) / 4),
     maxOutputTokens: MAX_TOKENS,
     label: 'callClaude',
+    userId,
   })
   if (!budget.allowed) throw new Error(AI_BUDGET_EXHAUSTED_ERROR)
 
@@ -1029,14 +1035,19 @@ async function extractPdfTextIfTextLayer(pdfBase64: string): Promise<string | nu
  * with it — the caller passes a FILE, never anything derived from a read of that file.
  */
 export async function transcribeStoredDocumentAmounts(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   fileBase64: string,
   mediaType: string,
   model?: string,
 ): Promise<string | null> {
-  return transcribeAmountsForGrounding(fileBase64, mediaType, model ?? CLAUDE_MODEL);
+  return transcribeAmountsForGrounding(userId, fileBase64, mediaType, model ?? CLAUDE_MODEL);
 }
 
 async function transcribeAmountsForGrounding(
+  // [EIGEN-AANDEEL] Carried through rather than re-derived: this helper is two calls away from
+  // Anthropic and has no other way of knowing whose day it is spending.
+  userId: string | null,
   fileBase64: string,
   mediaType: string,
   model: string,
@@ -1045,11 +1056,12 @@ async function transcribeAmountsForGrounding(
     const isImage = /^image\/(jpeg|png|webp|gif)$/.test(mediaType);
     const reply = isImage
       ? await callClaudeWithImage(
+          userId,
           fileBase64,
           mediaType as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
           OCR_AMOUNTS_PROMPT, OCR_AMOUNTS_SYSTEM, model,
         )
-      : await callClaudeWithPdf(fileBase64, OCR_AMOUNTS_PROMPT, OCR_AMOUNTS_SYSTEM, model);
+      : await callClaudeWithPdf(userId, fileBase64, OCR_AMOUNTS_PROMPT, OCR_AMOUNTS_SYSTEM, model);
     const haystack = parseOcrAmounts(reply);
     // A reply with one token is far more likely to be a model that gave up than an invoice with one
     // number on it. Treating that as a real search space would turn every amount into a false
@@ -1065,6 +1077,11 @@ async function transcribeAmountsForGrounding(
 }
 
 async function callClaudeWithPdf(
+  // [EIGEN-AANDEEL] Whose day this call is charged to. FIRST and REQUIRED, with `null` as the
+  // explicit "no account" — the login-free scanner is the only honest null, and it does not come
+  // through here. Required rather than optional so a new call site cannot reach Anthropic without
+  // answering the question; an optional parameter would have made forgetting it the default.
+  userId: string | null,
   pdfBase64: string,
   prompt: string,
   systemPrompt: string,
@@ -1078,6 +1095,7 @@ async function callClaudeWithPdf(
     inputTokens: TOKEN_ESTIMATE.rawPdfDocument,
     maxOutputTokens: MAX_TOKENS,
     label: 'callClaudeWithPdf',
+    userId,
   })
   if (!budget.allowed) throw new Error(AI_BUDGET_EXHAUSTED_ERROR)
 
@@ -1226,6 +1244,11 @@ async function downscaleImageIfNeeded(
 // [BOEK-011] handles image/jpeg, image/png, image/webp — May 2026
 // ─────────────────────────────────────────────────────────
 async function callClaudeWithImage(
+  // [EIGEN-AANDEEL] Whose day this call is charged to. FIRST and REQUIRED, with `null` as the
+  // explicit "no account" — the login-free scanner is the only honest null, and it does not come
+  // through here. Required rather than optional so a new call site cannot reach Anthropic without
+  // answering the question; an optional parameter would have made forgetting it the default.
+  userId: string | null,
   imageBase64: string,
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
   prompt: string,
@@ -1250,6 +1273,7 @@ async function callClaudeWithImage(
     inputTokens: TOKEN_ESTIMATE.imageDocument,
     maxOutputTokens: MAX_TOKENS,
     label: 'callClaudeWithImage',
+    userId,
   })
   if (!budget.allowed) throw new Error(AI_BUDGET_EXHAUSTED_ERROR)
 
@@ -1349,6 +1373,8 @@ function safeParseJSON<T>(text: string): T | null {
 // Note: for email attachments use verifyInvoiceFromPdf instead
 // ─────────────────────────────────────────────────────────
 export async function classifyDocument(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   fileContent: string,
   fileName: string
 ): Promise<ClassifyDocumentResult> {
@@ -1381,7 +1407,7 @@ Classify as:
 
 Return JSON only.`;
 
-    const result = await callClaude(prompt, systemPrompt);
+    const result = await callClaude(userId, prompt, systemPrompt);
     const parsed = safeParseJSON<ClassifyDocumentResult>(result);
     if (!parsed) return FALLBACK;
 
@@ -1476,6 +1502,8 @@ function eInvoiceVerification(f: EInvoiceFigures): VerifyInvoiceResult {
 }
 
 export async function verifyInvoiceFromPdf(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   fileBase64: string,
   mimeType: string,
   filename: string,
@@ -2017,7 +2045,7 @@ Return JSON only.`;
         // flattened-text path is exactly what loses the statiegeld/retour columns and the net-
         // negative total that a hard invoice like this needs. No text backstop here: the model
         // sees the whole document and its own is_statement guard still applies downstream.
-        result = await callClaudeWithPdf(fileBase64, prompt, systemPrompt, model);
+        result = await callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt, model);
       } else {
       // [PDF-OPTIMIZE] Try the cheap text path first. For a TEXT PDF (the
       // majority of supplier invoices) we extract the text ourselves and send
@@ -2029,6 +2057,7 @@ Return JSON only.`;
       statementText = extractedText;
       if (extractedText) {
         result = await callClaude(
+          userId,
           `${prompt}\n\n--- FACTUUR TEKST (uit PDF) ---\n${extractedText}`,
           systemPrompt,
           model
@@ -2074,12 +2103,12 @@ Return JSON only.`;
           console.log(
             '[PDF-OPTIMIZE] Text path not conclusive — re-reading via raw PDF (SAFECORE fallback)'
           );
-          result = await callClaudeWithPdf(fileBase64, prompt, systemPrompt, model);
+          result = await callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt, model);
         } else if (needsVisualReread(probe)) {
           console.log(
             '[VISUAL-REREAD] Text path read an invoice with weak number/split/amount — re-reading via the raw PDF layout'
           );
-          const reread = await callClaudeWithPdf(fileBase64, prompt, systemPrompt, model);
+          const reread = await callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt, model);
           const rp = safeParseJSON<VerifyInvoiceResult>(reread);
           // Adopt the visual re-read (to gain the recovered invoice number / BTW split) ONLY when
           // its total AGREES with the total the trusted text path already read. The re-read fires
@@ -2106,7 +2135,7 @@ Return JSON only.`;
       } else {
         // Raw PDF path — Claude reads the actual PDF (text + scanned). Already the visual layout,
         // so a VISUAL-REREAD would be an identical second pass — nothing to gain.
-        result = await callClaudeWithPdf(fileBase64, prompt, systemPrompt, model);
+        result = await callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt, model);
       }
       } // [REREAD-STRONG] close the non-preferRawPdf (text-path) branch
     } else if (
@@ -2118,6 +2147,7 @@ Return JSON only.`;
       // Claude reads the image directly (already the visual layout). The re-read model override is
       // honoured so the manual re-read of a photographed invoice also uses the stronger model.
       result = await callClaudeWithImage(
+        userId,
         fileBase64,
         mimeType as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
         prompt,
@@ -2274,7 +2304,7 @@ Return JSON only.`;
         typeof parsed.total_inc_btw === 'number' &&
         Number.isFinite(parsed.total_inc_btw)
       ) {
-        const transcribed = await transcribeAmountsForGrounding(fileBase64, mimeType, model ?? CLAUDE_MODEL);
+        const transcribed = await transcribeAmountsForGrounding(userId, fileBase64, mimeType, model ?? CLAUDE_MODEL);
         if (transcribed) {
           grounding = groundMoneyFields(amounts, transcribed, 'ocr');
           witnessText = transcribed;
@@ -2964,6 +2994,8 @@ Return JSON only.`;
 // [BOEK-018] translateToNL — May 2026
 // ─────────────────────────────────────────────────────────
 export async function translateToNL(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   text: string,
   sourceLanguage: string
 ): Promise<TranslateResult> {
@@ -2985,7 +3017,7 @@ Text: ${text}
 
 Return JSON only.`;
 
-    const result = await callClaude(prompt, systemPrompt);
+    const result = await callClaude(userId, prompt, systemPrompt);
     const parsed = safeParseJSON<TranslateResult>(result);
     if (!parsed) return FALLBACK;
 
@@ -3002,6 +3034,8 @@ Return JSON only.`;
 // [BOEK-018] composeDraftEmail — May 2026
 // ─────────────────────────────────────────────────────────
 export async function composeDraftEmail(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   accountantName: string,
   clientName: string,
   items: string[]
@@ -3030,7 +3064,7 @@ ${items.map((item, i) => `${i + 1}. ${item}`).join('\n')}
 
 Return JSON only.`;
 
-    const result = await callClaude(prompt, systemPrompt);
+    const result = await callClaude(userId, prompt, systemPrompt);
     const parsed = safeParseJSON<ComposeDraftEmailResult>(result);
     if (!parsed) return FALLBACK;
 
@@ -3046,6 +3080,8 @@ Return JSON only.`;
 // [BOEK-018] matchTransaction — May 2026
 // ─────────────────────────────────────────────────────────
 export async function matchTransaction(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   transaction: TransactionInput,
   invoices: InvoiceInput[]
 ): Promise<MatchTransactionResult> {
@@ -3091,7 +3127,7 @@ ${invoices
 
 Return JSON only.`;
 
-    const result = await callClaude(prompt, systemPrompt);
+    const result = await callClaude(userId, prompt, systemPrompt);
     const parsed = safeParseJSON<MatchTransactionResult>(result);
     if (!parsed) return FALLBACK;
 
@@ -3113,6 +3149,8 @@ Return JSON only.`;
 // [BOEK-018] classifyExpense — May 2026
 // ─────────────────────────────────────────────────────────
 export async function classifyExpense(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   description: string,
   amount?: number
 ): Promise<ClassifyExpenseResult> {
@@ -3139,7 +3177,7 @@ ${amount !== undefined ? `Amount: €${amount}` : ''}
 
 Return JSON only.`;
 
-    const result = await callClaude(prompt, systemPrompt);
+    const result = await callClaude(userId, prompt, systemPrompt);
     const parsed = safeParseJSON<ClassifyExpenseResult>(result);
     if (!parsed) return FALLBACK;
 
@@ -3161,6 +3199,8 @@ Return JSON only.`;
 // Human reviews and confirms before anything is saved
 // ─────────────────────────────────────────────────────────
 export async function generateInvoiceFromPrompt(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   prompt: string
 ): Promise<GenerateInvoiceFromPromptResult> {
   const FALLBACK: GenerateInvoiceFromPromptResult = {
@@ -3213,7 +3253,7 @@ Extract: who is the client, what was delivered, at what price, and any special n
 If a price is given including BTW, calculate the excl. BTW price based on the btw_rate.
 Return JSON only.`;
 
-    const result = await callClaude(userPrompt, systemPrompt);
+    const result = await callClaude(userId, userPrompt, systemPrompt);
     const parsed = safeParseJSON<GenerateInvoiceFromPromptResult>(result);
     if (!parsed) return FALLBACK;
 
@@ -3294,6 +3334,8 @@ Return JSON only.`;
 // Never throws — onboarding continues even if AI fails
 // ─────────────────────────────────────────────────────────
 export async function extractCompanyDetails(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   fileBase64: string,
   mimeType: string,
   filename: string
@@ -3351,7 +3393,7 @@ Return JSON only. If unsure between sender and receiver, choose the one at the T
     let raw: string;
 
     if (mimeType === 'application/pdf') {
-      raw = await callClaudeWithPdf(fileBase64, prompt, systemPrompt);
+      raw = await callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt);
     } else if (
       mimeType === 'image/jpeg' ||
       mimeType === 'image/png' ||
@@ -3359,6 +3401,7 @@ Return JSON only. If unsure between sender and receiver, choose the one at the T
       mimeType === 'image/gif'
     ) {
       raw = await callClaudeWithImage(
+        userId,
         fileBase64,
         mimeType as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
         prompt,
@@ -3367,6 +3410,7 @@ Return JSON only. If unsure between sender and receiver, choose the one at the T
     } else {
       // Unsupported type — treat as text extraction best-effort
       raw = await callClaude(
+        userId,
         `Filename: ${filename}\n${prompt}`,
         systemPrompt
       );
@@ -3410,6 +3454,8 @@ Return JSON only. If unsure between sender and receiver, choose the one at the T
 // model — does the structured extraction and applies its reconciliation cross-checks. The
 // model only reads the pixels; the arithmetic is deterministic and testable downstream.
 export async function transcribeEftReceipt(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   fileBase64: string,
   mimeType: string,
   filename: string,
@@ -3425,14 +3471,14 @@ export async function transcribeEftReceipt(
     'Geef ALLEEN de tekst terug, geen uitleg.';
 
   const isPdf = mimeType === 'application/pdf' || filename.toLowerCase().endsWith('.pdf');
-  if (isPdf) return callClaudeWithPdf(fileBase64, prompt, systemPrompt);
+  if (isPdf) return callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt);
 
   const mt: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' =
     mimeType === 'image/png' ? 'image/png'
     : mimeType === 'image/webp' ? 'image/webp'
     : mimeType === 'image/gif' ? 'image/gif'
     : 'image/jpeg';
-  return callClaudeWithImage(fileBase64, mt, prompt, systemPrompt);
+  return callClaudeWithImage(userId, fileBase64, mt, prompt, systemPrompt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3476,6 +3522,8 @@ const STATEMENT_FALLBACK: StatementRead = {
 };
 
 export async function readSupplierStatement(
+  /** [EIGEN-AANDEEL] Whose daily share this read is charged to; `null` only where there is no account. */
+  userId: string | null,
   fileBase64: string,
   mimeType: string,
   filename: string,
@@ -3534,15 +3582,15 @@ Neem ze allemaal mee, ook de regels die al betaald lijken.`;
       // extractie niet (gescand), dan gaat de ruwe PDF alsnog naar het model.
       const text = await extractPdfTextIfTextLayer(fileBase64);
       result = text
-        ? await callClaude(`${prompt}\n\n--- OVERZICHT TEKST (uit PDF) ---\n${text}`, systemPrompt)
-        : await callClaudeWithPdf(fileBase64, prompt, systemPrompt);
+        ? await callClaude(userId, `${prompt}\n\n--- OVERZICHT TEKST (uit PDF) ---\n${text}`, systemPrompt)
+        : await callClaudeWithPdf(userId, fileBase64, prompt, systemPrompt);
     } else if (mimeType.startsWith('image/')) {
       const mt: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' =
         mimeType === 'image/png' ? 'image/png'
         : mimeType === 'image/webp' ? 'image/webp'
         : mimeType === 'image/gif' ? 'image/gif'
         : 'image/jpeg';
-      result = await callClaudeWithImage(fileBase64, mt, prompt, systemPrompt);
+      result = await callClaudeWithImage(userId, fileBase64, mt, prompt, systemPrompt);
     } else {
       return STATEMENT_FALLBACK;
     }

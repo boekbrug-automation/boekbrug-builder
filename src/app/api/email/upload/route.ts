@@ -208,7 +208,7 @@ async function runUpload(req: NextRequest) {
   // (Same fix /api/intake already carries.)
   let verification: Awaited<ReturnType<typeof verifyInvoiceFromPdf>>;
   try {
-    verification = await verifyInvoiceFromPdf(base64, file.type, file.name, receiverName, {
+    verification = await verifyInvoiceFromPdf(user.id, base64, file.type, file.name, receiverName, {
       // [READING-MEMORY] See the intake route — fields only, never amounts.
       readingHint: readingPromptHint(await loadReadingMemory(supabase, user.id)),
       receiverKvk: me?.kvk_number || null,

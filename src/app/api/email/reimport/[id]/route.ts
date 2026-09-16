@@ -312,7 +312,7 @@ async function runReimport(
 
   // Re-read with the CURRENT extractor (same path the import uses → identical behaviour).
   const read = (model: string) =>
-    classifyAttachment(base64, mimeType, filename, receiverName, {
+    classifyAttachment(user.id, base64, mimeType, filename, receiverName, {
       model,
       // [REREAD-STRONG] As 1 — nooit weglaten, ook niet in de terugval. Dit is wat de handmatige
       // herlezing onderscheidt van de automatische, en het hangt niet aan het model.

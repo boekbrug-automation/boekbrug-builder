@@ -252,7 +252,7 @@ async function runAttachInvoice(req: NextRequest) {
   // maandtegoed kost — dezelfde belofte als op de andere vijf AI-routes.
   let verification: Awaited<ReturnType<typeof verifyInvoiceFromPdf>>;
   try {
-    verification = await verifyInvoiceFromPdf(base64, readerMime, file.name, receiverName, {
+    verification = await verifyInvoiceFromPdf(user.id, base64, readerMime, file.name, receiverName, {
       // [READING-MEMORY] Fields only, never amounts — see readingPromptHint. This path books
       // straight to 'paid', so a better first read is worth more here than anywhere else.
       readingHint: readingPromptHint(await loadReadingMemory(supabase, user.id)),

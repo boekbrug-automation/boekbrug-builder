@@ -230,6 +230,7 @@ export async function POST(request: NextRequest) {
 
       const accountantName = await accountantLabel(supabase, user.id)
       const result = await composeDraftEmail(
+        user.id,
         accountantName,
         clientLabel(client),
         items.map(i => i.description)

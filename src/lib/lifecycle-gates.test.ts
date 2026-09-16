@@ -35275,7 +35275,7 @@ test("[EERLIJK-DEUR] every AI-reading API route spends the monthly allowance, or
   // reservation at the top would charge for one and read forty.
   const audit = code("src/app/api/invoice/audit/route.ts");
   const gateAt = audit.indexOf("gateFairUse({");
-  const readAt = audit.indexOf("transcribeStoredDocumentAmounts(bytes");
+  const readAt = audit.indexOf("transcribeStoredDocumentAmounts(user.id, bytes");
   assert.ok(gateAt > -1, "[EERLIJK-DEUR] the audit route must reserve before it transcribes");
   assert.ok(readAt > -1, "[EERLIJK-DEUR] the audit route's transcription call moved — re-point this gate");
   assert.ok(gateAt < readAt, "[EERLIJK-DEUR] the reservation must come BEFORE the AI read");
@@ -35283,5 +35283,144 @@ test("[EERLIJK-DEUR] every AI-reading API route spends the monthly allowance, or
     audit,
     /release\(\)/,
     "[EERLIJK-DEUR] an unusable transcription must be given back — /eerlijk-gebruik §3",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [EIGEN-AANDEEL] Every call to Anthropic names the account whose day it is spending — and the
+// global fuse is asked anyway.
+//
+// WHY THIS GATE EXISTS. [COST-GUARD] put ONE euro ceiling on the whole app per UTC day, and it
+// answers exactly one question: can the owner pay today's bill. It cannot answer the question a
+// paid plan has to answer, which is whether ONE account can take that day away from everybody
+// else. Measured on production: a single account read 101 documents on 19 July 2026, and the
+// busiest day the app has ever had cost EUR 1.02 in total — one backlog import is most of a day.
+//
+// Selling a year up front is what makes that a promise rather than a nuisance, so the share had
+// to exist before annual could be sold. It is kept in usage_counters, under a period that is a
+// UTC DAY and a metric spelled `internal.`, and it is charged and settled beside the global one.
+//
+// WHAT THE GATE ACTUALLY HOLDS, and each line of it failed in some earlier draft of this change:
+//
+//   1. Only two files in the repository may speak to Anthropic, and both reserve first. Nothing
+//      else may grow a third transport quietly. `code()` strips comments, so the half-dozen
+//      places that merely NAME api.anthropic.com in prose do not count as reaching it.
+//   2. Every transport hands reserveAiBudget a userId. A reservation that forgets it still
+//      charges the global fuse and silently charges NOBODY's share — the exact half-enforcement
+//      [EERLIJK-DEUR] was written about, one layer down.
+//   3. Every call to a transport states an account or an explicit null. The parameter is first
+//      and required so the compiler asks the question; this reads the answers, because `null` is
+//      a legitimate answer in exactly one place and a lazy one everywhere else.
+//   4. The global fuse is UNCONDITIONAL. It may not sit inside the `if (userId)` branch — a
+//      share that could switch the real ceiling off would be a downgrade wearing a fix's clothes.
+//   5. The share hands itself back when the global fuse refuses. The call is not happening, so
+//      it must not stand on anyone's day.
+//   6. The share ships at 0 — count, do not limit. Mechanism and threshold are separate
+//      decisions, and the number is the owner's.
+test("[EIGEN-AANDEEL] every Anthropic call names an account, and the global fuse is unconditional", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const p = `${dir}/${e}`;
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (p.endsWith(".ts") || p.endsWith(".tsx")) out.push(p);
+    }
+    return out;
+  };
+
+  // 1. The transports, and only the transports.
+  const TRANSPORTS = ["src/lib/ai.ts", "src/app/api/tools/scan-invoice/route.ts"];
+  const speakers = walk("src")
+    .filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".test.tsx"))
+    .filter((f) => code(f).includes("api.anthropic.com"));
+  assert.deepEqual(
+    speakers.sort(),
+    [...TRANSPORTS].sort(),
+    "a new file reaches Anthropic directly. Every paid call goes through ai.ts or the public " +
+      "scanner, because those are the two places the fuse and the share are enforced.",
+  );
+  for (const f of TRANSPORTS) {
+    assert.match(code(f), /reserveAiBudget\(/, `[EIGEN-AANDEEL] ${f} spends without reserving`);
+  }
+
+  const ai = code("src/lib/ai.ts");
+
+  // 2. Each of the three transports in ai.ts names an account in its reservation. The public
+  //    scanner deliberately does not: it is login-free, so there is no account and no profile row
+  //    for usage_counters.user_id to reference. It keeps check_rate_limit_key and the global fuse.
+  for (const label of ["callClaude", "callClaudeWithPdf", "callClaudeWithImage"]) {
+    const at = ai.indexOf(`label: '${label}',`);
+    assert.ok(at > -1, `[EIGEN-AANDEEL] the reservation for ${label} moved — re-point this gate`);
+    assert.match(
+      ai.slice(at, at + 120),
+      /userId,/,
+      `[EIGEN-AANDEEL] ${label} reserves without naming the account — the share would be charged ` +
+        "to nobody while the global fuse still pays",
+    );
+  }
+  const scanner = code("src/app/api/tools/scan-invoice/route.ts");
+  assert.ok(
+    !/userId/.test(scanner.slice(scanner.indexOf("reserveAiBudget("), scanner.indexOf("reserveAiBudget(") + 300)),
+    "[EIGEN-AANDEEL] the public scanner has no account by construction. If it grew one, the " +
+      "exemption written into reserveAiBudget's doc comment is now wrong and must be rewritten.",
+  );
+
+  // 3. Every transport CALL answers the question. Definitions match too (their first parameter is
+  //    literally `userId`), which is what we want: the shape is identical either way.
+  const unnamed: string[] = [];
+  for (const m of ai.matchAll(/\bcallClaude(WithPdf|WithImage)?\(/g)) {
+    const after = ai.slice(m.index + m[0].length).replace(/^[\s]*/, "");
+    if (!/^(userId|null)\b/.test(after)) unnamed.push(after.slice(0, 40).split("\n")[0]);
+  }
+  assert.deepEqual(
+    unnamed,
+    [],
+    "these transport calls do not say whose day they spend. Pass userId, or `null` where there " +
+      `genuinely is no account:\n  ${unnamed.join("\n  ")}`,
+  );
+
+  const budget = code("src/lib/ai-budget.ts");
+
+  // 4. The fuse is not conditional on the share. Measured from the source rather than asserted in
+  //    prose: the global RPC must sit AFTER the `if (userId)` block has closed, at function level.
+  const shareBranch = budget.indexOf("if (userId) {");
+  const globalRpc = budget.indexOf('rpc("ai_budget_consume"');
+  assert.ok(shareBranch > -1 && globalRpc > -1, "[EIGEN-AANDEEL] re-point this gate: reserveAiBudget was restructured");
+  const between = budget.slice(shareBranch, globalRpc);
+  assert.ok(
+    between.includes("\n  }"),
+    "[EIGEN-AANDEEL] ai_budget_consume must be reached whether or not there is an account. It is " +
+      "the only ceiling that stands between the owner and a bill nobody can pay, and a per-account " +
+      "share may never become a condition on reaching it.",
+  );
+
+  // 5. A blown fuse gives the share back.
+  assert.match(
+    budget,
+    /if \(accountRecorded && userId\) \{\s*await moveAccountShare\(userId, accountPeriod, -costMicros/,
+    "[EIGEN-AANDEEL] when the global fuse refuses, the call does not happen — so the share it " +
+      "already took must be handed back, or a blown fuse silently eats the share of every account " +
+      "that asked afterwards.",
+  );
+
+  // 6. Mechanism now, threshold later. The share ships counting, not limiting.
+  assert.match(
+    budget,
+    /AI_DAILY_SHARE_EUR[\s\S]{0,200}?if \(raw === ""\) return 0;/,
+    "[EIGEN-AANDEEL] the share must default to 0 — count, do not limit. A ceiling chosen before " +
+      "there is per-account evidence is a guess, and this one would refuse paying customers.",
+  );
+
+  // …and the counter it writes to must be hidden from the account it belongs to, because the row
+  // is our cost model in micro-euros, not a number the owner is entitled to read off their meter.
+  assert.match(
+    budget,
+    /ACCOUNT_SHARE_METRIC = "internal\./,
+    "[EIGEN-AANDEEL] the share's metric must carry the `internal.` prefix the RLS policy hides on",
+  );
+  assert.match(
+    code("supabase/migrations/usage_counters_internal_metrics.sql"),
+    /metric NOT LIKE 'internal\.%'/,
+    "[EIGEN-AANDEEL] usage_counters_select_own must exclude internal metrics",
   );
 });

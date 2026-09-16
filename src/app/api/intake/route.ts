@@ -491,7 +491,7 @@ async function runIntake(req: NextRequest) {
     // extractor drops any vendor_kvk/btw/iban equal to the owner's own — otherwise a camera/file
     // upload could store the OWNER'S OWN IBAN as vendor_iban on a self-referencing document, which
     // later feeds the IBAN+amount bank auto-match tier.
-    v = await verifyInvoiceFromPdf(base64, effectiveType, file.name, receiverName, {
+    v = await verifyInvoiceFromPdf(user.id, base64, effectiveType, file.name, receiverName, {
       throwOnTransient: true,
       // [READING-MEMORY] Which suppliers this owner keeps having to correct, and in which field.
       // Fields only, never amounts. Null when the memory is empty or could not be loaded — the
@@ -2413,7 +2413,7 @@ async function reconcileSupplierStatement(args: {
 }): Promise<StatementReconcilePayload | null> {
   const { supabase, pipeline, userId, documentId, base64, mimeType, filename, receiverName } = args
 
-  const read = await readSupplierStatement(base64, mimeType, filename, receiverName)
+  const read = await readSupplierStatement(userId, base64, mimeType, filename, receiverName)
   // Geen leesbare regels → geen controle. Nooit "alles compleet" claimen op een leeg resultaat.
   if (!read.ok || read.lines.length === 0) return null
 

@@ -243,7 +243,7 @@ export async function POST(req: NextRequest) {
         photosOutOfAllowance = true;
       } else {
         photosDone++;
-        const transcribed = await transcribeStoredDocumentAmounts(bytes.toString("base64"), mime);
+        const transcribed = await transcribeStoredDocumentAmounts(user.id, bytes.toString("base64"), mime);
         // /eerlijk-gebruik §3: a failed attempt never lands on the owner's bill. An unusable
         // transcription is exactly that — nothing was learned, so nothing is charged.
         if (transcribed) grounding = groundMoneyFields(amounts, transcribed, "ocr");

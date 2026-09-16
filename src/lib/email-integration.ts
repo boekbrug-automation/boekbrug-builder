@@ -1933,6 +1933,9 @@ export interface AttachmentClassification {
  * Confidence threshold enforced inside verifyInvoiceFromPdf (0.6)
  */
 export async function classifyAttachment(
+  // [EIGEN-AANDEEL] Whose daily share this read is charged to. The sync has it per connection,
+  // the re-read route has it from the session; there is no path here without an account.
+  userId: string | null,
   base64Data: string,
   mimeType: string,
   filename: string,
@@ -1965,7 +1968,7 @@ export async function classifyAttachment(
   // [TRANSIENT-RETRY] Opt in: a transient Claude/network failure re-throws (→ PHASE 1 marks the
   // attachment classifyFailed → retried next sync) instead of returning a confidence-0 FALLBACK
   // that the caller would misread as "could not read" and permanently skip.
-  const result = await verifyInvoiceFromPdf(base64Data, mimeType, filename, receiverName, {
+  const result = await verifyInvoiceFromPdf(userId, base64Data, mimeType, filename, receiverName, {
     throwOnTransient: true,
     model: opts?.model,
     preferRawPdf: opts?.preferRawPdf,
@@ -3365,6 +3368,7 @@ export async function syncUserEmails(
     async (attachment) => {
       try {
         const classification = await classifyAttachment(
+          userId,
           attachment.data,
           attachment.mimeType,
           attachment.filename,
