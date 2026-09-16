@@ -35186,3 +35186,102 @@ test("[HANDGESCHREVEN-BOEKING] the two copies of confirm_bank_payment stay byte-
     "the two declarations of confirm_bank_payment have diverged. Comments included: a difference " +
     "in the REASONING is how the next reader learns the wrong thing about the copy they opened.");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [EERLIJK-DEUR] Every route that makes the AI read a document spends the owner's monthly
+// allowance — or is named here with the reason it does not.
+//
+// WHY THIS GATE EXISTS. The allowance was enforced in six routes and bypassed in two, and nothing
+// in the repository could see the difference: both sets import @/lib/ai, both reach Anthropic,
+// only one reaches consumeFairUse. /api/invoice/audit transcribes up to MAX_PHOTOS_PER_RUN stored
+// documents per request at the imageDocument rate and never moved the counter once. A free plan
+// whose limit can be walked around is a published number that is not true, and "10 documents a
+// month" is about to become a commercial promise rather than a comfortable ceiling.
+//
+// So the invariant is stated over the DOORS, not over any one route: importing the AI module and
+// not accounting for it is a decision that has to be written down.
+//
+// THE ALLOWLIST IS THE POINT. A route lands there only when the call is not a document read at
+// all, and the reason travels with it — because the opposite error is just as real. Charging an
+// allowance unit for something the model never read is what [E-FACTUUR-GRATIS] was written to
+// stop: it makes the owner pay for nothing AND pushes a real invoice out of the month.
+test("[EERLIJK-DEUR] every AI-reading API route spends the monthly allowance, or says why not", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const p = `${dir}/${e}`;
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (p.endsWith(".ts")) out.push(p);
+    }
+    return out;
+  };
+
+  // Routes that reach @/lib/ai without touching the allowance, each with the reason.
+  const EXEMPT: Record<string, string> = {
+    // classifyDocument() here is handed doc.file_name TWICE — the route never fetches the file's
+    // text, and the header says so: "a filename-based folder SUGGESTION only". It goes through
+    // callClaude at TOKEN_ESTIMATE.shortText (1,200 tokens), not callClaudeWithImage's 6,000: it
+    // is a short text call about a NAME, not a reading of a document. The published allowance is
+    // "Documenten die de AI voor je leest (bonnen, inkoopfacturen, bankafschriften)" — a folder
+    // suggestion is none of those. It stays bounded by RATE_LIMITS.DOCUMENT_CLASSIFY and by the
+    // global fuse in ai-budget.ts, which is the right pair of fences for what it is.
+    "src/app/api/bestanden/classify/route.ts":
+      "filename-only folder suggestion — shortText call, no document is read",
+
+    // The three below GENERATE or TRANSLATE text. Nothing is read from a stored document at all:
+    // they go through callClaude at shortText (1,200 tokens) and are bounded by
+    // RATE_LIMITS.AI_TRANSLATE (120/hour) plus the global fuse. Counting them against
+    // "documenten die de AI voor je leest" would charge a reading allowance for writing — the
+    // exact inversion [E-FACTUUR-GRATIS] refuses, and it would push real invoices out of a month
+    // to pay for an e-mail draft.
+    "src/app/api/ai/draft-email/route.ts":
+      "composes an e-mail — shortText generation, reads no stored document",
+    "src/app/api/ai/translate/route.ts":
+      "translateToNL on text already in hand — shortText, reads no stored document",
+    "src/app/api/draft-queue/route.ts":
+      "composeDraftEmail — shortText generation, reads no stored document",
+  };
+
+  const offenders: string[] = [];
+  for (const file of walk("src/app/api")) {
+    const src = code(file);
+    if (!/from ["']@\/lib\/ai["']/.test(src)) continue;
+    if (EXEMPT[file]) continue;
+    if (/gateFairUse(ForRead)?\s*\(/.test(src)) continue;
+    offenders.push(file);
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `these routes make the AI read and never spend the allowance — gate them, or add them to ` +
+      `EXEMPT with the reason they are not a document read:\n  ${offenders.join("\n  ")}`,
+  );
+
+  // The allowlist may not rot into a bypass list. Every name on it must still exist and must still
+  // be free of a gate — an entry that has since been gated is a stale excuse, and one whose file
+  // moved is an exemption protecting nothing.
+  for (const [file, reason] of Object.entries(EXEMPT)) {
+    assert.ok(existsSync(file), `[EERLIJK-DEUR] EXEMPT names ${file}, which no longer exists`);
+    assert.ok(reason.length > 20, `[EERLIJK-DEUR] ${file} needs a real reason, not a label`);
+    assert.ok(
+      !/gateFairUse(ForRead)?\s*\(/.test(code(file)),
+      `[EERLIJK-DEUR] ${file} is gated now — remove it from EXEMPT so the list stays honest`,
+    );
+  }
+
+  // And the door this gate was built for must actually carry it, inside the loop rather than once
+  // per request: one call to that route reads up to MAX_PHOTOS_PER_RUN documents, so a single
+  // reservation at the top would charge for one and read forty.
+  const audit = code("src/app/api/invoice/audit/route.ts");
+  const gateAt = audit.indexOf("gateFairUse({");
+  const readAt = audit.indexOf("transcribeStoredDocumentAmounts(bytes");
+  assert.ok(gateAt > -1, "[EERLIJK-DEUR] the audit route must reserve before it transcribes");
+  assert.ok(readAt > -1, "[EERLIJK-DEUR] the audit route's transcription call moved — re-point this gate");
+  assert.ok(gateAt < readAt, "[EERLIJK-DEUR] the reservation must come BEFORE the AI read");
+  assert.match(
+    audit,
+    /release\(\)/,
+    "[EERLIJK-DEUR] an unusable transcription must be given back — /eerlijk-gebruik §3",
+  );
+});

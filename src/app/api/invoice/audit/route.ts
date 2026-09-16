@@ -36,6 +36,9 @@ import { readPdfTextLayer } from "@/lib/pdf-text";
 import { sniffReadableMime } from "@/lib/detect-file";
 // [NAREKENEN-FOTO] The same blind transcription the import path uses — exported, never copied.
 import { transcribeStoredDocumentAmounts } from "@/lib/ai";
+// [EERLIJK-DEUR] The same monthly allowance every other AI read comes off — see the note at the
+// transcription call for why this route needed it and why the gate sits inside the loop.
+import { gateFairUse } from "@/lib/fair-use-gate";
 import { groundMoneyFields } from "@/lib/amount-grounding";
 // [E-FACTUUR-NAREKENEN] De leverancier stuurde zijn eigen cijfers mee — die zijn na te rekenen
 // zonder iets te lezen. Zonder dit belandde juist die factuur in "konden wij niet controleren".
@@ -138,6 +141,11 @@ export async function POST(req: NextRequest) {
   // is the kind of number that makes the whole report worthless.
   let photosDone = 0;
   let photosChecked = 0;
+  // [EERLIJK-DEUR] Stopped because the month's allowance ran out, not because of the cap above.
+  // Reported separately: "we stopped at 40, ask again" and "your free reads are gone until the
+  // 1st" are different sentences with different ways out, and one must never be shown for the
+  // other.
+  let photosOutOfAllowance = false;
 
   for (const inv of withDoc) {
     const path = inv.document_id ? docPaths.get(inv.document_id) : null;
@@ -214,9 +222,33 @@ export async function POST(req: NextRequest) {
       typeof inv.total_inc_btw === "number" && Number.isFinite(inv.total_inc_btw) &&
       bytes && mime
     ) {
-      photosDone++;
-      const transcribed = await transcribeStoredDocumentAmounts(bytes.toString("base64"), mime);
-      if (transcribed) grounding = groundMoneyFields(amounts, transcribed, "ocr");
+      // [EERLIJK-DEUR] This is an AI READ of a stored document — the same call the import path
+      // makes, on the same kind of file, at the same imageDocument cost. So it comes off the same
+      // monthly allowance as every other read (intake, e-mail, bank). It did not, and that was
+      // measured rather than assumed: this route imports from @/lib/ai and never reached the gate,
+      // so a month's free reads could be spent here without the counter moving once.
+      //
+      // Inside the loop, not once per request: one call to this route transcribes up to
+      // MAX_PHOTOS_PER_RUN documents. A single reservation at the top would charge one and read
+      // forty — which is the bypass wearing a gate.
+      //
+      // A refusal STOPS the photographs and never fails the audit. The invoice stays 'unreadable',
+      // which the note above already calls "the honest answer when the check did not run", and the
+      // text half of the report is unaffected. Same shape as photosCapped, for the same reason.
+      // NOT `continue`: the invoice still belongs in the report, as 'unreadable'. Skipping the
+      // loop body would drop it from `audited` altogether, and an invoice missing from a report is
+      // a worse answer than an invoice the report admits it could not check.
+      const photoGate = await gateFairUse({ client: supabase, userId: user.id, metric: "aiDocuments" });
+      if (!photoGate.allowed) {
+        photosOutOfAllowance = true;
+      } else {
+        photosDone++;
+        const transcribed = await transcribeStoredDocumentAmounts(bytes.toString("base64"), mime);
+        // /eerlijk-gebruik §3: a failed attempt never lands on the owner's bill. An unusable
+        // transcription is exactly that — nothing was learned, so nothing is charged.
+        if (transcribed) grounding = groundMoneyFields(amounts, transcribed, "ocr");
+        else await photoGate.release();
+      }
     }
     if (grounding.source === "ocr") photosChecked++;
 
@@ -268,6 +300,9 @@ export async function POST(req: NextRequest) {
     // look at your photographs" is a statement the owner reads rather than an absence they infer.
     photosChecked,
     photosCapped: includePhotos && photosDone >= MAX_PHOTOS_PER_RUN,
+    // [EERLIJK-DEUR] Distinct from photosCapped: the month's free reads ran out. The way out is
+    // the 1st of next month or Plus, not "run it again".
+    photosOutOfAllowance,
     // Invoices with no stored document at all cannot be checked against anything, and that is a
     // different gap with its own fix ([ORIGINEEL] — "Origineel toevoegen").
     withoutDocument: invoices.length - (withDoc.length + truncated),
