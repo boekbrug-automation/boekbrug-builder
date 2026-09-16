@@ -504,6 +504,39 @@ export async function POST(req: NextRequest) {
       ((atomicErr as { code?: string }).code === "42883" ||
         /confirm_bank_payment|allocate_bank_payment/i.test(atomicErr.message ?? "") &&
           /(does not exist|not find|schema cache)/i.test(atomicErr.message ?? ""));
+
+    // ── [F3-MEET] TEMPORARY. Remove once this has answered its question. ───────────────────────
+    //
+    // Everything below this point in the `moneyLeftOver` branch books BY HAND — invoice on the
+    // session client, line on pipeline, allocation last and best-effort — which is the shape
+    // [HANDGESCHREVEN-BOEKING] removed from the other two routes. It is reached only when
+    // `fnMissing` is true, and measured over the audit trail it has NEVER run: all 14 manual
+    // confirms carry the atomic RPC's row shape, none carries this branch's `applied_total`.
+    //
+    // So the open question is not WHETHER it ran — the audit shape answers that durably and for
+    // free, with no code — but whether it CAN. The detector fires on a raw 42883 or on a message
+    // matching both the function name and one of does-not-exist / not-find / schema-cache. That
+    // last word is the one worth knowing about: PostgREST rebuilds its schema cache after every
+    // migration (21 reload messages and one 2.2-second rebuild in a single measured day), and a
+    // PGRST202 raised inside that window would satisfy the detector while the function exists.
+    //
+    // That is reasoning from the message format, not from a captured instance. This line captures
+    // the instance. It changes nothing: no branch moves, no refusal is reworded, nothing is
+    // written. It only records what the error actually looked like, so the decision after it —
+    // delete the branch, or fix the detector — rests on an observation instead of an inference.
+    if (fnMissing) {
+      console.error("[F3-MEET] atomic door reported missing; falling through to the hand-written branch", {
+        fn: atomicFn,
+        code: (atomicErr as { code?: string }).code ?? null,
+        message: atomicErr.message ?? null,
+        details: (atomicErr as { details?: string }).details ?? null,
+        hint: (atomicErr as { hint?: string }).hint ?? null,
+        matchedOn:
+          (atomicErr as { code?: string }).code === "42883" ? "code-42883" : "message-regex",
+        transactionId,
+        invoiceId,
+      });
+    }
     if (atomicErr && !fnMissing) {
       const msg = (atomicErr.message ?? "").toLowerCase();
       if (msg.includes("verwerkt")) {
