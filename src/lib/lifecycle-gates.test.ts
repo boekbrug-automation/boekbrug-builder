@@ -34302,6 +34302,114 @@ test("[NOOIT-BETAALBAAR] the batch door refuses the same set, in its own shape, 
     `${BATCH_DOOR} is declared in ${declaring.length} migration(s) — ${declaring.join(", ")}`);
 });
 
+// ─── [VERPLAATS-TEKEN] A move may not change the SIGN of what a bank line has spent ──────────────
+//
+// move_invoice_payment is the only writer that REPOINTS an allocation, and it was the only one of
+// the paths that change a line's spend which took no lock on the line and read no line budget at
+// all. It guards the TARGET invoice's remaining room and nothing about the line.
+//
+// That matters because the line's budget is signed. A link either spends the line or gives money
+// back to it, decided by whether the invoice moves money the same way the line did. The function
+// refuses a creditnota TARGET but deliberately allows a creditnota SOURCE — opposite sides of that
+// test — so a move across them flipped the link from -a to +a and the line's spend rose by 2a.
+// Measured on a real PostgreSQL: a tied EUR 850 debit ended carrying EUR 1.150.
+//
+// What this gate holds is STRUCTURE, deliberately, and it is not a concurrency proof. That the
+// lock is taken in the right order is checkable here; that two connections interleave correctly is
+// not, and no permanent two-connection harness exists in this repository — see [GELIJKTIJDIG-VAST].
+
+const MOVE_FILES = [
+  "supabase/migrations/invoice_move_payment.sql",
+  "supabase/migrations/invoice_move_payment_creditnota_guard.sql",
+] as const;
+
+test("[VERPLAATS-TEKEN] the move locks link -> line -> invoices and refuses a sign flip before it writes", () => {
+  for (const file of MOVE_FILES) {
+    const body = functionBody(sqlNoComments(file), "move_invoice_payment");
+
+    // 1 — the three locks, in ONE fixed order. Cut on real code, and each marker asserted found:
+    //     an indexOf that may return -1 silently reorders everything below it.
+    const linkLock = body.indexOf("FROM public.bank_tx_invoices l");
+    const lineLock = body.indexOf("FROM public.bank_transactions t");
+    const invLock = body.indexOf("PERFORM 1 FROM public.invoices");
+    assert.ok(linkLock > -1, `move_invoice_payment in ${file} does not read the link row`);
+    assert.ok(lineLock > -1, `move_invoice_payment in ${file} never locks the parent bank line`);
+    assert.ok(invLock > -1, `move_invoice_payment in ${file} does not lock the invoices`);
+    assert.ok(linkLock < lineLock,
+      `move_invoice_payment in ${file} locks the bank line before the link row — the order is not fixed`);
+    assert.ok(lineLock < invLock,
+      `move_invoice_payment in ${file} locks the invoices before the bank line — the order is not fixed`);
+    for (const [what, at] of [["the link", linkLock], ["the bank line", lineLock], ["the invoices", invLock]] as const) {
+      assert.match(body.slice(at, at + 400), /FOR UPDATE/,
+        `move_invoice_payment in ${file} reads ${what} without FOR UPDATE`);
+    }
+
+    // 2 — the sign rule is computed for BOTH documents, in the same shape the four doors use.
+    for (const v of ["v_src_spends", "v_tgt_spends"]) {
+      assert.match(body, new RegExp(`${v}\\s*:=`),
+        `move_invoice_payment in ${file} does not compute ${v}`);
+    }
+    for (const v of ["v_src_spends", "v_tgt_spends"]) {
+      const at = body.indexOf(`${v} :=`);
+      const expr = body.slice(at, at + 260);
+      assert.match(expr, /'incoming'/, `${v} in ${file} does not read the direction`);
+      assert.match(expr, /'creditnota'/, `${v} in ${file} does not read the document type`);
+      assert.match(expr, /total_inc_btw|_signed/, `${v} in ${file} ignores a negative total`);
+      assert.match(expr, /v_tx_amount < 0/, `${v} in ${file} is not measured against the LINE's own sign`);
+    }
+
+    // 3 — and only a FLIP is refused. A comparison on anything but the two booleans would be a
+    //     different rule; an equality instead of IS DISTINCT FROM would pass NULL through.
+    const compare = body.match(/IF\s+v_src_spends\s+IS DISTINCT FROM\s+v_tgt_spends\s+THEN/);
+    assert.ok(compare, `move_invoice_payment in ${file} does not refuse exactly the sign flip`);
+
+    // 4 — under the locks and BEFORE the first write. A refusal must leave everything as it found it.
+    const guardAt = body.indexOf(compare![0]);
+    const firstWrite = Math.min(
+      ...["UPDATE public.bank_tx_invoices", "UPDATE public.bank_transactions", "UPDATE public.invoices"]
+        .map((w) => { const i = body.indexOf(w); return i === -1 ? Number.MAX_SAFE_INTEGER : i; }),
+    );
+    assert.ok(firstWrite < Number.MAX_SAFE_INTEGER, `move_invoice_payment in ${file} writes nothing — the cut is wrong`);
+    assert.ok(invLock < guardAt, `move_invoice_payment in ${file} judges the sign before it holds the locks`);
+    assert.ok(guardAt < firstWrite,
+      `move_invoice_payment in ${file} refuses AFTER its first write — it would undo a move it already made`);
+
+    // 5 — the wording says nothing a caller reads as a DIFFERENT refusal.
+    const refusal = body.slice(guardAt, guardAt + 400);
+    assert.match(refusal, /RAISE EXCEPTION '\[VERPLAATS-TEKEN\]/, `${file} tests the sign and does not refuse it`);
+    assert.match(refusal, /ERRCODE = '55000'/, `${file} refuses with the wrong class`);
+    for (const s of TRIAGED_SUBSTRINGS) {
+      assert.ok(!refusal.toLowerCase().includes(s),
+        `move_invoice_payment in ${file} words its refusal with "${s}" — a caller would triage it as that other refusal`);
+    }
+  }
+
+  // 6 — the two declaring copies are the same function. They were NOT before this: the creditnota
+  //     guard shipped as a new file and was never back-ported, so applying the older one removed a
+  //     live money guard — the same shape book_bank_batch was in.
+  assert.strictEqual(
+    sqlBodyTrimmed(MOVE_FILES[0], "move_invoice_payment"), sqlBodyTrimmed(MOVE_FILES[1], "move_invoice_payment"),
+    `move_invoice_payment differs between ${MOVE_FILES[0]} and ${MOVE_FILES[1]} — apply order would decide which is real`,
+  );
+
+  // 7 — and there are EXACTLY these two, discovered rather than assumed.
+  const MIGRATION_DIR = "supabase/migrations";
+  const declaring = readdirSync(MIGRATION_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => sqlNoComments(join(MIGRATION_DIR, f)).includes("CREATE OR REPLACE FUNCTION public.move_invoice_payment("))
+    .map((f) => `${MIGRATION_DIR}/${f}`)
+    .sort();
+  assert.deepStrictEqual(declaring, [...MOVE_FILES].sort(),
+    `move_invoice_payment is declared in ${declaring.length} migration(s) — ${declaring.join(", ")}`);
+
+  // 8 — and the owner reads a sentence about it, not the generic "try again". Matched on the RPC's
+  //     own fragment, the same convention [MOVE-CREDITNOTA] uses.
+  const beslissing = readFileSync("src/lib/payment-move.ts", "utf8");
+  assert.match(beslissing, /m\.includes\("change what the bank line has spent"\)/,
+    "moveFailureText does not recognise the sign refusal — the owner would be told to retry, which cannot work");
+});
+
+
 // ─── [RECONCILE-VOLGORDE] The reconcile circle has one owner, and the two orchestrators obey it ──
 //
 // Measured before this existed: /api/cron/reconcile ran five passes and POST /api/reconcile/run ran

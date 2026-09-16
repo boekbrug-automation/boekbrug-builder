@@ -69,6 +69,14 @@ DECLARE
   v_tx_left      integer;
   -- One cent of slack, same as apply_bank_payment: OCR totals can be a rounding tick short, and
   -- "covered within a cent" counts as paid.
+  -- [VERPLAATS-TEKEN] The line's own signed amount, and both documents read as SIGNED rather than
+  -- through abs(), because the sign is exactly what this guard is about.
+  v_tx_amount    numeric;
+  v_src_type     text;
+  v_src_signed   numeric;
+  v_tgt_signed   numeric;
+  v_src_spends   boolean;
+  v_tgt_spends   boolean;
   v_eps          numeric := 0.01;
 BEGIN
   -- Caller guard, same contract as apply_bank_payment/book_bank_batch: session client -> auth.uid()
@@ -109,6 +117,27 @@ BEGIN
     RAISE EXCEPTION '[MOVE-PAYMENT] target already linked to this transaction' USING ERRCODE = '55000';
   END IF;
 
+  -- [VERPLAATS-TEKEN] The bank line itself, locked SECOND — after the link row above and before the
+  -- two invoices below, so this function takes its locks in one fixed order for every caller.
+  --
+  -- It was not locked at all. Every other path that changes what a line has spent
+  -- (apply_bank_payment, confirm_bank_payment, allocate_bank_payment, book_bank_batch) takes this
+  -- row FIRST and decides under it. This one repointed an allocation with no lock on the line and
+  -- no look at its budget, so the sibling sum it is about to change could move underneath it.
+  --
+  -- A NULL transaction_id is a MANUAL instalment: it belongs to no bank line, so there is no line
+  -- to lock and no line budget to change. Nothing in this paragraph applies to it.
+  IF v_tx_id IS NOT NULL THEN
+    SELECT coalesce(t.amount, 0) INTO v_tx_amount
+    FROM public.bank_transactions t
+    WHERE t.id = v_tx_id AND t.user_id = p_user_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION '[MOVE-PAYMENT] the bank line behind this payment is gone'
+        USING ERRCODE = '55000';
+    END IF;
+  END IF;
+
   -- Lock BOTH invoices, in a FIXED order by id. Two moves running concurrently in opposite
   -- directions would otherwise deadlock each other; ascending by id makes that impossible by
   -- construction.
@@ -121,16 +150,20 @@ BEGIN
     WHERE id = v_second_id AND (sender_id = p_user_id OR receiver_id = p_user_id)
     FOR UPDATE;
 
-  SELECT i.status, i.accountant_status, i.direction, abs(coalesce(i.total_inc_btw, 0))
-    INTO v_src_status, v_src_acc, v_src_dir, v_src_total
+  SELECT i.status, i.accountant_status, i.direction, abs(coalesce(i.total_inc_btw, 0)),
+         i.invoice_type, coalesce(i.total_inc_btw, 0)
+    INTO v_src_status, v_src_acc, v_src_dir, v_src_total,
+         v_src_type, v_src_signed
   FROM public.invoices i
   WHERE i.id = v_src_id AND (i.sender_id = p_user_id OR i.receiver_id = p_user_id);
   IF NOT FOUND THEN
     RAISE EXCEPTION '[MOVE-PAYMENT] source invoice not found / not owned' USING ERRCODE = '55000';
   END IF;
 
-  SELECT i.status, i.accountant_status, i.direction, abs(coalesce(i.total_inc_btw, 0)), coalesce(i.amount_paid, 0), i.invoice_type
-    INTO v_tgt_status, v_tgt_acc, v_tgt_dir, v_tgt_total, v_tgt_paid, v_tgt_type
+  SELECT i.status, i.accountant_status, i.direction, abs(coalesce(i.total_inc_btw, 0)), coalesce(i.amount_paid, 0), i.invoice_type,
+         coalesce(i.total_inc_btw, 0)
+    INTO v_tgt_status, v_tgt_acc, v_tgt_dir, v_tgt_total, v_tgt_paid, v_tgt_type,
+         v_tgt_signed
   FROM public.invoices i
   WHERE i.id = p_target_invoice_id AND (i.sender_id = p_user_id OR i.receiver_id = p_user_id);
   IF NOT FOUND THEN
@@ -167,6 +200,46 @@ BEGIN
   END IF;
   IF v_tgt_total <= 0 THEN
     RAISE EXCEPTION '[MOVE-PAYMENT] target has no total to settle' USING ERRCODE = '55000';
+  END IF;
+
+  -- [VERPLAATS-TEKEN] A move may not change WHICH WAY this allocation counts against the bank line.
+  --
+  -- The line's budget is not a sum of magnitudes. A link either SPENDS the line or GIVES money back
+  -- to it, and which one it does is decided by whether the invoice moves money the same way the
+  -- line did -- identical to spendsTheLine in bank-line-budget.ts and to the signed sibling sum all
+  -- four payment doors compute. amount_applied itself never changes here; only the document it
+  -- hangs on does, and that is enough to change its sign.
+  --
+  -- The SOURCE may be a creditnota -- the guard above refuses only the TARGET, deliberately, so a
+  -- payment wrongly attached to a credit can be moved back off it. But those two sit on OPPOSITE
+  -- sides of the test above, so moving a link across them flips its contribution from -a to +a and
+  -- the line's spend rises by 2a, with no budget check anywhere in this function.
+  --
+  -- Measured on a real PostgreSQL before this guard existed: a EUR 850 debit carrying a EUR 1.000
+  -- purchase invoice and a EUR 150 supplier credit is exactly tied at 850. Moving the credit's
+  -- EUR 150 onto an ordinary EUR 500 purchase invoice left EUR 1.150 booked against EUR 850 --
+  -- EUR 300 out of a line that never had it -- and the function answered ok.
+  --
+  -- ONLY the flip is refused. A same-sign move changes nothing about the line and is untouched,
+  -- which is every move the screen offers today. The target's own protections above are unchanged
+  -- and still run first.
+  --
+  -- A manual instalment (transaction_id NULL) belongs to no line and is not measured here.
+  --
+  -- The wording deliberately carries none of the six substrings the callers triage on ("verwerkt",
+  -- "already fully paid", "already covered", "fully applied", "no longer payable", "tie no longer
+  -- exact"): this is a different refusal, with a different answer.
+  IF v_tx_id IS NOT NULL THEN
+    v_src_spends := ((v_src_dir = 'incoming')
+                      <> (coalesce(v_src_type, 'factuur') = 'creditnota' OR v_src_signed < 0))
+                    = (v_tx_amount < 0);
+    v_tgt_spends := ((v_tgt_dir = 'incoming')
+                      <> (coalesce(v_tgt_type, 'factuur') = 'creditnota' OR v_tgt_signed < 0))
+                    = (v_tx_amount < 0);
+    IF v_src_spends IS DISTINCT FROM v_tgt_spends THEN
+      RAISE EXCEPTION '[VERPLAATS-TEKEN] this move would change what the bank line has spent'
+        USING ERRCODE = '55000';
+    END IF;
   END IF;
 
   -- Does it fit? Not fitting means over-paying OR silently splitting. Both are an answer the owner
