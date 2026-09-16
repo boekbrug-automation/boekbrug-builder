@@ -34487,6 +34487,89 @@ test("[ALLOCATIE-DEUR] no application code writes the allocation table with a se
   }
 });
 
+// ─── [KOLOMRECHT] A session writes three columns on bank_transactions, and no others ────────────
+//
+// [ALLOCATIE-DEUR] closed the CHILD table. The parent was still fully session-writable, and every
+// effect the child's policies used to allow was reachable one level up — measured on production,
+// rollback-only: a session could set invoice_id and status, flip a real pending line to 'matched',
+// and DELETE a booked line, taking its allocations with it. RLS scopes ROWS; those two columns sit
+// in the same row the owner may legitimately edit for categorisation.
+//
+// The privilege is now column-scoped. What a gate can hold is the other half of that bargain: that
+// no application path ever needs a fourth column, and that no migration quietly hands the whole
+// table back. The behavioural half — what the role may actually DO — lives in
+// tests/sql/bank_transactions_column_grant.test.sql, which tries it under SET ROLE authenticated.
+
+const TX_TABLE = "bank_transactions";
+/** The only columns a logged-in session may write. Same list as the migration's GRANT. */
+const SESSION_WRITABLE = ["category", "category_source", "category_confirmed"];
+
+test("[KOLOMRECHT] no session write to the bank line touches anything but the category columns", () => {
+  const files = walkSourceFiles("src").filter((f) => !f.includes(".test."));
+  const offenders: string[] = [];
+  let sessionWrites = 0;
+
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    if (!src.includes(TX_TABLE)) continue;
+    const re = new RegExp(`(\\w+)\\s*\\n?\\s*\\.from\\(["']${TX_TABLE}["']\\)[\\s\\S]{0,300}?\\.(update|upsert|insert)\\(\\s*(\\{[\\s\\S]{0,400}?\\})`, "g");
+    for (const m of src.matchAll(re)) {
+      const [, receiver, , objectLiteral] = m;
+      // `pipeline` is the service-role client and bypasses RLS entirely; this gate is about the
+      // SESSION client, which is what the column grant governs.
+      if (receiver === "pipeline") continue;
+      sessionWrites += 1;
+      const keys = [...objectLiteral.matchAll(/(?:^|[{,])\s*(?:\/\/[^\n]*\n\s*)*([a-z_][a-z0-9_]*)\s*:/gi)].map((k) => k[1]);
+      const forbidden = keys.filter((k) => !SESSION_WRITABLE.includes(k));
+      if (forbidden.length > 0) {
+        offenders.push(`${file}: ${receiver}.from("${TX_TABLE}") writes ${forbidden.join(", ")}`);
+      }
+    }
+  }
+
+  assert.ok(sessionWrites >= 3,
+    `only ${sessionWrites} session write(s) to ${TX_TABLE} found — the matcher stopped seeing them, ` +
+      "so this gate proves nothing. Three are expected, all in /api/bank/categorize.");
+  assert.deepStrictEqual(offenders, [],
+    `these write a column the session grant does not cover — the write will fail with 42501 in ` +
+      `production:\n  ${offenders.join("\n  ")}`);
+});
+
+test("[KOLOMRECHT] no migration hands the whole bank line back to a session", () => {
+  const MIGRATION_DIR = "supabase/migrations";
+  const files = readdirSync(MIGRATION_DIR).filter((f) => f.endsWith(".sql"));
+  const offenders: string[] = [];
+  for (const f of files) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f)).replace(/\s+/g, " ");
+    // A table-wide UPDATE grant, i.e. one with no column list between UPDATE and ON.
+    if (new RegExp(`GRANT[^;]*\\bUPDATE\\s+(?:,[^;(]*)?ON\\s+(?:public\\.)?${TX_TABLE}\\b[^;]*TO[^;]*authenticated`, "i").test(sql)) {
+      offenders.push(`${f} grants table-wide UPDATE on ${TX_TABLE} to authenticated`);
+    }
+    if (new RegExp(`GRANT\\s+ALL[^;]*ON\\s+(?:public\\.)?${TX_TABLE}\\b[^;]*TO[^;]*authenticated`, "i").test(sql)) {
+      offenders.push(`${f} grants ALL on ${TX_TABLE} to authenticated`);
+    }
+    if (new RegExp(`CREATE POLICY\\s+${TX_TABLE}_delete_own\\b`, "i").test(sql)) {
+      offenders.push(`${f} re-creates ${TX_TABLE}_delete_own`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    `apply order would decide whether the bank line is session-writable again:\n  ${offenders.join("\n  ")}`);
+
+  // …and the column grant is still created somewhere, or the categorise screen stops working.
+  const granting = files.filter((f) => {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f)).replace(/\s+/g, " ");
+    return new RegExp(`GRANT\\s+UPDATE\\s*\\([^)]*\\)\\s*ON\\s+(?:public\\.)?${TX_TABLE}`, "i").test(sql);
+  });
+  assert.ok(granting.length > 0,
+    `nothing grants the column-scoped UPDATE on ${TX_TABLE} — /api/bank/categorize would fail 42501`);
+  // The granted list must be exactly the three, read back out of the migration rather than assumed.
+  const granted = sqlNoComments(join(MIGRATION_DIR, granting[0])).replace(/\s+/g, " ")
+    .match(new RegExp(`GRANT\\s+UPDATE\\s*\\(([^)]*)\\)\\s*ON\\s+(?:public\\.)?${TX_TABLE}`, "i"))![1]
+    .split(",").map((c) => c.trim()).sort();
+  assert.deepStrictEqual(granted, [...SESSION_WRITABLE].sort(),
+    `the migration grants UPDATE on ${granted.join(", ")} — the contract above names a different set`);
+});
+
 test("[ALLOCATIE-DEUR] a third identical copy forces a new ruling, it is not chosen by apply order", () => {
   // [VERPLAATS-TEKEN] made the two move_invoice_payment declarations byte-identical on purpose.
   // migration-inventory's newest-version heuristic looks for the version whose tokens are a strict
