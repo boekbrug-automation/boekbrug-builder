@@ -122,6 +122,12 @@ test("een grens van 1 kent geen 'bijna vol'", () => {
   // Erboven is nog steeds een overschrijding — de uitzondering geldt alleen voor de
   // waarschuwing, niet voor de grens zelf.
   assert.deepEqual(evaluateFairUse({ mailboxes: 2 }).exceeded, ["mailboxes"]);
-  // En bij Plus (grens 3) doet de waarschuwing gewoon weer zijn werk.
-  assert.ok(evaluateFairUse({ mailboxes: 3 }, "plus").nearLimit.includes("mailboxes"));
+
+  // [MAILBOX-WAAR] Bij Plus is de grens 2, niet 3: email_connections is UNIQUE(user_id,
+  // provider) met alleen gmail en outlook, dus twee is wat de tabel kan houden. Op 2 van 2
+  // doet de waarschuwing wél zijn werk — dat is geen permanente toestand zoals 1 van 1, maar
+  // de bovenkant die je bereikt door een tweede mailbox te koppelen.
+  assert.ok(evaluateFairUse({ mailboxes: 2 }, "plus").nearLimit.includes("mailboxes"));
+  assert.deepEqual(evaluateFairUse({ mailboxes: 2 }, "plus").exceeded, []);
+  assert.deepEqual(evaluateFairUse({ mailboxes: 3 }, "plus").exceeded, ["mailboxes"]);
 });
