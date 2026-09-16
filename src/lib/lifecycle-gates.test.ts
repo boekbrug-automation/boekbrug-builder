@@ -35507,3 +35507,133 @@ test("[MAILBOX-WAAR] the published mailbox limit is a number the app can actuall
     "[MAILBOX-WAAR] the connected panel must offer the remaining provider when there is one",
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [OPSLAG-DEUR] Every write that fills the owner's storage asks whether there is room — or is
+// named here with the reason it does not.
+//
+// WHY THIS GATE EXISTS. /eerlijk-gebruik and the Terms publish an storage allowance (2 GB free,
+// 20 GB Plus) and NINE separate places wrote into the documents bucket. Not one of them measured
+// anything. The number was reported on the owner's own meter and enforced nowhere — the same
+// shape of hole [EERLIJK-DEUR] found for the AI allowance, in the metric the owner can see best.
+//
+// THE SPLIT, AND IT IS NOT ARBITRARY. Six of the nine create a `documents` row, and `documents`
+// is exactly what the meter measures — sum(file_size) over the rows that are not in the
+// prullenbak. Those are what an owner means by "my files", and they are gated.
+//
+// The other three write a PDF THE APP GENERATED: the invoice, the creditnota, the offerte. They
+// never make a documents row, the meter has never counted them, and charging an owner storage for
+// sending an invoice would be the same inversion [E-FACTUUR-GRATIS] refuses — making him pay to
+// bill someone. They are named below with that reason.
+//
+// The allowlist may not rot into a bypass list, so each entry is re-checked: the file must still
+// exist, the reason must be a reason, and a door that HAS since been gated must leave the list.
+test("[OPSLAG-DEUR] every documents write measures the allowance, or says why not", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const p = `${dir}/${e}`;
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (p.endsWith(".ts")) out.push(p);
+    }
+    return out;
+  };
+
+  const EXEMPT: Record<string, string> = {
+    // The offerte PDF this app generated. It lands in <owner>/offertes/ and creates no documents
+    // row, so the meter has never counted it and the owner has never seen it there. Charging
+    // storage for sending a quotation would make him pay to try to win work — the same inversion
+    // [E-FACTUUR-GRATIS] refuses. If it ever starts writing a documents row, it must be gated.
+    "src/app/api/invoice/[id]/send-offerte/route.ts":
+      "uploads the offerte PDF this app generated — no documents row, never on the owner's meter",
+
+    // A screenshot attached to a bug report. It goes to <user>/feedback/, creates no documents row
+    // and is never listed among the owner's files — it is a message to US, not part of his
+    // administration. Refusing it would mean telling someone he cannot report that the app is
+    // broken because his disk is full, which is the wrong way round in every direction.
+    "src/app/api/feedback/route.ts":
+      "a screenshot on a bug report — sent to us, not stored as the owner's own file",
+
+    // KNOWN GAP, deliberately left rather than closed badly. The e-mail sync DOES create a
+    // documents row, so it can carry an account past its allowance. Refusing here is not a 402 to
+    // a person waiting on a screen: it is a background job holding somebody's incoming invoice,
+    // and the branch beside it already shows what a mishandled failure costs — an invoice in the
+    // books with no reachable paper. The correct behaviour is the HOLD that isAiBudgetError
+    // already earns in this same file (leave the attachment, do not advance past it, retry next
+    // sync), and wiring that belongs in its own change with its own evidence. Until then the
+    // owner-initiated doors are bounded and this one is not, and that is written down here rather
+    // than quietly true.
+    "src/lib/email-integration.ts":
+      "background sync — a refusal must HOLD the attachment like a budget outage, not drop it; see [COST-GUARD] outageHold",
+  };
+
+  // NOT IN SCOPE, and worth saying once so the next reader does not go looking: the invoice PDF
+  // (/api/invoice/send) and the creditnota (/api/invoice/creditnota) are written to PDF_BUCKET, a
+  // DIFFERENT bucket. The published allowance is measured from documents rows — measureUsage()
+  // sums documents.file_size — so nothing in that bucket has ever been on the owner's meter, and
+  // this gate is not the place to decide whether it should be. They are absent below because the
+  // pattern only finds the documents bucket, not because anyone judged them exempt.
+
+  const UPLOAD = /\.storage\s*\.from\(["']documents["']\)\s*\.upload\(/;
+
+  const offenders: string[] = [];
+  for (const file of [...walk("src/app/api"), "src/lib/email-integration.ts"]) {
+    const src = code(file);
+    if (!UPLOAD.test(src)) continue;
+    if (EXEMPT[file]) continue;
+    if (/gateStorage\s*\(/.test(src)) continue;
+    offenders.push(file);
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    "these doors fill the owner's storage and never ask whether there is room — gate them with " +
+      `gateStorage, or name them in EXEMPT with the reason they are not the owner's files:\n  ${offenders.join("\n  ")}`,
+  );
+
+  for (const [file, reason] of Object.entries(EXEMPT)) {
+    assert.ok(existsSync(file), `[OPSLAG-DEUR] EXEMPT names ${file}, which no longer exists`);
+    assert.ok(reason.length > 20, `[OPSLAG-DEUR] ${file} needs a real reason, not a label`);
+    assert.ok(
+      UPLOAD.test(code(file)),
+      `[OPSLAG-DEUR] ${file} no longer writes to storage — remove it so the list stays honest`,
+    );
+  }
+
+  // And the gate must run BEFORE the bytes are written, in each door that carries it. Measuring
+  // after the upload would refuse a file that is already stored — the owner is charged for it and
+  // told he could not have it.
+  for (const file of [
+    "src/app/api/bank/attachment/route.ts",
+    "src/app/api/bank/attach-invoice/route.ts",
+    "src/app/api/email/upload/route.ts",
+    "src/app/api/intake/route.ts",
+    "src/app/api/invoice/[id]/document/route.ts",
+  ]) {
+    const src = code(file);
+    const uploads = [...src.matchAll(new RegExp(UPLOAD.source, "g"))].map((m) => m.index ?? -1);
+    const gates = [...src.matchAll(/gateStorage\(\{/g)].map((m) => m.index ?? -1);
+    assert.ok(uploads.length > 0, `[OPSLAG-DEUR] ${file}'s upload moved — re-point this gate`);
+    assert.ok(gates.length > 0, `[OPSLAG-DEUR] ${file} must measure the allowance`);
+
+    // EVERY upload, not the first one. /api/intake has two doors into the bucket — the readable
+    // path and the one for a file the reader could not read — and both write a documents row.
+    // Checking only the first would have declared the route gated while the cheapest way to fill
+    // an account (upload things we cannot read) stayed open.
+    for (const at of uploads) {
+      assert.ok(
+        gates.some((g) => g < at),
+        `[OPSLAG-DEUR] ${file} writes bytes at ${at} with no allowance check before it`,
+      );
+    }
+  }
+
+  // The measurement must be the meter's own, not a second opinion. Two ways of counting the same
+  // megabytes is how an owner gets told he has room on one screen and refused on another.
+  assert.match(
+    code("src/lib/fair-use-gate.ts"),
+    /measureUsage\(/,
+    "[OPSLAG-DEUR] gateStorage must measure with measureUsage — the same numbers the owner reads",
+  );
+});

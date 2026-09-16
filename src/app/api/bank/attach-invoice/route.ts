@@ -35,7 +35,7 @@ import { computeContentHash } from "@/lib/content-hash";
 import { buildFolderBreadcrumb } from "@/lib/documents";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
-import { gateFairUseForRead } from "@/lib/fair-use-gate";
+import { gateFairUseForRead, gateStorage } from "@/lib/fair-use-gate";
 // [E-FACTUUR-XML] Een Peppol-factuur aan een bankregel hangen — zelfde lezer als elke andere deur.
 import { looksLikeInvoiceXmlBytes, E_INVOICE_XML_MIME } from "@/lib/e-invoice";
 import { normalizeToIso, findSemanticDuplicate, normalizeInvoiceNumber, normalizeVendor } from "@/lib/safecore";
@@ -605,6 +605,12 @@ async function runAttachInvoice(req: NextRequest) {
   }
 
   // 7. Store the file in Storage + documents (same shape as manual upload).
+  // [OPSLAG-DEUR] Before a byte is written. The allowance is MEASURED from the documents this
+  // account still has, so the refusal and the meter on the owner's own screen quote the same
+  // megabytes. Fails open — see gateStorage.
+  const space = await gateStorage({ client: supabase, userId: user.id, bytes: buffer.length });
+  if (!space.allowed) return space.response!;
+
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`;
   const { error: uploadError } = await supabase.storage

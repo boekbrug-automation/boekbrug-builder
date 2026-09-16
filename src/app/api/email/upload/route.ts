@@ -31,7 +31,7 @@ import { archivedDuplicateMessage, archivedInvoiceById, archivedInvoiceForDocume
 import { buildFolderBreadcrumb } from "@/lib/documents";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
-import { gateFairUse } from "@/lib/fair-use-gate";
+import { gateFairUse, gateStorage } from "@/lib/fair-use-gate";
 import { escapeLikeValue } from "@/lib/sanitize";
 // [DUP-TRASHED] Gedeelde uitzondering op de byte-hash-poort: een weggegooid bestand mag de
 // dedup-sleutel niet levenslang bezet houden. Zelfde module als /api/intake gebruikt.
@@ -404,6 +404,12 @@ const dup = await findSemanticDuplicate(
   }
 
   // Store the file in Supabase Storage
+  // [OPSLAG-DEUR] Before a byte is written. The allowance is MEASURED from the documents this
+  // account still has, so the refusal and the meter on the owner's own screen quote the same
+  // megabytes. Fails open — see gateStorage.
+  const space = await gateStorage({ client: supabase, userId: user.id, bytes: buffer.length });
+  if (!space.allowed) return space.response!;
+
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`;
 

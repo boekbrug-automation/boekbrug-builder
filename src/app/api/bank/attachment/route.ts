@@ -15,6 +15,7 @@ import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { attachmentsByTransaction, attachmentTypeAllowed, ATTACHMENT_MAX_BYTES } from "@/lib/bank-attachments";
 import { fetchAllRowsForIds } from "@/lib/supabase-paginate";
+import { gateStorage } from "@/lib/fair-use-gate";
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +77,12 @@ export async function POST(req: NextRequest) {
   if (!ctx.user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!ctx.tx) return NextResponse.json({ error: "transaction_not_found" }, { status: 404 });
   const { user, supabase, pipeline } = ctx;
+
+  // [OPSLAG-DEUR] Before a byte is written. The allowance is MEASURED from the documents this
+  // account still has, so the refusal and the meter on the owner's own screen quote the same
+  // megabytes. Fails open — see gateStorage.
+  const space = await gateStorage({ client: supabase, userId: user.id, bytes: file.size });
+  if (!space.allowed) return space.response!;
 
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "bijlage";
   const storagePath = `${user.id}/bank/${transactionId}/${Date.now()}-${safeName}`;
