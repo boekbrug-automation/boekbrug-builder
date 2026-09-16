@@ -172,6 +172,24 @@ const ALLEEN_SERVICE_ROLE = [
 ];
 const lijst = (namen: string[]) => namen.map((n) => `'${n}'`).join(", ");
 
+/**
+ * [ALLOCATIE-DEUR] Functies die meer dan één migratie WOORD VOOR WOORD hetzelfde declareert, en
+ * welk bestand daarvan de nieuwste is.
+ *
+ * Normaal draagt elke herdefinitie de vorige mee en voegt toe, dus de nieuwste is af te leiden uit
+ * haar tokens. Sinds [VERPLAATS-TEKEN] de twee kopieën van move_invoice_payment gelijk trok — met
+ * opzet, omdat uiteenlopende kopieën betekenden dat de oudste toepassen een levende geldpoort
+ * weghaalde — is dat voor die familie niet meer zo. De body wordt op haar merktekens gemeten; wie
+ * hem draagt staat hier.
+ *
+ * Alleen de families die HIER staan worden zo gemeten. Andere identieke paren (de drie bankdeuren
+ * tegenover bank_rpc_never_payable_states.sql, book_bank_batch tegenover zijn tweede declaratie)
+ * houden de meting die ze hadden: dit lost één regressie op en hermeet de rest niet ongevraagd.
+ */
+const GELIJKE_BODY_NIEUWSTE: Record<string, string> = {
+  move_invoice_payment: "invoice_move_payment_creditnota_guard.sql",
+};
+
 const STAND_CONTROLE: Record<string, Stand> = {
   "drop_supplier_rows_that_are_misreadings.sql": {
     soort: "controle",
@@ -502,6 +520,40 @@ function herdefinitieMerken(alle: { bestand: string; sql: string }[]): {
     if (lijst.length > 0) {
       merken.set(naam, lijst.map((k) => `.${k}`));
       continue;
+    }
+
+    // ── Twee kopieën die WOORD VOOR WOORD hetzelfde zeggen ─────────────────────────────────────
+    //
+    // [ALLOCATIE-DEUR] Dit was geen bestaand geval en werd er één: [VERPLAATS-TEKEN] maakte de twee
+    // declaraties van move_invoice_payment byte-identiek, met opzet — zolang ze uiteenliepen kon
+    // het toepassen van de OUDSTE een levende geldpoort weghalen.
+    //
+    // De bovenverzameling-truc hieronder kan daar niet mee overweg: hij zoekt de versie die strikt
+    // MEER tokens heeft, en bij gelijke bodies bestaat die niet. De functie viel daardoor terug op
+    // BESTAAN, wat precies de meting is die twee migraties ooit als toegepast meldde terwijl ze niet
+    // gedraaid waren.
+    //
+    // Bij gelijke bodies is er ook niets te onderscheiden TUSSEN de bestanden — ze zeggen hetzelfde,
+    // dus welk bestand de probe draagt maakt niet uit. Wat wél onderscheiden moet worden is de
+    // repo-body van wat er in de DATABASE staat, en daarvoor gebruiken we de merktekens die dit
+    // project overal zet: [ZO-IETS] in de body zelf. Staan ze in prosrc, dan draait deze body.
+    //
+    // Welk BESTAND de nieuwste is, valt uit gelijke tekst niet af te leiden — en raden is hier het
+    // verkeerde antwoord: de oudere houdt haar bestaansprobe (ingehaald is niet ongedraaid), dus
+    // een verkeerde gok zet OPEN bij een migratie die allang gedraaid is. Daarom staat het
+    // hieronder opgeschreven, net als NIETS_BEWIJZEND en STAND_CONTROLE. Een nieuwe familie die
+    // hier niet in staat laat het script vallen in plaats van te kiezen.
+    const bodies = [...byFile.values()];
+    const nieuwsteBestand = GELIJKE_BODY_NIEUWSTE[naam];
+    if (nieuwsteBestand && bodies.length > 1 && bodies.every((b) => b === bodies[0])) {
+      if (!byFile.has(nieuwsteBestand)) {
+        throw new Error(`GELIJKE_BODY_NIEUWSTE wijst ${naam} naar ${nieuwsteBestand}, dat deze functie niet declareert`);
+      }
+      const markers = [...new Set([...bodies[0].matchAll(/\[([A-Z][A-Z0-9-]{2,})\]/g)].map((m) => m[1]))].sort();
+      if (markers.length > 0) {
+        nieuwste.set(naam, { bestand: nieuwsteBestand, merken: markers.map((m) => `[${m}]`) });
+        continue;
+      }
     }
 
     // ── Geen gedeelde kolomverwijzing: geen triggerfunctie ──────────────────────────────────────
