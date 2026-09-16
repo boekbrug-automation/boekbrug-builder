@@ -34,12 +34,17 @@ ALTER TABLE public.bank_tx_invoices ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS bank_tx_invoices_select_own ON public.bank_tx_invoices;
 CREATE POLICY bank_tx_invoices_select_own ON public.bank_tx_invoices
   FOR SELECT TO authenticated USING (user_id = auth.uid());
-DROP POLICY IF EXISTS bank_tx_invoices_insert_own ON public.bank_tx_invoices;
-CREATE POLICY bank_tx_invoices_insert_own ON public.bank_tx_invoices
-  FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid());
-DROP POLICY IF EXISTS bank_tx_invoices_delete_own ON public.bank_tx_invoices;
-CREATE POLICY bank_tx_invoices_delete_own ON public.bank_tx_invoices
-  FOR DELETE TO authenticated USING (user_id = auth.uid());
+-- [ALLOCATIE-DEUR] An INSERT and a DELETE policy stood here, each scoped to `user_id = auth.uid()`.
+-- Scoped is not guarded: the INSERT check asked only that the row carry your own user_id, and said
+-- nothing about the bank line it hangs on — no budget, no ownership of the transaction or the
+-- invoice it names, no lock, no recompute. DELETE was the mirror. Both were reachable from any
+-- logged-in session through PostgREST, around every payment door.
+--
+-- They are gone, here AND in bank_tx_invoices_read_only_policy.sql, so no apply order can bring
+-- them back. Measured before removing them: all four TypeScript write sites use the service-role
+-- pipeline client and all six SQL writers are SECURITY DEFINER, so not one application write
+-- depended on them. The SELECT policy above stays — /dashboard/facturen reads this table from the
+-- browser with the owner's own session.
 
 -- Backfill from the existing single-invoice links so already-booked payments are reversible by id
 -- too. (A pre-existing BATCH only carried its representative invoice_id, so only that one backfills

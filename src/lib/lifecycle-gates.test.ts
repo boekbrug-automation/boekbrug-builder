@@ -34409,6 +34409,157 @@ test("[VERPLAATS-TEKEN] the move locks link -> line -> invoices and refuses a si
     "moveFailureText does not recognise the sign refusal — the owner would be told to retry, which cannot work");
 });
 
+// ─── [ALLOCATIE-DEUR] bank_tx_invoices is read-only to a logged-in session ───────────────────────
+//
+// The table had three policies for `authenticated`: select_own, insert_own and delete_own, each
+// scoped to `user_id = auth.uid()`. Scoped is not guarded. The INSERT check asked one thing — that
+// the row carry your own user_id — and nothing about the bank line it hangs on: no budget, no
+// ownership of the transaction or invoice it names, no lock, no recompute. One POST through
+// PostgREST could therefore write an allocation past what a line has, around every payment door.
+//
+// Removing them costs nothing, and THAT is the part a gate has to keep true. Measured over src/ at
+// the time: every write to this table runs on the service-role `pipeline` client or inside a
+// SECURITY DEFINER function, and not one uses the session client. The day someone adds a session
+// write, this gate goes red instead of the write silently failing in production.
+//
+// The behavioural half — what the role may actually DO — is not checkable here and lives in
+// tests/sql/bank_tx_invoices_policies.test.sql, which tries it under SET ROLE authenticated.
+
+const LINKS_TABLE = "bank_tx_invoices";
+
+/** Every .ts/.tsx under a directory, tests excluded — the same walk several gates above use. */
+function walkSourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir)) {
+    const path = `${dir}/${e}`;
+    if (statSync(path).isDirectory()) out.push(...walkSourceFiles(path));
+    else if (/\.tsx?$/.test(path)) out.push(path);
+  }
+  return out;
+}
+
+test("[ALLOCATIE-DEUR] no application code writes the allocation table with a session client", () => {
+  const files = walkSourceFiles("src").filter((f) => !f.includes(".test."));
+  const offenders: string[] = [];
+  let writeSites = 0;
+
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    if (!src.includes(LINKS_TABLE)) continue;
+    // Every `.from("bank_tx_invoices")` whose next chained call is a mutation. The receiver is
+    // whatever precedes `.from(`, which is the client the write runs on.
+    const re = new RegExp(
+      `(\\w+)\\s*\\n?\\s*\\.from\\(["']${LINKS_TABLE}["']\\)[\\s\\S]{0,400}?\\.(insert|upsert|update|delete)\\(`,
+      "g",
+    );
+    for (const m of src.matchAll(re)) {
+      // Only count it when the mutation is the FIRST chained call after .from(, not a later one in
+      // an unrelated statement the 400-char window ran into.
+      const after = src.slice(m.index! + m[0].lastIndexOf(".from("));
+      const firstCall = after.match(/\.from\([^)]*\)\s*\n?\s*\.(\w+)\(/);
+      if (!firstCall || !["insert", "upsert", "update", "delete"].includes(firstCall[1])) continue;
+      writeSites += 1;
+      const receiver = m[1];
+      // `pipeline` is the service-role client (supabase-pipeline.ts, bypasses RLS). `client` is
+      // bank-tx-links.ts's parameter, whose call sites are checked separately below.
+      if (receiver !== "pipeline" && receiver !== "client") {
+        offenders.push(`${file}: ${receiver}.from("${LINKS_TABLE}").${firstCall[1]}(...)`);
+      }
+    }
+  }
+
+  assert.ok(writeSites >= 4,
+    `only ${writeSites} write site(s) found — the matcher stopped seeing them, so this gate proves nothing`);
+  assert.deepStrictEqual(offenders, [],
+    `these write the allocation table with something other than the service-role client:\n  ${offenders.join("\n  ")}`);
+
+  // bank-tx-links.ts takes its client as a parameter, so the receiver check above cannot decide it.
+  // Every call site must hand it `pipeline`.
+  for (const fn of ["recordPaymentLinks", "clearPaymentLinks"]) {
+    const callers = files.filter((f) => !f.endsWith("bank-tx-links.ts"))
+      .flatMap((f) => [...readFileSync(f, "utf8").matchAll(new RegExp(`await ${fn}\\(\\s*\\n?\\s*(\\w+)`, "g"))]
+        .map((m) => ({ file: f, arg: m[1] })));
+    assert.ok(callers.length > 0, `${fn} has no call sites — the matcher is wrong, not the code`);
+    for (const c of callers) {
+      assert.strictEqual(c.arg, "pipeline",
+        `${c.file} calls ${fn} with "${c.arg}" — only the service-role client may write allocations`);
+    }
+  }
+});
+
+test("[ALLOCATIE-DEUR] a third identical copy forces a new ruling, it is not chosen by apply order", () => {
+  // [VERPLAATS-TEKEN] made the two move_invoice_payment declarations byte-identical on purpose.
+  // migration-inventory's newest-version heuristic looks for the version whose tokens are a strict
+  // SUPERSET of the others, and identical bodies have none — so the function fell back to being
+  // measured by EXISTENCE, which is the measurement that once reported two unrun migrations as
+  // applied, one of them a money guard.
+  //
+  // The fix names the newest file in GELIJKE_BODY_NIEUWSTE rather than deriving it. That is only
+  // safe while the named copy-set is still the real one: a THIRD identical declaration makes the
+  // old ruling an assumption again, and apply order would quietly decide. So the set is recorded
+  // beside the ruling, and this gate holds the recording to what is on disk.
+  const MIGRATION_DIR = "supabase/migrations";
+  const bodies = new Map<string, Map<string, string>>();
+  for (const f of readdirSync(MIGRATION_DIR).filter((x) => x.endsWith(".sql"))) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f));
+    for (const m of sql.matchAll(/CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\s*\([\s\S]*?\bAS \$\$([\s\S]*?)\$\$;/g)) {
+      const fn = m[1].toLowerCase();
+      if (!bodies.has(fn)) bodies.set(fn, new Map());
+      bodies.get(fn)!.set(f, m[2]);
+    }
+  }
+  const identical = [...bodies].filter(([, byFile]) =>
+    byFile.size > 1 && new Set(byFile.values()).size === 1);
+  assert.ok(identical.length > 0,
+    "no function is declared identically by two migrations any more — this gate has nothing to hold, " +
+      "so either the matcher broke or GELIJKE_BODY_NIEUWSTE should go");
+
+  const script = readFileSync("scripts/migration-inventory.ts", "utf8");
+  let held = 0;
+  for (const [fn, byFile] of identical) {
+    const ruling = script.match(new RegExp(`\\b${fn}:\\s*\\{([\\s\\S]*?)\\n  \\},`));
+    if (!ruling) continue;   // not a named family: it keeps the measurement it always had
+    const newest = ruling[1].match(/nieuwste:\s*"([a-z0-9_]+\.sql)"/)?.[1];
+    const copyBlock = ruling[1].match(/kopieen:\s*\[([\s\S]*?)\]/)?.[1];
+    assert.ok(newest, `GELIJKE_BODY_NIEUWSTE.${fn} records no newest file`);
+    assert.ok(copyBlock !== undefined, `GELIJKE_BODY_NIEUWSTE.${fn} records no copy set`);
+    const recorded = [...copyBlock!.matchAll(/"([a-z0-9_]+\.sql)"/g)].map((m) => m[1]).sort();
+    const onDisk = [...byFile.keys()].sort();
+
+    // A third declaration appearing makes this red and names it, instead of riding the old ruling.
+    assert.deepStrictEqual(recorded, onDisk,
+      `${fn} is declared identically by ${onDisk.length} migration(s) on disk, but the ruling records ` +
+        `${recorded.length}. Identical text cannot say which is newest, so a new copy needs a new ` +
+        `ruling — apply order must not decide.\n  on disk:  ${onDisk.join(", ")}\n  recorded: ${recorded.join(", ")}`);
+    assert.ok(onDisk.includes(newest!), `GELIJKE_BODY_NIEUWSTE.${fn} names ${newest}, which does not declare it`);
+    held += 1;
+  }
+  assert.ok(held > 0,
+    "no identical-body family is named in GELIJKE_BODY_NIEUWSTE any more — this gate asserted nothing");
+});
+
+test("[ALLOCATIE-DEUR] no migration creates the write policies, in any apply order", () => {
+  const MIGRATION_DIR = "supabase/migrations";
+  const files = readdirSync(MIGRATION_DIR).filter((f) => f.endsWith(".sql"));
+  const creators: string[] = [];
+  for (const f of files) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f));
+    for (const pol of [`${LINKS_TABLE}_insert_own`, `${LINKS_TABLE}_delete_own`]) {
+      if (new RegExp(`CREATE POLICY\\s+${pol}\\b`).test(sql)) creators.push(`${f} creates ${pol}`);
+    }
+  }
+  assert.deepStrictEqual(creators, [],
+    `a migration re-creates a write policy on ${LINKS_TABLE}; apply order would decide whether the ` +
+      `door is open:\n  ${creators.join("\n  ")}`);
+
+  // …and the SELECT policy is still created somewhere, or the screens go blank.
+  const selectCreators = files.filter((f) =>
+    new RegExp(`CREATE POLICY\\s+${LINKS_TABLE}_select_own\\b`).test(sqlNoComments(join(MIGRATION_DIR, f))));
+  assert.ok(selectCreators.length > 0,
+    `nothing creates ${LINKS_TABLE}_select_own — the browser read on /dashboard/facturen would return nothing`);
+});
+
+
 
 // ─── [RECONCILE-VOLGORDE] The reconcile circle has one owner, and the two orchestrators obey it ──
 //
