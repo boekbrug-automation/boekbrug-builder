@@ -405,3 +405,122 @@ BEGIN
   SELECT * INTO r FROM public.confirm_bank_payment(u, tx, ia, DATE '2026-08-07');
   PERFORM public.t_eq('a EUR 0.02 line books normally', r.applied, 0.02);
 END $$;
+
+\echo ''
+\echo '— [HANDGESCHREVEN-BOEKING] R6 · no payment door may leave a line naming an invoice nothing backs —'
+-- ── THE INVARIANT, AND WHY IT IS STATED OVER THE TABLES ────────────────────────────────────────
+--
+--   A bank line that names an invoice must carry an allocation row for THAT invoice.
+--
+-- This is a property of the DATA, not of any one function, and it is written that way on purpose.
+-- The [HANDGESCHREVEN-BOEKING] guard higher up refuses to SPEND a line that violates it; this
+-- asserts that no door PRODUCES one — which is the half a refusal can never prove about itself. A
+-- gate that only re-ran confirm_bank_payment would pass on the day a sibling door started writing
+-- bank_transactions.invoice_id without its link, and the refusal would then fire on the app's own
+-- output.
+--
+-- So it drives ALL FOUR doors that set invoice_id — confirm, allocate, apply, book_bank_batch —
+-- over lines and invoices of both directions, both types and several sizes, and re-checks the
+-- whole table after EVERY call. Refusals are swallowed deliberately: a door that declines is
+-- behaving, and what is being measured is what the database holds afterwards either way.
+CREATE OR REPLACE FUNCTION public.t_unbacked() RETURNS bigint LANGUAGE sql AS $$
+  SELECT count(*) FROM public.bank_transactions t
+  WHERE t.invoice_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM public.bank_tx_invoices l
+                    WHERE l.transaction_id = t.id AND l.invoice_id = t.invoice_id);
+$$;
+
+DO $r6$
+DECLARE
+  u uuid; tx uuid; i1 uuid; i2 uuid;
+  amt numeric; t1 numeric; t2 numeric; kind text; dir text; door text;
+  calls int := 0; shapes int := 0; refused int := 0;
+  booked_by jsonb := '{}'::jsonb; d text;
+BEGIN
+  PERFORM public.t_reset();
+  FOREACH amt IN ARRAY ARRAY[-100, 100, -0.02, -5000] LOOP
+  FOREACH t1  IN ARRAY ARRAY[40, 100, 250] LOOP
+  FOREACH t2  IN ARRAY ARRAY[40, 100] LOOP
+  FOREACH kind IN ARRAY ARRAY['factuur', 'creditnota'] LOOP
+  -- EACH DOOR ON ITS OWN VIRGIN LINE. The first version of this gate ran all four doors down ONE
+  -- line, and it passed a mutation that made book_bank_batch point the line at an invoice it had
+  -- written no link for -- because confirm had already written that invoice's link two calls
+  -- earlier. The invariant held for a reason that had nothing to do with the door under test,
+  -- which is the exact way a gate goes green while the thing it guards is broken.
+  FOREACH door IN ARRAY ARRAY['confirm', 'allocate', 'apply', 'batch', 'stacked'] LOOP
+    dir := CASE WHEN amt < 0 THEN 'incoming' ELSE 'outgoing' END;
+    u := gen_random_uuid(); tx := gen_random_uuid();
+    i1 := gen_random_uuid(); i2 := gen_random_uuid();
+    -- book_bank_batch refuses unless the batch ties to the line to the cent ([BANK-BATCH] "tie no
+    -- longer exact"), so the batch shape gets a line that ties. Without this it refused all 48
+    -- times and the gate was blind to that door — measured: a mutation making book_bank_batch
+    -- name a representative it wrote no link for passed this gate green.
+    INSERT INTO public.bank_transactions
+    VALUES (tx, u, CASE WHEN door = 'batch' THEN sign(amt) * (t1 + t2) ELSE amt END,
+            DATE '2026-08-07', 'pending', NULL);
+    INSERT INTO public.invoices (id, receiver_id, sender_id, direction, status, invoice_type, total_inc_btw, amount_paid)
+    VALUES (i1, u, u, dir, 'received', 'factuur', t1, 0),
+           (i2, u, u, dir, 'received', kind,      CASE WHEN kind = 'creditnota' THEN -t2 ELSE t2 END, 0);
+    shapes := shapes + 1;
+
+    BEGIN
+      CASE door
+        WHEN 'confirm'  THEN PERFORM public.confirm_bank_payment(u, tx, i1, DATE '2026-08-07');
+        WHEN 'allocate' THEN PERFORM public.allocate_bank_payment(u, tx, i2, 10, DATE '2026-08-07');
+        WHEN 'apply'    THEN PERFORM public.apply_bank_payment(u, tx, i2, abs(amt), DATE '2026-08-07');
+        WHEN 'batch'    THEN PERFORM public.book_bank_batch(u, tx, ARRAY[i1, i2], DATE '2026-08-07');
+        ELSE  -- the doors STACKED on one line, which is also a real sequence
+          BEGIN PERFORM public.confirm_bank_payment(u, tx, i1, DATE '2026-08-07');
+            EXCEPTION WHEN OTHERS THEN refused := refused + 1; END;
+          IF public.t_unbacked() > 0 THEN
+            RAISE EXCEPTION 'FAIL · R6 · stacked/confirm left a line naming an invoice nothing backs (amt=%, t1=%)', amt, t1;
+          END IF;
+          BEGIN PERFORM public.allocate_bank_payment(u, tx, i2, 10, DATE '2026-08-07');
+            EXCEPTION WHEN OTHERS THEN refused := refused + 1; END;
+          IF public.t_unbacked() > 0 THEN
+            RAISE EXCEPTION 'FAIL · R6 · stacked/allocate left a line naming an invoice nothing backs (amt=%, t2=%, %)', amt, t2, kind;
+          END IF;
+          BEGIN PERFORM public.book_bank_batch(u, tx, ARRAY[i1, i2], DATE '2026-08-07');
+            EXCEPTION WHEN OTHERS THEN refused := refused + 1; END;
+          calls := calls + 2;
+      END CASE;
+    EXCEPTION WHEN OTHERS THEN refused := refused + 1;
+    END;
+    calls := calls + 1;
+
+    IF public.t_unbacked() > 0 THEN
+      RAISE EXCEPTION 'FAIL · R6 · % left a line naming an invoice that no allocation backs (amt=%, t1=%, t2=%, %)',
+        door, amt, t1, t2, kind;
+    END IF;
+    -- Did this door actually DO anything on its own line? A door that refuses every shape is a
+    -- door this gate is blind to, and the invariant then holds for a reason unrelated to it.
+    IF EXISTS (SELECT 1 FROM public.bank_tx_invoices WHERE transaction_id = tx) THEN
+      booked_by := jsonb_set(booked_by, ARRAY[door],
+        to_jsonb(coalesce((booked_by ->> door)::int, 0) + 1));
+    END IF;
+  END LOOP; END LOOP; END LOOP; END LOOP; END LOOP;
+
+  -- POSITIVE CONTROLS on the gate itself. Without these it passes on a database where every door
+  -- is broken shut: nothing booked, nothing named, invariant vacuously true.
+  IF (SELECT count(*) FROM public.bank_tx_invoices) = 0 THEN
+    RAISE EXCEPTION 'FAIL · R6 · not one allocation was written — the gate proved nothing';
+  END IF;
+  IF (SELECT count(*) FROM public.bank_transactions WHERE invoice_id IS NOT NULL) = 0 THEN
+    RAISE EXCEPTION 'FAIL · R6 · no line ever came to name an invoice — the gate proved nothing';
+  END IF;
+  -- …and EVERY door must have booked on a line of its own at least once. This is the control the
+  -- first two versions of this gate lacked: book_bank_batch refused all 48 of its shapes on a
+  -- precondition, so the gate reported 0 unbacked lines while being unable to see that door at all.
+  FOREACH d IN ARRAY ARRAY['confirm', 'allocate', 'apply', 'batch', 'stacked'] LOOP
+    IF coalesce((booked_by ->> d)::int, 0) = 0 THEN
+      RAISE EXCEPTION 'FAIL · R6 · the % door never booked once — this gate is blind to it (booked: %)',
+        d, booked_by;
+    END IF;
+  END LOOP;
+
+  RAISE NOTICE '  ok · R6 · % door calls over % virgin-line shapes (% refused), 0 unbacked lines',
+    calls, shapes, refused;
+  RAISE NOTICE '  ok · R6 · positive control: % allocations, % lines naming an invoice, booked per door %',
+    (SELECT count(*) FROM public.bank_tx_invoices),
+    (SELECT count(*) FROM public.bank_transactions WHERE invoice_id IS NOT NULL), booked_by;
+END $r6$;
