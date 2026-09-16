@@ -130,6 +130,17 @@ BEGIN
    AND (i.sender_id = p_user_id OR i.receiver_id = p_user_id)
   WHERE i.id IS NULL                        -- missing / not owned by caller
      OR i.status = 'paid'                   -- already paid → would double-count
+     -- [NOOIT-BETAALBAAR] The fourth door. The three scalar doors carry this set as an explicit
+     -- IF v_inv_status IN (...) guard and their comments say "the same never-payable set that
+     -- isPayableInvoiceState and book_bank_batch already refuse". PRODUCTION's book_bank_batch does
+     -- refuse it — measured, prosrc md5 52f2d60a072f6f61b8e248831b53bd9a — and neither copy in this
+     -- repository ever carried the line. So the repo did not merely lack a guard: re-applying either
+     -- file would have REMOVED a live one from the door that books whole batches.
+     --
+     -- The shape differs from the other three because this door decides over a SET, not a scalar:
+     -- one count under the lock taken above, aborting the whole batch. Same rule, same place in the
+     -- order (after the FOR UPDATE, before the first write), same refusal that was already here.
+     OR i.status IN ('draft', 'archived', 'processing')
      OR i.accountant_status = 'verwerkt';   -- B.4 locked by the accountant
 
   IF v_bad > 0 THEN

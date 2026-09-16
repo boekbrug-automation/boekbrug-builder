@@ -383,6 +383,9 @@ BEGIN
    AND (i.sender_id = p_user_id OR i.receiver_id = p_user_id)
   WHERE i.id IS NULL
      OR i.status = 'paid'
+     -- [NOOIT-BETAALBAAR] Kept byte-for-byte with book_bank_batch_atomic.sql, which carries the
+     -- reason. Both files declare this function; whichever is applied last wins.
+     OR i.status IN ('draft', 'archived', 'processing')
      OR i.accountant_status = 'verwerkt';
 
   IF v_bad > 0 THEN
