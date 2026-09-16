@@ -111,6 +111,9 @@ DECLARE
   v_total       numeric;
   v_paid        numeric;
   v_remaining   numeric;
+  -- [LIJN-BUDGET] What the LINE has already given elsewhere, and what that leaves it.
+  v_elsewhere   numeric;
+  v_available   numeric;
   v_applied     numeric;
   v_now_paid    numeric;
   v_is_paid     boolean;
@@ -152,9 +155,60 @@ BEGIN
   -- that function is not installed, and it is SECURITY DEFINER + GRANTed to authenticated, so
   -- PostgREST will call it with whatever it is handed. Two cents of rounding drift are absorbed;
   -- a real shortfall is refused, and the caller is told which function it wanted.
-  IF v_tx_amount > 0 AND p_amount < v_tx_amount - 0.02 THEN
+  -- ── [LIJN-BUDGET] WHAT THE LINE STILL HAS, NOT WHAT IT ONCE WAS ────────────────────────────
+  --
+  -- This was the only one of the four bank-line doors that never read bank_tx_invoices at all.
+  -- confirm_bank_payment, allocate_bank_payment and book_bank_batch each subtract what the line
+  -- has already given before deciding; this one measured against the line's GROSS amount, and
+  -- that single word is the whole defect. It cost in both directions:
+  --
+  --   · OVER-ALLOCATION. allocate_bank_payment(40) on a EUR 100 line leaves it 'pending' with 60
+  --     left. apply_bank_payment(100) then passed the guard below — 100 is not < 100 − 0.02 — and
+  --     spent 100, putting 140 on a 100 line. On an already-exhausted line it put 200. One
+  --     authenticated caller, no concurrency, no direct table write: both functions are
+  --     SECURITY DEFINER, GRANTed to `authenticated`, and PostgREST exposes them by name.
+  --   · FALSE REFUSAL. /api/bank/confirm hands this function alloc.amount — payAvailable, already
+  --     net of the siblings. On a partly-spent line that net figure IS less than the gross, so the
+  --     guard refused a booking that was correct. The same correction fixes both.
+  --
+  -- Read under the bank-line lock taken immediately above, so it is exact rather than a snapshot a
+  -- concurrent booking can invalidate. No new lock, no new abstraction.
+  --
+  -- [CREDITNOTA] SIGNED, character-for-character the CASE confirm_bank_payment and
+  -- allocate_bank_payment already use, and the same rule as bank-line-budget.ts's spendsTheLine.
+  -- amount_applied is stored as a MAGNITUDE per invoice, but the LINE's budget is not a sum of
+  -- magnitudes: a credit in the same batch GAVE money to the line rather than taking it, so a
+  -- EUR 100 debit carrying a EUR 40 supplier creditnota has EUR 140 to give, not 60. Read as
+  -- magnitudes this function would cap that invoice at 60 and report success.
+  SELECT coalesce(sum(
+           CASE WHEN ((i.direction = 'incoming')
+                       <> (coalesce(i.invoice_type, 'factuur') = 'creditnota'
+                           OR coalesce(i.total_inc_btw, 0) < 0))
+                     = (coalesce(t.amount, 0) < 0)
+                THEN  abs(coalesce(l.amount_applied, 0))
+                ELSE -abs(coalesce(l.amount_applied, 0)) END
+         ), 0) INTO v_elsewhere
+  FROM public.bank_tx_invoices l
+  JOIN public.invoices i ON i.id = l.invoice_id
+  JOIN public.bank_transactions t ON t.id = l.transaction_id
+  WHERE l.transaction_id = p_tx_id AND l.user_id = p_user_id
+    AND l.invoice_id <> p_invoice_id;
+
+  v_available := v_tx_amount - v_elsewhere;
+
+  -- Nothing left to spend. Worded exactly as confirm_bank_payment and allocate_bank_payment word
+  -- it, because "fully applied" is one of the six substrings fourteen callers triage on: a
+  -- different sentence here would be read as a different refusal, with a different dialog.
+  IF v_available <= v_eps THEN
+    RAISE EXCEPTION '[PARTIAL-PAY] payment fully applied' USING ERRCODE = '55000';
+  END IF;
+
+  -- [PARTIAL-PAY-HEEL] …measured against v_available. The function still CONSUMES the line — it
+  -- ends by setting the transaction to 'matched' unconditionally — and that stays honest precisely
+  -- because the amount it may spend is now capped at what the line still has.
+  IF v_available > 0 AND p_amount < v_available - 0.02 THEN
     RAISE EXCEPTION '[PARTIAL-PAY] this function consumes the whole line (% of %) — use allocate_bank_payment to spend part of it',
-      p_amount, v_tx_amount USING ERRCODE = '55000';
+      p_amount, v_available USING ERRCODE = '55000';
   END IF;
 
   -- Lock + read the invoice under the lock (its amount_paid/status can't change
@@ -203,7 +257,10 @@ BEGIN
   IF v_remaining <= 0 THEN
     RAISE EXCEPTION '[PARTIAL-PAY] invoice already covered' USING ERRCODE = '55000';
   END IF;
-  v_applied  := LEAST(p_amount, v_remaining);
+  -- [LIJN-BUDGET] Capped by the LINE's remaining budget as well as the invoice's. This is the
+  -- assertion that makes the guard above unbypassable: a caller handing the gross amount is
+  -- clamped to what the line can still give rather than spending money that is already gone.
+  v_applied  := LEAST(p_amount, v_remaining, v_available);
   v_now_paid := v_paid + v_applied;
   v_is_paid  := v_now_paid >= v_total - v_eps;
 

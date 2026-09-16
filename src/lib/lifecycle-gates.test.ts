@@ -34977,6 +34977,70 @@ test("[EEN-GELDMUTATIE] the door it books through really is one transaction with
   assert.match(body, /RAISE EXCEPTION '\[NOOIT-BETAALBAAR\] invoice state/, "payable-state guard");
 });
 
+// ─── [LIJN-BUDGET] apply_bank_payment measures against what the LINE STILL HAS ────────────────
+//
+// The SQL seam test (tests/sql/apply_bank_payment_budget.test.sql) holds the BEHAVIOUR of this
+// guard, case by case. It cannot hold two things, and they are the two this block exists for:
+//
+//   1. The ROW LOCK. A seam test runs in one psql session, so a mutation that deletes FOR UPDATE
+//      leaves every single-session assertion green — measured: it was the one mutation of seven
+//      that survived the behavioural battery. Run with two real connections the same mutation puts
+//      2 links and 200 on a 100 line. The lock is load-bearing and only its ORDER can be asserted
+//      from here: it must be taken BEFORE the sibling sum is read, or the sum is a snapshot a
+//      concurrent booking can invalidate.
+//   2. npm run gates never runs test:sql — scripts/sql-seam-test.sh exits 0 without a database, and
+//      only CI sets SQL_SEAM_REQUIRED=1. So the structural half lives here, where it always runs.
+const LIJN_BUDGET_DOORS = [
+  "supabase/migrations/bank_rpc_never_payable_states.sql",
+  "supabase/migrations/invoice_partial_payments.sql",
+] as const;
+
+test("[LIJN-BUDGET] apply_bank_payment locks the line, then measures the signed sum, then caps", () => {
+  for (const file of LIJN_BUDGET_DOORS) {
+    const body = functionBody(sqlNoComments(file), "apply_bank_payment");
+
+    const lockAt = body.search(/FROM public\.bank_transactions[\s\S]{0,200}?FOR UPDATE/);
+    assert.ok(lockAt > -1, `${file}: apply_bank_payment no longer locks the bank line`);
+
+    const siblingAt = body.indexOf("FROM public.bank_tx_invoices l");
+    assert.ok(siblingAt > -1,
+      `${file}: apply_bank_payment does not read its sibling allocations. That was the defect: it ` +
+        "was the only one of the four bank-line doors that never read the table it writes");
+    assert.ok(lockAt < siblingAt,
+      `${file}: the sibling sum is read BEFORE the line is locked — it is then a snapshot a ` +
+        "concurrent booking can invalidate, which is the race the lock exists to remove");
+
+    // SIGNED, not a magnitude. A EUR 100 debit carrying a EUR 40 supplier creditnota has 140 to
+    // give; summed as magnitudes this door caps that invoice at 60 and reports success.
+    assert.match(body, /ELSE -abs\(coalesce\(l\.amount_applied, 0\)\) END/,
+      `${file}: the sibling sum is no longer signed — a credit would count as spending the line`);
+
+    // …and the decision is capped by it. Without v_available in the LEAST the guard above is
+    // advisory: a caller handing the gross amount still spends money that is already gone.
+    assert.match(body, /v_applied\s+:=\s+LEAST\(p_amount, v_remaining, v_available\);/,
+      `${file}: what is applied is no longer capped by the line's remaining budget`);
+
+    // The refusal must stay inside the vocabulary fourteen callers triage on.
+    assert.match(body, /RAISE EXCEPTION '\[PARTIAL-PAY\] payment fully applied'/,
+      `${file}: the exhausted-line refusal is gone or reworded outside the triaged substrings`);
+
+    // The HEEL guard measures the REMAINING budget, never the gross amount. This one word is the
+    // whole defect: it over-allocated on a partly-spent line and refused a legitimate net amount.
+    assert.doesNotMatch(body, /p_amount < v_tx_amount - 0\.02/,
+      `${file}: the consumes-the-whole-line guard is measuring the GROSS line amount again`);
+    assert.match(body, /p_amount < v_available - 0\.02/,
+      `${file}: the consumes-the-whole-line guard must measure v_available`);
+  }
+});
+
+test("[LIJN-BUDGET] the two copies of apply_bank_payment stay byte-identical", () => {
+  // The owning migration and the file that first declared it. A database built from either, in any
+  // order, must end at the same definition — the failure book_bank_batch already has.
+  const [a, b] = LIJN_BUDGET_DOORS.map((f) => functionBody(sqlNoComments(f), "apply_bank_payment"));
+  assert.equal(a, b,
+    "the two declarations of apply_bank_payment have drifted; whichever migration runs last wins");
+});
+
 // ─── [HANDGESCHREVEN-BOEKING] The two hand-written bank bookings go through the door ──────────
 //
 // /api/bank/line-invoice and /api/bank/attach-invoice each wrote a bank allocation BY HAND: an
