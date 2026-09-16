@@ -225,6 +225,16 @@ interface ConnectionStatus {
   connected_at: string | null;
   needs_reauth: boolean;
   pending_count: number;
+  /**
+   * [MAILBOX-WAAR] The provider this account may still add, or null.
+   *
+   * Decided on the server against the same limit /api/email/connect enforces, never here: a
+   * button the screen offers and the door refuses is worse than no button at all. Before this
+   * existed the connected panel had no second door on it, so an owner who had linked Gmail could
+   * not discover that Outlook was still possible — the two connect buttons lived only in the
+   * "not connected" branch.
+   */
+  other_provider?: "gmail" | "outlook" | null;
 }
 
 interface Props {
@@ -963,6 +973,27 @@ function ConnectEmailCard({ status }: { status: ConnectionStatus }) {
             and it is now labelled with what it does rather than with jargon.
             M3.error, not the bright #ea4335 the old border used: that tone is
             fill-only in the tokens and fails the contrast floor for a word. */}
+        {/* [MAILBOX-WAAR] The second mailbox, where the plan allows one. Quiet and above the
+            destructive action, because adding is the ordinary thing and removing is not. Same
+            wording as the two buttons on the not-connected screen — [KNOP-IN-ZIN]: one control,
+            one name, wherever it appears. */}
+        {status.other_provider && (
+          <div style={{ borderTop: "1px solid #f1f3f4", marginTop: 14, paddingTop: 12 }}>
+            <a
+              href={`/api/email/connect?provider=${status.other_provider}`}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 8,
+                color: M3.primary, fontSize: 13, fontWeight: 600, textDecoration: "none",
+              }}
+            >
+              <span style={{ fontSize: 16 }}>{status.other_provider === "gmail" ? "📧" : "📮"}</span>
+              {t('ink.email.verbindProvider', {
+                provider: status.other_provider === "gmail" ? "Gmail" : "Outlook",
+              })}
+            </a>
+          </div>
+        )}
+
         <div style={{ borderTop: "1px solid #f1f3f4", marginTop: 14, paddingTop: 12 }}>
           <button
             onClick={handleDisconnect}

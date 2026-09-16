@@ -127,7 +127,16 @@ export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
     key: "mailboxes",
     label: "Gekoppelde mailboxen (Gmail/Outlook)",
     free: 1,
-    plus: 3,
+    // [MAILBOX-WAAR] Two, not three — and three was never reachable. email_connections carries
+    // UNIQUE (user_id, provider) with CHECK (provider IN ('gmail','outlook')), so an account can
+    // hold at most one Gmail and one Outlook. A second Gmail address does not fail: saveEmailTokens
+    // upserts on (user_id, provider), so it silently REPLACES the first one.
+    //
+    // Publishing 3 was therefore a number the app could not honour on any plan. Corrected down
+    // rather than up because the alternative is a migration on the table the e-mail sync keys on —
+    // a product decision, not a typo fix. Verified on production before changing it: no account
+    // holds more than one connection, so nobody loses a limit they already had (§5.5.1).
+    plus: 2,
     unit: "actief",
     perMonth: false,
     onExceed: "Een extra mailbox koppelen vraagt Plus.",

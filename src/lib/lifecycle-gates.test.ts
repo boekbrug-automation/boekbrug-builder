@@ -65,7 +65,7 @@ import {
 } from "./dutch-address";
 import { decidePlan as decidePlanFor } from "./subscription";
 import { PUBLIC_PATHS as PUBLIC_PATHS_FOR } from "./public-paths";
-import { PLUS_PRICE_EUR } from "./fair-use";
+import { PLUS_PRICE_EUR, fairUseLimit } from "./fair-use";
 import { round2 } from "./invoice-totals";
 // [SEGMENT-VOORDEUR] De drie deuren, en alles wat ze beloven.
 import { SEGMENT_PAGES, claimedRoutes } from "./segment-pages";
@@ -1483,8 +1483,10 @@ test("[GEGROND-OCR] the second read is blind, or it is worth nothing", () => {
 
   const ai = code("src/lib/ai.ts");
   assert.match(
-    ai, /transcribeAmountsForGrounding\(fileBase64, mimeType/,
-    "the call receives the FILE and nothing derived from the first read",
+    ai, /transcribeAmountsForGrounding\(userId, fileBase64, mimeType/,
+    "the call receives the FILE and nothing derived from the first read. [EIGEN-AANDEEL] added the " +
+      "account in front of it, and that is the one argument allowed to precede the file: it says " +
+      "whose day pays for the second read, never anything about what the first read saw.",
   );
   assert.match(
     ai, /grounding\.totalIncBtw === 'unreadable' &&/,
@@ -2640,8 +2642,8 @@ test("[E-FACTUUR-XML] attaching a Peppol invoice to a bank line goes to the same
     "the reader must be handed the type the content actually is",
   );
   assert.match(
-    src, /verifyInvoiceFromPdf\(base64, readerMime,/,
-    "…and actually be given it",
+    src, /verifyInvoiceFromPdf\(user\.id, base64, readerMime,/,
+    "…and actually be given it — behind the account whose daily AI share this read spends",
   );
 });
 
@@ -35422,5 +35424,86 @@ test("[EIGEN-AANDEEL] every Anthropic call names an account, and the global fuse
     code("supabase/migrations/usage_counters_internal_metrics.sql"),
     /metric NOT LIKE 'internal\.%'/,
     "[EIGEN-AANDEEL] usage_counters_select_own must exclude internal metrics",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [MAILBOX-WAAR] You cannot publish more mailboxes than there are doors to open one.
+//
+// WHY THIS GATE EXISTS. Three layers said three different things, and nothing could see it:
+//
+//   · /eerlijk-gebruik and the Terms published "Gekoppelde mailboxen: Free 1, Plus 3".
+//   · The table allows at most TWO — UNIQUE (user_id, provider) with the provider limited to
+//     gmail and outlook — so a second Gmail ADDRESS is not refused, it is silently upserted over
+//     the first. The owner loses a mailbox and is told nothing.
+//   · The screen showed ONE. The two connect buttons lived only in the not-connected branch, and
+//     the page read the connections with .limit(1).maybeSingle(), so a Gmail owner could not
+//     discover that Outlook was still possible on any plan.
+//
+// A published limit nobody enforces is decoration; a published limit the app CANNOT reach is a
+// promise we break by existing. The owner found this one by opening the screen and counting.
+//
+// So the invariant is stated between the published number and the code that can honour it: the
+// Plus limit equals the number of providers the connect door accepts. Raising the published
+// number now requires either a new provider or a migration off (user_id, provider) — both real
+// decisions, neither of them a constant somebody edits in passing.
+test("[MAILBOX-WAAR] the published mailbox limit is a number the app can actually reach", () => {
+  const connect = code("src/app/api/email/connect/route.ts");
+
+  // 1. The providers this door will start an OAuth flow for. Read from the refusal that is the
+  //    door's own definition of what it accepts — not from a list written down twice.
+  const accepted = [...connect.matchAll(/provider !== "(\w+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(accepted, ["gmail", "outlook"], "the connect door's provider list moved");
+
+  const limit = fairUseLimit("mailboxes");
+  assert.equal(
+    limit.plus,
+    accepted.length,
+    "the published Plus mailbox limit must equal the number of providers that can be connected. " +
+      "email_connections is UNIQUE (user_id, provider), so one row per provider is the hard " +
+      "maximum — a higher published number cannot be honoured on any plan, and a second address " +
+      "on a provider already connected is UPSERTED over the first rather than refused.",
+  );
+  assert.ok(limit.free <= limit.plus, "[MAILBOX-WAAR] Free may never be allowed more than Plus");
+
+  // 2. The door enforces it — and a RECONNECT is never an addition. A grant dies, the owner
+  //    presses "Verbind opnieuw", and that must work on Free too: counting a re-auth as a new
+  //    mailbox would lock an account out of the one it already has the moment its token expired.
+  assert.match(
+    connect, /!connected\.includes\(provider\)/,
+    "[MAILBOX-WAAR] the limit must skip a provider that is already connected — that is a " +
+      "reconnect of the same mailbox, not a second one",
+  );
+  assert.match(
+    connect, /connected\.length >= limit/,
+    "[MAILBOX-WAAR] the connect door must refuse an ADDITIONAL mailbox beyond the plan's limit",
+  );
+  assert.match(
+    connect, /status: 402/,
+    "[MAILBOX-WAAR] 402, like every other fair-use refusal: this is not 'you may not', it is " +
+      "'this costs more than your plan' — and it carries the published sentence and the way out",
+  );
+  // Before the redirect, or the owner grants Google access to their mail and is then told no.
+  assert.ok(
+    connect.indexOf("status: 402") < connect.indexOf("NextResponse.redirect"),
+    "[MAILBOX-WAAR] refuse BEFORE sending the owner to the provider",
+  );
+
+  // 3. The screen may no longer read one connection and call that the answer.
+  const page = code("src/app/dashboard/incoming/page.tsx");
+  const q = page.indexOf('.from("email_connections")');
+  assert.ok(q > -1, "[MAILBOX-WAAR] re-point this gate: the incoming page's connection query moved");
+  assert.ok(
+    !page.slice(q, q + 400).includes(".limit(1)"),
+    "[MAILBOX-WAAR] the page must read every connection. With .limit(1) an owner who has two " +
+      "sees one, and the screen cannot know whether a second is still possible.",
+  );
+
+  // 4. …and it must offer the one that is still possible, decided on the server.
+  assert.match(page, /other_provider:/, "[MAILBOX-WAAR] the page must decide the second door");
+  assert.match(
+    code("src/app/dashboard/incoming/IncomingInvoicesClient.tsx"),
+    /status\.other_provider &&/,
+    "[MAILBOX-WAAR] the connected panel must offer the remaining provider when there is one",
   );
 });
