@@ -142,3 +142,10 @@ done
 if [ "$failed" -ne 0 ]; then exit 1; fi
 echo ""
 echo "✅ [SEAM] every SQL contract held."
+
+# [GELIJKTIJDIG-VAST] Everything above ran on ONE connection per file, where a FOR UPDATE never
+# waits. The concurrency driver is the other half: it drives the real doors from TWO connections
+# and asserts the outcome. It runs from here rather than standing alone so it inherits the
+# [SEAM-GUARD] refusals above — it rebuilds schema public too, and must never reach a real
+# database on its own.
+SQL_SEAM_GUARDED=1 bash "$here/scripts/sql-concurrency-test.sh" || exit 1
