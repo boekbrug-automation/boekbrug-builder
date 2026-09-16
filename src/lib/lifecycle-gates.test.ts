@@ -34487,6 +34487,57 @@ test("[ALLOCATIE-DEUR] no application code writes the allocation table with a se
   }
 });
 
+test("[ALLOCATIE-DEUR] a third identical copy forces a new ruling, it is not chosen by apply order", () => {
+  // [VERPLAATS-TEKEN] made the two move_invoice_payment declarations byte-identical on purpose.
+  // migration-inventory's newest-version heuristic looks for the version whose tokens are a strict
+  // SUPERSET of the others, and identical bodies have none — so the function fell back to being
+  // measured by EXISTENCE, which is the measurement that once reported two unrun migrations as
+  // applied, one of them a money guard.
+  //
+  // The fix names the newest file in GELIJKE_BODY_NIEUWSTE rather than deriving it. That is only
+  // safe while the named copy-set is still the real one: a THIRD identical declaration makes the
+  // old ruling an assumption again, and apply order would quietly decide. So the set is recorded
+  // beside the ruling, and this gate holds the recording to what is on disk.
+  const MIGRATION_DIR = "supabase/migrations";
+  const bodies = new Map<string, Map<string, string>>();
+  for (const f of readdirSync(MIGRATION_DIR).filter((x) => x.endsWith(".sql"))) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f));
+    for (const m of sql.matchAll(/CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\s*\([\s\S]*?\bAS \$\$([\s\S]*?)\$\$;/g)) {
+      const fn = m[1].toLowerCase();
+      if (!bodies.has(fn)) bodies.set(fn, new Map());
+      bodies.get(fn)!.set(f, m[2]);
+    }
+  }
+  const identical = [...bodies].filter(([, byFile]) =>
+    byFile.size > 1 && new Set(byFile.values()).size === 1);
+  assert.ok(identical.length > 0,
+    "no function is declared identically by two migrations any more — this gate has nothing to hold, " +
+      "so either the matcher broke or GELIJKE_BODY_NIEUWSTE should go");
+
+  const script = readFileSync("scripts/migration-inventory.ts", "utf8");
+  let held = 0;
+  for (const [fn, byFile] of identical) {
+    const ruling = script.match(new RegExp(`\\b${fn}:\\s*\\{([\\s\\S]*?)\\n  \\},`));
+    if (!ruling) continue;   // not a named family: it keeps the measurement it always had
+    const newest = ruling[1].match(/nieuwste:\s*"([a-z0-9_]+\.sql)"/)?.[1];
+    const copyBlock = ruling[1].match(/kopieen:\s*\[([\s\S]*?)\]/)?.[1];
+    assert.ok(newest, `GELIJKE_BODY_NIEUWSTE.${fn} records no newest file`);
+    assert.ok(copyBlock !== undefined, `GELIJKE_BODY_NIEUWSTE.${fn} records no copy set`);
+    const recorded = [...copyBlock!.matchAll(/"([a-z0-9_]+\.sql)"/g)].map((m) => m[1]).sort();
+    const onDisk = [...byFile.keys()].sort();
+
+    // A third declaration appearing makes this red and names it, instead of riding the old ruling.
+    assert.deepStrictEqual(recorded, onDisk,
+      `${fn} is declared identically by ${onDisk.length} migration(s) on disk, but the ruling records ` +
+        `${recorded.length}. Identical text cannot say which is newest, so a new copy needs a new ` +
+        `ruling — apply order must not decide.\n  on disk:  ${onDisk.join(", ")}\n  recorded: ${recorded.join(", ")}`);
+    assert.ok(onDisk.includes(newest!), `GELIJKE_BODY_NIEUWSTE.${fn} names ${newest}, which does not declare it`);
+    held += 1;
+  }
+  assert.ok(held > 0,
+    "no identical-body family is named in GELIJKE_BODY_NIEUWSTE any more — this gate asserted nothing");
+});
+
 test("[ALLOCATIE-DEUR] no migration creates the write policies, in any apply order", () => {
   const MIGRATION_DIR = "supabase/migrations";
   const files = readdirSync(MIGRATION_DIR).filter((f) => f.endsWith(".sql"));

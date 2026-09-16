@@ -186,8 +186,15 @@ const lijst = (namen: string[]) => namen.map((n) => `'${n}'`).join(", ");
  * tegenover bank_rpc_never_payable_states.sql, book_bank_batch tegenover zijn tweede declaratie)
  * houden de meting die ze hadden: dit lost één regressie op en hermeet de rest niet ongevraagd.
  */
-const GELIJKE_BODY_NIEUWSTE: Record<string, string> = {
-  move_invoice_payment: "invoice_move_payment_creditnota_guard.sql",
+const GELIJKE_BODY_NIEUWSTE: Record<string, { nieuwste: string; kopieen: string[] }> = {
+  move_invoice_payment: {
+    nieuwste: "invoice_move_payment_creditnota_guard.sql",
+    // De kopieën die er OP DIT MOMENT zijn. Komt er een DERDE identieke declaratie bij, dan is de
+    // aanwijzing hierboven niet meer per definitie waar — en juist dan kiest apply order stilletjes
+    // een winnaar. Het script valt dan om en vraagt om een nieuwe uitspraak, in plaats van de oude
+    // op goed geluk door te trekken.
+    kopieen: ["invoice_move_payment.sql", "invoice_move_payment_creditnota_guard.sql"],
+  },
 };
 
 const STAND_CONTROLE: Record<string, Stand> = {
@@ -544,8 +551,18 @@ function herdefinitieMerken(alle: { bestand: string; sql: string }[]): {
     // hieronder opgeschreven, net als NIETS_BEWIJZEND en STAND_CONTROLE. Een nieuwe familie die
     // hier niet in staat laat het script vallen in plaats van te kiezen.
     const bodies = [...byFile.values()];
-    const nieuwsteBestand = GELIJKE_BODY_NIEUWSTE[naam];
-    if (nieuwsteBestand && bodies.length > 1 && bodies.every((b) => b === bodies[0])) {
+    const afspraak = GELIJKE_BODY_NIEUWSTE[naam];
+    if (afspraak && bodies.length > 1 && bodies.every((b) => b === bodies[0])) {
+      const gevonden = [...byFile.keys()].sort();
+      const afgesproken = [...afspraak.kopieen].sort();
+      if (gevonden.join("|") !== afgesproken.join("|")) {
+        throw new Error(
+          `${naam} wordt nu door ANDERE bestanden identiek gedeclareerd dan GELIJKE_BODY_NIEUWSTE ` +
+          `vastlegt. Welke de nieuwste is, is uit gelijke tekst niet af te leiden, dus dit moet ` +
+          `opnieuw worden uitgesproken — niet doorgetrokken.\n  afgesproken: ${afgesproken.join(", ")}` +
+          `\n  gevonden:    ${gevonden.join(", ")}`);
+      }
+      const nieuwsteBestand = afspraak.nieuwste;
       if (!byFile.has(nieuwsteBestand)) {
         throw new Error(`GELIJKE_BODY_NIEUWSTE wijst ${naam} naar ${nieuwsteBestand}, dat deze functie niet declareert`);
       }
