@@ -85,6 +85,19 @@ interface Probe {
  * Wat hier NIET thuishoort: een object dat gewoon ontbreekt. Dat hoort OPEN te heten.
  */
 const NIETS_BEWIJZEND: Record<string, { object: string; reden: string }[]> = {
+  "bank_transactions_column_grant.sql": [
+    {
+      object: "bank_transactions_update_own",
+      reden:
+        "Deze policy BESTOND al — ze komt uit de oorspronkelijke dashboard-opzet en staat in geen " +
+        "enkele migratie, net als de basispolicies van invoices. De migratie maakt haar opnieuw " +
+        "aan omdat ze de hele vorm wil opschrijven die ze achterlaat, niet omdat ze nieuw is. Haar " +
+        "bestaan bewijst dus niets: op productie is het antwoord 'ja, die staat er' ook op de dag " +
+        "VOORDAT deze migratie ooit draaide. Wat wél alleen door deze migratie waar wordt, is de " +
+        "STAND eronder — het kolom-recht en de verdwenen delete-policy — en die staat in " +
+        "STAND_CONTROLE.",
+    },
+  ],
   "documents_content_hash_unique.sql": [
     {
       object: "document_is_referenced",
@@ -172,7 +185,53 @@ const ALLEEN_SERVICE_ROLE = [
 ];
 const lijst = (namen: string[]) => namen.map((n) => `'${n}'`).join(", ");
 
+/**
+ * [ALLOCATIE-DEUR] Functies die meer dan één migratie WOORD VOOR WOORD hetzelfde declareert, en
+ * welk bestand daarvan de nieuwste is.
+ *
+ * Normaal draagt elke herdefinitie de vorige mee en voegt toe, dus de nieuwste is af te leiden uit
+ * haar tokens. Sinds [VERPLAATS-TEKEN] de twee kopieën van move_invoice_payment gelijk trok — met
+ * opzet, omdat uiteenlopende kopieën betekenden dat de oudste toepassen een levende geldpoort
+ * weghaalde — is dat voor die familie niet meer zo. De body wordt op haar merktekens gemeten; wie
+ * hem draagt staat hier.
+ *
+ * Alleen de families die HIER staan worden zo gemeten. Andere identieke paren (de drie bankdeuren
+ * tegenover bank_rpc_never_payable_states.sql, book_bank_batch tegenover zijn tweede declaratie)
+ * houden de meting die ze hadden: dit lost één regressie op en hermeet de rest niet ongevraagd.
+ */
+const GELIJKE_BODY_NIEUWSTE: Record<string, { nieuwste: string; kopieen: string[] }> = {
+  move_invoice_payment: {
+    nieuwste: "invoice_move_payment_creditnota_guard.sql",
+    // De kopieën die er OP DIT MOMENT zijn. Komt er een DERDE identieke declaratie bij, dan is de
+    // aanwijzing hierboven niet meer per definitie waar — en juist dan kiest apply order stilletjes
+    // een winnaar. Het script valt dan om en vraagt om een nieuwe uitspraak, in plaats van de oude
+    // op goed geluk door te trekken.
+    kopieen: ["invoice_move_payment.sql", "invoice_move_payment_creditnota_guard.sql"],
+  },
+};
+
 const STAND_CONTROLE: Record<string, Stand> = {
+  "bank_transactions_column_grant.sql": {
+    soort: "controle",
+    vraag:
+      "authenticated mag op bank_transactions nog precies de drie categorie-kolommen UPDATEN en " +
+      "geen enkele regel meer verwijderen",
+    // Drie onafhankelijke helften, want elke helft afzonderlijk is met de hand terug te draaien
+    // zonder dat de andere twee het zien: het recht kan te RUIM staan (een table-wide GRANT zet
+    // elke kolom terug), te KRAP (de REVOKE liep, de GRANT niet — dan valt /api/bank/categorize
+    // om met 42501), en de delete-policy kan opnieuw zijn aangemaakt.
+    sql: `(select count(*) from information_schema.column_privileges
+             where table_schema = 'public' and table_name = 'bank_transactions'
+               and grantee = 'authenticated' and privilege_type = 'UPDATE') = 3
+          and not exists (
+            select 1 from information_schema.column_privileges
+             where table_schema = 'public' and table_name = 'bank_transactions'
+               and grantee = 'authenticated' and privilege_type = 'UPDATE'
+               and column_name not in ('category', 'category_source', 'category_confirmed'))
+          and not exists (
+            select 1 from pg_policy
+             where polrelid = 'public.bank_transactions'::regclass and polcmd = 'd')`,
+  },
   "drop_supplier_rows_that_are_misreadings.sql": {
     soort: "controle",
     vraag: "geen leveranciersrij houdt nog een nummer vast dat geen rekeningnummer is terwijl niets ernaar wijst",
@@ -502,6 +561,50 @@ function herdefinitieMerken(alle: { bestand: string; sql: string }[]): {
     if (lijst.length > 0) {
       merken.set(naam, lijst.map((k) => `.${k}`));
       continue;
+    }
+
+    // ── Twee kopieën die WOORD VOOR WOORD hetzelfde zeggen ─────────────────────────────────────
+    //
+    // [ALLOCATIE-DEUR] Dit was geen bestaand geval en werd er één: [VERPLAATS-TEKEN] maakte de twee
+    // declaraties van move_invoice_payment byte-identiek, met opzet — zolang ze uiteenliepen kon
+    // het toepassen van de OUDSTE een levende geldpoort weghalen.
+    //
+    // De bovenverzameling-truc hieronder kan daar niet mee overweg: hij zoekt de versie die strikt
+    // MEER tokens heeft, en bij gelijke bodies bestaat die niet. De functie viel daardoor terug op
+    // BESTAAN, wat precies de meting is die twee migraties ooit als toegepast meldde terwijl ze niet
+    // gedraaid waren.
+    //
+    // Bij gelijke bodies is er ook niets te onderscheiden TUSSEN de bestanden — ze zeggen hetzelfde,
+    // dus welk bestand de probe draagt maakt niet uit. Wat wél onderscheiden moet worden is de
+    // repo-body van wat er in de DATABASE staat, en daarvoor gebruiken we de merktekens die dit
+    // project overal zet: [ZO-IETS] in de body zelf. Staan ze in prosrc, dan draait deze body.
+    //
+    // Welk BESTAND de nieuwste is, valt uit gelijke tekst niet af te leiden — en raden is hier het
+    // verkeerde antwoord: de oudere houdt haar bestaansprobe (ingehaald is niet ongedraaid), dus
+    // een verkeerde gok zet OPEN bij een migratie die allang gedraaid is. Daarom staat het
+    // hieronder opgeschreven, net als NIETS_BEWIJZEND en STAND_CONTROLE. Een nieuwe familie die
+    // hier niet in staat laat het script vallen in plaats van te kiezen.
+    const bodies = [...byFile.values()];
+    const afspraak = GELIJKE_BODY_NIEUWSTE[naam];
+    if (afspraak && bodies.length > 1 && bodies.every((b) => b === bodies[0])) {
+      const gevonden = [...byFile.keys()].sort();
+      const afgesproken = [...afspraak.kopieen].sort();
+      if (gevonden.join("|") !== afgesproken.join("|")) {
+        throw new Error(
+          `${naam} wordt nu door ANDERE bestanden identiek gedeclareerd dan GELIJKE_BODY_NIEUWSTE ` +
+          `vastlegt. Welke de nieuwste is, is uit gelijke tekst niet af te leiden, dus dit moet ` +
+          `opnieuw worden uitgesproken — niet doorgetrokken.\n  afgesproken: ${afgesproken.join(", ")}` +
+          `\n  gevonden:    ${gevonden.join(", ")}`);
+      }
+      const nieuwsteBestand = afspraak.nieuwste;
+      if (!byFile.has(nieuwsteBestand)) {
+        throw new Error(`GELIJKE_BODY_NIEUWSTE wijst ${naam} naar ${nieuwsteBestand}, dat deze functie niet declareert`);
+      }
+      const markers = [...new Set([...bodies[0].matchAll(/\[([A-Z][A-Z0-9-]{2,})\]/g)].map((m) => m[1]))].sort();
+      if (markers.length > 0) {
+        nieuwste.set(naam, { bestand: nieuwsteBestand, merken: markers.map((m) => `[${m}]`) });
+        continue;
+      }
     }
 
     // ── Geen gedeelde kolomverwijzing: geen triggerfunctie ──────────────────────────────────────

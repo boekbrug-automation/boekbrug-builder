@@ -94,6 +94,7 @@ DECLARE
   v_now_paid   numeric;
   v_is_paid    boolean;
   v_line_rest  numeric;
+  v_tx_invoice_id uuid;
   -- One cent of slack, same as apply_bank_payment: floating totals from
   -- OCR/xlsx can be a rounding tick short. Covered-within-a-cent counts.
   v_eps        numeric := 0.01;
@@ -109,12 +110,50 @@ BEGIN
   -- MUTEX on the bank line. Every path that spends this line's money
   -- (apply_bank_payment, book_bank_batch, this function) takes this lock
   -- first, so the sibling-links sum below cannot change beneath us.
-  SELECT status, abs(coalesce(amount, 0)) INTO v_tx_status, v_tx_amount
+  SELECT status, abs(coalesce(amount, 0)), invoice_id
+    INTO v_tx_status, v_tx_amount, v_tx_invoice_id
   FROM public.bank_transactions
   WHERE id = p_tx_id AND user_id = p_user_id
   FOR UPDATE;
   IF NOT FOUND OR v_tx_status IS DISTINCT FROM 'pending' THEN
     RETURN;   -- already claimed / not ours → empty result (caller answers 409)
+  END IF;
+
+  -- [HANDGESCHREVEN-BOEKING] The SECOND half of the line claim, and it belongs here
+  -- rather than in a caller: /api/bank/line-invoice enforced `invoice_id IS NULL` in
+  -- its own UPDATE, and delegating the mutation to this function would have dropped
+  -- that condition on the floor.
+  --
+  -- It is NOT a blanket `invoice_id IS NULL`. This function deliberately leaves a
+  -- part-spent line 'pending' WITH invoice_id set (see the ELSE branch at the end),
+  -- because one payment can cover several invoices -- so a blanket condition would
+  -- refuse the second confirm of every multi-invoice payment, which is the flow
+  -- /api/bank/confirm runs. Measured: line 100, invoices A and B of 40 each; the
+  -- second confirm must succeed and does.
+  --
+  -- What is unsafe is narrower and exact: a line naming an invoice that NO allocation
+  -- row backs. /api/bank/attach-invoice writes the invoice and the line and treats its
+  -- link write as non-fatal by design, so {pending, invoice_id set, no link} is a
+  -- state this database tolerates -- and against it the signed sibling sum below reads
+  -- ZERO, so the whole line would be offered a second time. Measured on that state: a
+  -- EUR 100 line gave EUR 100 to a second invoice while the first already carried
+  -- amount_paid = 100. EUR 200 booked out of EUR 100.
+  --
+  -- It sits AFTER the row lock and BEFORE the first write, so a refusal leaves the
+  -- invoice, the line and the allocations exactly as it found them.
+  --
+  -- The wording carries none of the six substrings the callers triage on ("verwerkt",
+  -- "already fully paid", "already covered", "fully applied", "no longer payable",
+  -- "tie no longer exact"): this is a different refusal, with a different answer.
+  IF v_tx_invoice_id IS NOT NULL
+     AND v_tx_invoice_id <> p_invoice_id
+     AND NOT EXISTS (
+       SELECT 1 FROM public.bank_tx_invoices l
+       WHERE l.transaction_id = p_tx_id AND l.user_id = p_user_id
+         AND l.invoice_id = v_tx_invoice_id)
+  THEN
+    RAISE EXCEPTION '[HANDGESCHREVEN-BOEKING] line already names an invoice that no allocation backs'
+      USING ERRCODE = '55000';
   END IF;
   IF v_tx_amount <= 0 THEN
     RAISE EXCEPTION '[BANK-CONFIRM] transaction has no amount to spend' USING ERRCODE = '55000';
@@ -344,6 +383,9 @@ BEGIN
    AND (i.sender_id = p_user_id OR i.receiver_id = p_user_id)
   WHERE i.id IS NULL
      OR i.status = 'paid'
+     -- [NOOIT-BETAALBAAR] Kept byte-for-byte with book_bank_batch_atomic.sql, which carries the
+     -- reason. Both files declare this function; whichever is applied last wins.
+     OR i.status IN ('draft', 'archived', 'processing')
      OR i.accountant_status = 'verwerkt';
 
   IF v_bad > 0 THEN

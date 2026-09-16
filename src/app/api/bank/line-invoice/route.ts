@@ -10,6 +10,23 @@
 // document carries no btw. This route adds the things only a database can answer — that the line
 // is still free, that a paid invoice of this amount is not already sitting beside it (the same
 // double-booking guard every machine writer asks), and the supplier's identity in the registry.
+//
+// [HANDGESCHREVEN-BOEKING] This route does NOT book the payment. It creates the invoice as an
+// ORDINARY OPEN one and hands the money decision to confirm_bank_payment — the same door
+// /api/bank/confirm and the auto-confirm pass already go through.
+//
+// What it used to do: write invoices.status='paid' with amount_paid, then UPDATE the bank line,
+// then INSERT the allocation row — three statements, three transactions, no row lock between
+// them, and a hand-written compensating DELETE for the middle one. The allocation write was the
+// last and least protected: it was reported and SWALLOWED, so the ordinary outcome of a failure
+// there was an invoice standing paid with no link to the money that paid it. Nothing measured the
+// line's remaining budget at all, because this route only ever ran on a line it had read as free
+// — unlocked, one statement earlier, which is exactly the window a concurrent confirm fits in.
+//
+// Now: one call, one transaction, one row lock. The door decides the amount under that lock and
+// refuses rather than over-spending. There is no second payment-write path left here to
+// compensate — the only rollback is the DELETE of the invoice this route just created, which is a
+// document that never became a payment, not a payment being undone.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
@@ -19,9 +36,7 @@ import { requireOwner } from "@/lib/owner-only";
 import { buildLineInvoice, isLineRate } from "@/lib/line-invoice";
 import { deriveVendorRate } from "@/lib/vendor-vat-rate";
 import { resolveSupplierForImport } from "@/lib/supplier-registry";
-import { recordPaymentLinks } from "@/lib/bank-tx-links";
 import { readDoubleBookingGuard } from "@/lib/bank-double-booking";
-import { reportHandledFailure } from "@/lib/report-handled";
 
 export const dynamic = "force-dynamic";
 
@@ -130,13 +145,17 @@ export async function POST(req: NextRequest) {
     ? await resolveSupplierForImport(pipeline, user.id, { name: d.clientName, iban: line.counterpart_iban }).catch(() => null)
     : null;
   const isIncoming = d.direction === "incoming";
+  // [HANDGESCHREVEN-BOEKING] Created OPEN, not paid. The payment is confirm_bank_payment's to
+  // write, under the bank line's row lock, together with the allocation row — so 'paid',
+  // amount_paid, payment_method, marked_paid_at and payment_date all appear in the same
+  // transaction as the money they describe, or none of them do.
   const { data: inv, error: insErr } = await pipeline
     .from("invoices")
     .insert({
       sender_id: isIncoming ? null : user.id,
       receiver_id: isIncoming ? user.id : null,
       direction: d.direction,
-      status: "paid",
+      status: isIncoming ? "received" : "sent",
       source: "created",
       invoice_type: "factuur",
       invoice_number: null,
@@ -144,10 +163,6 @@ export async function POST(req: NextRequest) {
       supplier_id: supplier?.id ?? null,
       invoice_date: d.invoiceDate,
       due_date: d.invoiceDate,
-      payment_date: d.invoiceDate,
-      payment_method: "bank",
-      marked_paid_at: new Date().toISOString(),
-      amount_paid: d.totalIncBtw,
       total_ex_btw: d.totalExBtw,
       btw_amount: d.btwAmount,
       total_inc_btw: d.totalIncBtw,
@@ -167,25 +182,56 @@ export async function POST(req: NextRequest) {
   if (insErr || !inv) return NextResponse.json({ error: "invoice_insert_failed", detail: insErr?.message }, { status: 500 });
   const invoiceId = (inv as { id: string }).id;
 
-  // The line: this invoice, settled in full — exactly the end state confirm_bank_payment leaves.
-  const { data: linked, error: linkErr } = await pipeline
-    .from("bank_transactions")
-    .update({ invoice_id: invoiceId, status: "matched" })
-    .eq("id", transactionId).eq("user_id", user.id).eq("status", "pending").is("invoice_id", null)
-    .select("id");
-  if (linkErr || !linked || linked.length === 0) {
+  // [HANDGESCHREVEN-BOEKING] THE money mutation, and the only one. One call: the door locks the
+  // line, re-reads what the line still has after its other allocations, refuses a line that is
+  // not claimable, decides the amount, and writes the invoice, the allocation row and the line
+  // status inside one transaction.
+  //
+  // The SESSION client, deliberately — the same authority /api/bank/confirm books with. The
+  // function is SECURITY DEFINER and checks auth.uid() against p_user_id, and the owner's own
+  // uid is what lets the accountant-'verwerkt' trigger fire on the invoices write.
+  //
+  // p_pay_date is the LINE's date, which is what this route has always written as payment_date.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: bookedRows, error: bookErr } = await (supabase.rpc as any)("confirm_bank_payment", {
+    p_user_id: user.id,
+    p_tx_id: transactionId,
+    p_invoice_id: invoiceId,
+    p_pay_date: d.invoiceDate,
+  }) as { data: unknown; error: { code?: string; message?: string } | null };
+
+  // Nothing was booked ⇒ the invoice this route created a moment ago is a document describing a
+  // payment that did not happen. Deleting it is not a compensating PAYMENT write — there is no
+  // payment to compensate, which is the whole point of doing the money in one transaction.
+  const undoInvoice = async () => {
     await pipeline.from("invoices").delete().eq("id", invoiceId).eq(isIncoming ? "receiver_id" : "sender_id", user.id);
-    return NextResponse.json({ error: "transaction_already_processed" }, { status: 409 });
+  };
+
+  if (bookErr) {
+    const msg = (bookErr.message ?? "").toLowerCase();
+    await undoInvoice();
+    // The line was claimed, or names an invoice no allocation backs — both mean this line is not
+    // this route's to turn into an invoice, which is the answer the screen already handles.
+    if (msg.includes("no allocation backs")) {
+      return NextResponse.json({ error: "transaction_already_processed" }, { status: 409 });
+    }
+    if (msg.includes("fully applied")) {
+      return NextResponse.json({ error: "payment_fully_applied", code: "payment_fully_applied" }, { status: 409 });
+    }
+    return NextResponse.json({ error: "payment_failed", detail: bookErr.message }, { status: 500 });
   }
-  const recorded = await recordPaymentLinks(pipeline, user.id, transactionId, [invoiceId], { [invoiceId]: d.totalIncBtw });
-  if (!recorded) {
-    reportHandledFailure({ tag: "REGEL-FACTUUR", severity: "data-integrity", message: "payment link not recorded for an invoice created from a bank line", context: { userId: user.id, invoiceId, transactionId } });
+  const booked = Array.isArray(bookedRows) ? (bookedRows[0] as { applied: number } | undefined) : undefined;
+  if (!booked) {
+    // Empty result ⇒ the line was claimed between freeLine's read and the lock. Nothing written.
+    await undoInvoice();
+    return NextResponse.json({ error: "transaction_already_processed" }, { status: 409 });
   }
   await logAuditAction({
     userId: user.id, action: "invoice.created", entityType: "invoice", entityId: invoiceId,
     newValue: {
       via: "bank_line_no_document", transaction_id: transactionId, direction: d.direction,
       total_inc_btw: d.totalIncBtw, btw_amount: d.btwAmount, rate_applied: d.rateApplied,
+      applied: booked.applied,
       btw_withheld_no_document: d.btwWithheldNoDocument, document_missing: d.documentMissing,
     },
     ipAddress: getClientIP(req),

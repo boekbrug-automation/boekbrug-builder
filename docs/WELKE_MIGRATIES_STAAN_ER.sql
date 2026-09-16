@@ -31,8 +31,8 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 154 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
---   DEEL 2  de 17 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
+--   DEEL 1  de 155 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 2  de 18 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
 -- Draai ze allebei. Deel 1 alleen is een schoon rapport met twee veiligheidsmigraties er
@@ -152,9 +152,10 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('bank_tx_invoices.sql', 'index', 'idx_bank_tx_invoices_inv', null, 'public'),
   ('bank_tx_invoices.sql', 'index', 'idx_bank_tx_invoices_tx', null, 'public'),
   ('bank_tx_invoices.sql', 'index', 'idx_bank_tx_invoices_user', null, 'public'),
-  ('bank_tx_invoices.sql', 'policy', 'bank_tx_invoices_delete_own', 'bank_tx_invoices', 'public'),
-  ('bank_tx_invoices.sql', 'policy', 'bank_tx_invoices_insert_own', 'bank_tx_invoices', 'public'),
+  ('bank_tx_invoices.sql', 'policy', 'bank_tx_invoices_select_own', 'bank_tx_invoices', 'public'),
+  ('bank_tx_invoices.sql', 'table', 'bank_tx_invoices', null, 'public'),
   ('bank_tx_invoices_memory_index.sql', 'index', 'idx_bank_tx_invoices_user_recent', null, 'public'),
+  ('bank_tx_invoices_read_only_policy.sql', 'policy', 'bank_tx_invoices_select_own', 'bank_tx_invoices', 'public'),
   ('bank_tx_source_identity.sql', 'column', 'external_id', 'bank_transactions', 'public'),
   ('bank_tx_source_identity.sql', 'column', 'source', 'bank_transactions', 'public'),
   ('bank_tx_source_identity.sql', 'index', 'uniq_bank_tx_source_identity', null, 'public'),
@@ -313,7 +314,7 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('invoice_manual_payments.sql', 'constraint', 'bank_tx_invoices_origin_check', null, 'public'),
   ('invoice_manual_payments.sql', 'function', 'apply_manual_payment', null, 'public'),
   ('invoice_move_payment.sql', 'function', 'move_invoice_payment', null, 'public'),
-  ('invoice_move_payment_creditnota_guard.sql', 'function_body', 'move_invoice_payment', 'creditnota,invoice_type,receiving', 'public'),
+  ('invoice_move_payment_creditnota_guard.sql', 'function_body', 'move_invoice_payment', '[MOVE-PAYMENT],[VERPLAATS-TEKEN]', 'public'),
   ('invoice_number_twins.sql', 'function', 'invoice_number_twins', null, 'public'),
   ('invoice_partial_payments.sql', 'column', 'amount_applied', 'bank_tx_invoices', 'public'),
   ('invoice_partial_payments.sql', 'column', 'amount_paid', 'invoices', 'public'),
@@ -662,7 +663,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 17 van de 171
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 173
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
@@ -715,6 +716,20 @@ with controle(bestand, vraag, toegepast) as (
     and not has_function_privilege('anon', 'public.audit_row_is_about_me(text,uuid,uuid)', 'EXECUTE')
     and has_function_privilege('authenticated', 'public.has_active_invoice_mandate(uuid,uuid)', 'EXECUTE')
     and has_function_privilege('anon', 'public.is_my_accountant_client(uuid)', 'EXECUTE')
+  )
+  union all
+  select 'bank_transactions_column_grant.sql'::text, 'authenticated mag op bank_transactions nog precies de drie categorie-kolommen UPDATEN en geen enkele regel meer verwijderen'::text, (
+    (select count(*) from information_schema.column_privileges
+       where table_schema = 'public' and table_name = 'bank_transactions'
+         and grantee = 'authenticated' and privilege_type = 'UPDATE') = 3
+    and not exists (
+      select 1 from information_schema.column_privileges
+       where table_schema = 'public' and table_name = 'bank_transactions'
+         and grantee = 'authenticated' and privilege_type = 'UPDATE'
+         and column_name not in ('category', 'category_source', 'category_confirmed'))
+    and not exists (
+      select 1 from pg_policy
+       where polrelid = 'public.bank_transactions'::regclass and polcmd = 'd')
   )
   union all
   select 'bank_tx_invoices_amount.sql'::text, 'de dubbele kolom `amount` is weg en `amount_applied` staat er'::text, (
@@ -895,6 +910,8 @@ where direction = 'incoming'
 -- Ze staan in NIETS_BEWIJZEND in scripts/migration-inventory.ts. Een object dat gewoon
 -- ontbreekt hoort daar NIET in: dat hoort OPEN te heten.
 --
+--   bank_transactions_column_grant.sql → bank_transactions_update_own
+--       Deze policy BESTOND al — ze komt uit de oorspronkelijke dashboard-opzet en staat in geen enkele migratie, net als de basispolicies van invoices. De migratie maakt haar opnieuw aan omdat ze de hele vorm wil opschrijven die ze achterlaat, niet omdat ze nieuw is. Haar bestaan bewijst dus niets: op productie is het antwoord 'ja, die staat er' ook op de dag VOORDAT deze migratie ooit draaide. Wat wél alleen door deze migratie waar wordt, is de STAND eronder — het kolom-recht en de verdwenen delete-policy — en die staat in STAND_CONTROLE.
 --   documents_content_hash_unique.sql → document_is_referenced
 --       Steiger, geen fundament. Deze functie bestaat alleen om binnen DEZE migratie de eenmalige dedup-DELETE te rangschikken; geen enkele regel in src/ roept haar aan. Het blijvende resultaat is de unieke index uq_documents_user_content_hash, en die staat er. Haar afwezigheid betekent dus dat iemand de steiger heeft opgeruimd, niet dat de migratie niet liep.
 --   documents_shared_and_storage_policies.sql → idx_documents_user_content_hash

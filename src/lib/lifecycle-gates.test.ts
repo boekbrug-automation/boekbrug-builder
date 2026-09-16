@@ -9836,14 +9836,30 @@ test("[ATTACH-REKENT] the attach-invoice door obeys the same money rules as ever
   // 3. No fabricated document identifiers, anywhere in the file.
   assert.doesNotMatch(route, /UPLOAD-\$\{/, "a minted UPLOAD- number is a record contradicting its own audit trail");
 
-  // 4. The line's remaining budget is read before anything is written, and the applied amount
-  //    is capped by it. Σ amount_applied over one transaction may never exceed what moved.
-  assert.match(route, /from\("bank_tx_invoices"\)[\s\S]{0,200}\.eq\("transaction_id", transactionId\)/, "prior links are read");
-  assert.match(route, /const appliedNow = Math\.min\(Math\.abs\(totalIncBtw\), budgetLeft\)/, "…and cap the application");
-  assert.match(route, /\[invoice\.id\]: appliedNow,/, "…which is what the link row records");
+  // 4. [HANDGESCHREVEN-BOEKING] The budget. This used to assert that the route capped the applied
+  //    amount in TypeScript — `Math.min(Math.abs(totalIncBtw), budgetLeft)` — and that the cap is
+  //    what the link row recorded. Both of those are gone, and the gate is stronger for it: the
+  //    cap was computed from an UNLOCKED read, so two requests (or one overlapping a confirm)
+  //    read the same "already assigned" and both wrote. The cap now happens inside
+  //    confirm_bank_payment, under the bank line's row lock, in the same transaction as the
+  //    allocation row. So what is asserted is the delegation and the ABSENCE of the hand-written
+  //    sequence — a route that quietly grew its own back would fail here, not in production.
+  assert.match(route, /from\("bank_tx_invoices"\)[\s\S]{0,200}\.eq\("transaction_id", transactionId\)/,
+    "prior links are still read — it is what makes the 409 and the review flag honest");
+  assert.match(route, /\.rpc as any\)\("confirm_bank_payment"/, "the booking goes through the payment door");
+  assert.doesNotMatch(route, /recordPaymentLinks/, "no hand-written allocation row beside the door");
+  assert.doesNotMatch(route, /from\("bank_transactions"\)[\s\S]{0,120}\.update\(/,
+    "no hand-written bank-line write beside the door");
+  assert.doesNotMatch(route, /status: [^,\n]*\?\s*"paid"/,
+    "the route may not decide 'paid' — only the door, which holds the lock, can know");
 
-  // 5. 'paid' only when actually covered; partial coverage says so.
-  assert.match(route, /fullySettled \? "paid" : "received"/, "status tells the truth about coverage");
+  // 5. 'paid' only when actually covered — now BY CONSTRUCTION. The invoice is created open and
+  //    the door promotes it, so there is no arrangement of failures that leaves a row claiming
+  //    settled with nothing settled. The expectation the route still computes is a REVIEW flag,
+  //    and it is named so: a reader must not mistake it for the money decision again.
+  assert.match(route, /status: isOutgoing \? "sent" : "received",/, "created open; the door pays it");
+  assert.match(route, /const expectedFullySettled = expectedApplied \+ 0\.005 >= Math\.abs\(totalIncBtw\)/,
+    "the JS number is an expectation, and says so in its name");
 
   // 6. The outgoing refusal also catches a split the gate itself dropped — otherwise the
   //    conservative fallback (gross at 0%) walks a sale past the refusal it sits above.
@@ -9851,7 +9867,12 @@ test("[ATTACH-REKENT] the attach-invoice door obeys the same money rules as ever
 
   // 7. Every fallback is flagged for a human: the amount-confidence channel that
   //    classifyImportHealth already turns into needs-review.
-  assert.match(route, /splitDropped \|\| amountWarning \|\| !fullySettled/, "fallbacks mark the row for review");
+  assert.match(route, /splitDropped \|\| amountWarning \|\| !expectedFullySettled/, "fallbacks mark the row for review");
+  // …and when the DOOR disagrees with that expectation, the door wins and the flag is corrected.
+  // Without this the one case the unlocked read gets wrong — a concurrent allocation between the
+  // read and the lock — is exactly the case that reaches no list as needing a human.
+  assert.match(route, /if \(!booked\.is_paid && expectedFullySettled\) \{/,
+    "a document the line turned out not to cover is still flagged");
 });
 
 test("[ASSURANTIE] insurance premium tax never reaches the deductible BTW column", () => {
@@ -11168,9 +11189,23 @@ test("[LINKS-WRITE-HONEST] the boolean these writers return is actually read", (
   // balance drifted instead of guessing.
   assert.match(unlink, /\.\.\.\(linksCleared \? \{\} : \{ links_not_cleared: true \}\),/);
 
+  // [HANDGESCHREVEN-BOEKING] attach-invoice was the third named call site, and it is gone —
+  // the same way bank-auto-confirm's entry went in [EEN-GELDMUTATIE], and for the same reason.
+  // This gate exists because recordPaymentLinks returns a boolean that was being dropped, so a
+  // failed link write was invisible; the strongest possible version of "the answer is read" is a
+  // route that never asks the question, because the allocation row is written inside the same
+  // transaction as the payment and cannot fail separately from it.
+  //
+  // So the assertion is the ABSENCE, and it names its replacement. A gate that kept asserting the
+  // old call would have gone red on a property that had become true in a stronger way — and the
+  // repair for that is never to delete the gate, it is to re-aim it at the new subject.
   const attach = code("src/app/api/bank/attach-invoice/route.ts");
-  assert.match(attach, /const linksRecorded = await recordPaymentLinks\(/);
-  assert.match(attach, /if \(!linksRecorded\) \{[\s\S]{0,200}?reportHandledFailure\(/);
+  assert.doesNotMatch(attach, /recordPaymentLinks/,
+    "attach-invoice books through confirm_bank_payment; a hand-written link write beside it is the defect this closed");
+  assert.match(attach, /\.rpc as any\)\("confirm_bank_payment"/, "…and that is where the allocation row comes from");
+  const regel = code("src/app/api/bank/line-invoice/route.ts");
+  assert.doesNotMatch(regel, /recordPaymentLinks/, "line-invoice likewise");
+  assert.match(regel, /\.rpc as any\)\("confirm_bank_payment"/, "…likewise");
 
   // ── The class, because the list missed one ──────────────────────────────────────────────────
   // This gate first named three call sites and pinned each. bank-auto-confirm was a FOURTH, and no
@@ -11204,7 +11239,11 @@ test("[LINKS-WRITE-HONEST] the boolean these writers return is actually read", (
       }
     }
   }
-  assert.ok(aanroepen >= 5, `only ${aanroepen} call sites seen; the scan must be broken`);
+  // The floor was 5 when attach-invoice and line-invoice each had a call. Both now book through
+  // the door instead, so three remain: /api/bank/confirm's deploy-window fallback and unlink's
+  // two. The number is a SCAN-IS-BROKEN check, not a target — it may only ever be lowered with
+  // the call sites that actually left, which is what this line records.
+  assert.ok(aanroepen >= 3, `only ${aanroepen} call sites seen; the scan must be broken`);
   assert.deepEqual(weggegooid, [],
     "these await one of the payment-link writers and drop the answer it returns. Both return a " +
     "boolean precisely so a failed write can be reported, and recompute_invoice_amount_paid " +
@@ -13382,8 +13421,49 @@ test("[REGEL-FACTUUR] no btw on a purchase without a document, the guard is aske
   assert.match(route, /const verdict = buildLineInvoice\(/, "the money rule is the pure module's, not the route's");
   assert.match(route, /readDoubleBookingGuard\(/, "a paid invoice of this amount nearby refuses the booking");
   assert.match(route, /if \(hold === "paid-invoice"\)/);
-  assert.match(route, /\.update\(\{ invoice_id: invoiceId, status: "matched" \}\)[\s\S]{0,200}\.eq\("status", "pending"\)\.is\("invoice_id", null\)/, "the link re-asserts the line is free");
-  assert.match(route, /recordPaymentLinks\(pipeline, user\.id, transactionId, \[invoiceId\], \{ \[invoiceId\]: d\.totalIncBtw \}\)/, "the join row carries the amount");
+  // [HANDGESCHREVEN-BOEKING] These two assertions used to read the route's own three statements:
+  // an UPDATE of the bank line filtered on `.eq("status","pending").is("invoice_id", null)`, and
+  // a recordPaymentLinks call carrying the amount. Both properties still hold — they moved into
+  // confirm_bank_payment, where they hold under the line's row lock instead of between two
+  // unlocked statements — so the gate follows them rather than mourning them.
+  //
+  // The `invoice_id IS NULL` half is the one that could have been LOST in the move, because the
+  // door only ever checked `status = 'pending'`. It is asserted against the SQL, in both files
+  // that declare the function, so a caller-side guard can never be the only thing holding it.
+  assert.match(route, /\.rpc as any\)\("confirm_bank_payment"/, "the booking is one atomic call");
+  assert.doesNotMatch(route, /from\("bank_transactions"\)[\s\S]{0,120}\.update\(/,
+    "no hand-written bank-line write beside the door");
+  assert.doesNotMatch(route, /recordPaymentLinks/, "no hand-written allocation row beside the door");
+  assert.doesNotMatch(route, /status: "paid"/, "the route may not create the invoice already paid");
+  for (const f of ["supabase/migrations/bank_confirm_atomic.sql",
+                   "supabase/migrations/bank_rpc_never_payable_states.sql"]) {
+    const body = functionBody(sqlNoComments(f), "confirm_bank_payment");
+    const lockAt = body.indexOf("FOR UPDATE");
+    const guardAt = body.indexOf("v_tx_invoice_id IS NOT NULL");
+    const writeAt = body.indexOf("UPDATE public.invoices");
+    assert.ok(lockAt > -1 && guardAt > -1 && writeAt > -1,
+      `${f}: the lock, the invoice_id guard and the first write must all be findable`);
+    assert.ok(lockAt < guardAt && guardAt < writeAt,
+      `${f}: the guard must sit AFTER the row lock and BEFORE the first write — a refusal may ` +
+      "never leave a partial allocation behind, and an unlocked check answers about a row that " +
+      "can change before the write");
+    // Not a blanket `invoice_id IS NULL`: that would refuse the second confirm of every
+    // multi-invoice payment, which is the flow /api/bank/confirm runs. What is refused is a line
+    // naming an invoice NO allocation row backs — the state attach-invoice's non-fatal link write
+    // used to leave behind, and against which the signed sibling sum reads zero.
+    assert.match(body, /AND v_tx_invoice_id <> p_invoice_id/,
+      `${f}: the line's own invoice must not refuse its own top-up`);
+    assert.match(body, /NOT EXISTS \([\s\S]{0,240}?l\.invoice_id = v_tx_invoice_id\)/,
+      `${f}: what makes it safe is a BACKING allocation row, not the column being null`);
+    assert.doesNotMatch(body, /v_tx_invoice_id IS NOT NULL\s*\n\s*THEN/,
+      `${f}: a blanket invoice_id refusal breaks the multi-invoice flow`);
+    // The refusal may carry none of the six substrings the callers triage on.
+    const refusal = body.slice(body.indexOf("HANDGESCHREVEN-BOEKING", guardAt));
+    for (const woord of TRIAGED_SUBSTRINGS) {
+      assert.ok(!refusal.slice(0, 160).includes(woord),
+        `${f}: the new refusal says "${woord}", which the callers read as a different refusal`);
+    }
+  }
   assert.match(route, /source: "created"/);
   assert.match(route, /_btw_withheld_no_document: d\.btwWithheldNoDocument/, "the reason for a 0 stays on the row");
   assert.match(route, /requireOwner\(/);
@@ -34118,6 +34198,452 @@ test("[NOOIT-BETAALBAAR] all three bank doors refuse the same never-payable stat
   }
 });
 
+// ─── [NOOIT-BETAALBAAR] The FOURTH door — the one the other three said already refused this ──────
+//
+// The three guards above each carry a comment reading "the same never-payable set that
+// isPayableInvoiceState and book_bank_batch already refuse". Measured against pg_proc, only half of
+// that was true:
+//
+//   · PRODUCTION's book_bank_batch DOES refuse it — prosrc md5 52f2d60a072f6f61b8e248831b53bd9a,
+//     the predicate at offset 1197, after the line's FOR UPDATE (766) and before the first write
+//     (2524);
+//   · NEITHER declaring file in this repository ever carried the line. `git log -S` over both finds
+//     nothing.
+//
+// So this was never "a door missing a guard". Re-applying either file to production would have
+// REMOVED a live money guard from the door that books whole batches — silently, because both copies
+// agreed with each other and nothing compared them to the database. The gate above cannot catch
+// that: it deliberately scopes itself to three doors and even asserts the owning migration does not
+// mention book_bank_batch.
+//
+// This door's SHAPE is genuinely different and the assertions follow the shape rather than forcing
+// it into the other one:
+//
+//   · it decides over a SET, not a scalar — one `count(*)` over unnest(p_invoice_ids) under the
+//     lock, and any bad row aborts the whole batch. There is no v_inv_status here to match on.
+//   · its refusal MUST carry "no longer payable". For the three scalar doors that substring is
+//     forbidden (a caller would read it as a different refusal); here it is the contract —
+//     bank-auto-confirm.ts:519-522 triages exactly this wording as an expected skip, and a rewording
+//     would turn every ordinary batch refusal into a reported data-integrity fault.
+//
+// Its two copies are compared with comments stripped AND per-line trailing whitespace trimmed,
+// because the two files' end-of-line comments differ by design and `sqlNoComments` leaves their
+// whitespace behind. That normalisation cannot hide the thing this guards: a predicate present in
+// one copy and absent from the other.
+
+const BATCH_DOOR = "book_bank_batch";
+const BATCH_FILES = [
+  "supabase/migrations/bank_confirm_atomic.sql",
+  "supabase/migrations/book_bank_batch_atomic.sql",
+] as const;
+
+/** Comments stripped, then every blank line dropped and trailing whitespace trimmed — see the note
+ *  above. `sqlNoComments` blanks a full-line comment rather than deleting the line, so two copies
+ *  that differ only in commentary differ by a run of empty lines. Measured on these two files: with
+ *  this normalisation they are equal, and the count of differing NON-BLANK lines is 0 — so nothing
+ *  it removes could be a predicate. */
+function sqlBodyTrimmed(path: string, fn: string): string {
+  return functionBody(sqlNoComments(path), fn)
+    .split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.length > 0).join("\n");
+}
+
+test("[NOOIT-BETAALBAAR] the batch door refuses the same set, in its own shape, before it writes", () => {
+  for (const file of BATCH_FILES) {
+    const body = functionBody(sqlNoComments(file), BATCH_DOOR);
+
+    // 1 — the guard exists and lists EXACTLY the declared set, read back out of the predicate
+    //     rather than pattern-matched, so a fourth state or a dropped one fails here.
+    const guard = body.match(/OR\s+i\.status\s+IN\s*\(([^)]*)\)/);
+    assert.ok(guard, `${BATCH_DOOR} in ${file} has no never-payable predicate on i.status`);
+    const listed = [...guard![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    assert.deepStrictEqual(listed, [...NEVER_PAYABLE].sort(),
+      `${BATCH_DOOR} in ${file} guards a different set than the declared contract`);
+
+    // 2 — under the lock, and before the money. Both bounds are cut on real code.
+    const lockAt = body.indexOf("FOR UPDATE");
+    const guardAt = body.indexOf(guard![0]);
+    const firstWrite = Math.min(
+      ...["UPDATE public.invoices", "UPDATE public.bank_transactions", "INSERT INTO public.bank_tx_invoices"]
+        .map((w) => { const i = body.indexOf(w); return i === -1 ? Number.MAX_SAFE_INTEGER : i; }),
+    );
+    assert.ok(lockAt > -1, `${BATCH_DOOR} in ${file} takes no row lock`);
+    assert.ok(firstWrite < Number.MAX_SAFE_INTEGER, `${BATCH_DOOR} in ${file} writes nothing — the cut is wrong`);
+    assert.ok(lockAt < guardAt, `${BATCH_DOOR} in ${file} guards BEFORE it locks — the state it read can move`);
+    assert.ok(guardAt < firstWrite,
+      `${BATCH_DOOR} in ${file} guards AFTER its first write — it would refuse a batch it already booked`);
+
+    // 3 — and the count it feeds actually refuses, with the class the callers triage on.
+    const refusal = body.slice(guardAt, guardAt + 600);
+    assert.match(refusal, /IF v_bad > 0 THEN[\s\S]*?RAISE EXCEPTION/,
+      `${BATCH_DOOR} in ${file} counts the bad rows and does not refuse them`);
+    assert.match(refusal, /ERRCODE = '55000'/,
+      `${BATCH_DOOR} in ${file} refuses with the wrong class`);
+
+    // 4 — the INVERSE of the three-door rule, and deliberately so: this wording IS the contract.
+    assert.match(refusal, /no longer payable/,
+      `${BATCH_DOOR} in ${file} reworded its refusal — bank-auto-confirm triages "no longer payable" ` +
+        `as an expected skip, so a new wording turns every ordinary batch refusal into a reported fault`);
+  }
+
+  // 5 — the two copies are the same function. Neither may carry the predicate alone.
+  assert.strictEqual(
+    sqlBodyTrimmed(BATCH_FILES[0], BATCH_DOOR), sqlBodyTrimmed(BATCH_FILES[1], BATCH_DOOR),
+    `${BATCH_DOOR} differs between ${BATCH_FILES[0]} and ${BATCH_FILES[1]} — apply order would decide which is real`,
+  );
+
+  // 6 — and there are EXACTLY these two copies. A third would silently win on apply order.
+  const MIGRATION_DIR = "supabase/migrations";
+  const declaring = readdirSync(MIGRATION_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => sqlNoComments(join(MIGRATION_DIR, f)).includes(`CREATE OR REPLACE FUNCTION public.${BATCH_DOOR}(`))
+    .map((f) => `${MIGRATION_DIR}/${f}`)
+    .sort();
+  assert.deepStrictEqual(declaring, [...BATCH_FILES].sort(),
+    `${BATCH_DOOR} is declared in ${declaring.length} migration(s) — ${declaring.join(", ")}`);
+});
+
+// ─── [VERPLAATS-TEKEN] A move may not change the SIGN of what a bank line has spent ──────────────
+//
+// move_invoice_payment is the only writer that REPOINTS an allocation, and it was the only one of
+// the paths that change a line's spend which took no lock on the line and read no line budget at
+// all. It guards the TARGET invoice's remaining room and nothing about the line.
+//
+// That matters because the line's budget is signed. A link either spends the line or gives money
+// back to it, decided by whether the invoice moves money the same way the line did. The function
+// refuses a creditnota TARGET but deliberately allows a creditnota SOURCE — opposite sides of that
+// test — so a move across them flipped the link from -a to +a and the line's spend rose by 2a.
+// Measured on a real PostgreSQL: a tied EUR 850 debit ended carrying EUR 1.150.
+//
+// What this gate holds is STRUCTURE, deliberately, and it is not a concurrency proof. That the
+// lock is taken in the right order is checkable here; that two connections interleave correctly is
+// not, and no permanent two-connection harness exists in this repository — see [GELIJKTIJDIG-VAST].
+
+const MOVE_FILES = [
+  "supabase/migrations/invoice_move_payment.sql",
+  "supabase/migrations/invoice_move_payment_creditnota_guard.sql",
+] as const;
+
+test("[VERPLAATS-TEKEN] the move locks link -> line -> invoices and refuses a sign flip before it writes", () => {
+  for (const file of MOVE_FILES) {
+    const body = functionBody(sqlNoComments(file), "move_invoice_payment");
+
+    // 1 — the three locks, in ONE fixed order. Cut on real code, and each marker asserted found:
+    //     an indexOf that may return -1 silently reorders everything below it.
+    const linkLock = body.indexOf("FROM public.bank_tx_invoices l");
+    const lineLock = body.indexOf("FROM public.bank_transactions t");
+    const invLock = body.indexOf("PERFORM 1 FROM public.invoices");
+    assert.ok(linkLock > -1, `move_invoice_payment in ${file} does not read the link row`);
+    assert.ok(lineLock > -1, `move_invoice_payment in ${file} never locks the parent bank line`);
+    assert.ok(invLock > -1, `move_invoice_payment in ${file} does not lock the invoices`);
+    assert.ok(linkLock < lineLock,
+      `move_invoice_payment in ${file} locks the bank line before the link row — the order is not fixed`);
+    assert.ok(lineLock < invLock,
+      `move_invoice_payment in ${file} locks the invoices before the bank line — the order is not fixed`);
+    for (const [what, at] of [["the link", linkLock], ["the bank line", lineLock], ["the invoices", invLock]] as const) {
+      assert.match(body.slice(at, at + 400), /FOR UPDATE/,
+        `move_invoice_payment in ${file} reads ${what} without FOR UPDATE`);
+    }
+
+    // 2 — the sign rule is computed for BOTH documents, in the same shape the four doors use.
+    for (const v of ["v_src_spends", "v_tgt_spends"]) {
+      assert.match(body, new RegExp(`${v}\\s*:=`),
+        `move_invoice_payment in ${file} does not compute ${v}`);
+    }
+    for (const v of ["v_src_spends", "v_tgt_spends"]) {
+      const at = body.indexOf(`${v} :=`);
+      const expr = body.slice(at, at + 260);
+      assert.match(expr, /'incoming'/, `${v} in ${file} does not read the direction`);
+      assert.match(expr, /'creditnota'/, `${v} in ${file} does not read the document type`);
+      assert.match(expr, /total_inc_btw|_signed/, `${v} in ${file} ignores a negative total`);
+      assert.match(expr, /v_tx_amount < 0/, `${v} in ${file} is not measured against the LINE's own sign`);
+    }
+
+    // 3 — and only a FLIP is refused. A comparison on anything but the two booleans would be a
+    //     different rule; an equality instead of IS DISTINCT FROM would pass NULL through.
+    const compare = body.match(/IF\s+v_src_spends\s+IS DISTINCT FROM\s+v_tgt_spends\s+THEN/);
+    assert.ok(compare, `move_invoice_payment in ${file} does not refuse exactly the sign flip`);
+
+    // 4 — under the locks and BEFORE the first write. A refusal must leave everything as it found it.
+    const guardAt = body.indexOf(compare![0]);
+    const firstWrite = Math.min(
+      ...["UPDATE public.bank_tx_invoices", "UPDATE public.bank_transactions", "UPDATE public.invoices"]
+        .map((w) => { const i = body.indexOf(w); return i === -1 ? Number.MAX_SAFE_INTEGER : i; }),
+    );
+    assert.ok(firstWrite < Number.MAX_SAFE_INTEGER, `move_invoice_payment in ${file} writes nothing — the cut is wrong`);
+    assert.ok(invLock < guardAt, `move_invoice_payment in ${file} judges the sign before it holds the locks`);
+    assert.ok(guardAt < firstWrite,
+      `move_invoice_payment in ${file} refuses AFTER its first write — it would undo a move it already made`);
+
+    // 5 — the wording says nothing a caller reads as a DIFFERENT refusal.
+    const refusal = body.slice(guardAt, guardAt + 400);
+    assert.match(refusal, /RAISE EXCEPTION '\[VERPLAATS-TEKEN\]/, `${file} tests the sign and does not refuse it`);
+    assert.match(refusal, /ERRCODE = '55000'/, `${file} refuses with the wrong class`);
+    for (const s of TRIAGED_SUBSTRINGS) {
+      assert.ok(!refusal.toLowerCase().includes(s),
+        `move_invoice_payment in ${file} words its refusal with "${s}" — a caller would triage it as that other refusal`);
+    }
+  }
+
+  // 6 — the two declaring copies are the same function. They were NOT before this: the creditnota
+  //     guard shipped as a new file and was never back-ported, so applying the older one removed a
+  //     live money guard — the same shape book_bank_batch was in.
+  assert.strictEqual(
+    sqlBodyTrimmed(MOVE_FILES[0], "move_invoice_payment"), sqlBodyTrimmed(MOVE_FILES[1], "move_invoice_payment"),
+    `move_invoice_payment differs between ${MOVE_FILES[0]} and ${MOVE_FILES[1]} — apply order would decide which is real`,
+  );
+
+  // 7 — and there are EXACTLY these two, discovered rather than assumed.
+  const MIGRATION_DIR = "supabase/migrations";
+  const declaring = readdirSync(MIGRATION_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => sqlNoComments(join(MIGRATION_DIR, f)).includes("CREATE OR REPLACE FUNCTION public.move_invoice_payment("))
+    .map((f) => `${MIGRATION_DIR}/${f}`)
+    .sort();
+  assert.deepStrictEqual(declaring, [...MOVE_FILES].sort(),
+    `move_invoice_payment is declared in ${declaring.length} migration(s) — ${declaring.join(", ")}`);
+
+  // 8 — and the owner reads a sentence about it, not the generic "try again". Matched on the RPC's
+  //     own fragment, the same convention [MOVE-CREDITNOTA] uses.
+  const beslissing = readFileSync("src/lib/payment-move.ts", "utf8");
+  assert.match(beslissing, /m\.includes\("change what the bank line has spent"\)/,
+    "moveFailureText does not recognise the sign refusal — the owner would be told to retry, which cannot work");
+});
+
+// ─── [ALLOCATIE-DEUR] bank_tx_invoices is read-only to a logged-in session ───────────────────────
+//
+// The table had three policies for `authenticated`: select_own, insert_own and delete_own, each
+// scoped to `user_id = auth.uid()`. Scoped is not guarded. The INSERT check asked one thing — that
+// the row carry your own user_id — and nothing about the bank line it hangs on: no budget, no
+// ownership of the transaction or invoice it names, no lock, no recompute. One POST through
+// PostgREST could therefore write an allocation past what a line has, around every payment door.
+//
+// Removing them costs nothing, and THAT is the part a gate has to keep true. Measured over src/ at
+// the time: every write to this table runs on the service-role `pipeline` client or inside a
+// SECURITY DEFINER function, and not one uses the session client. The day someone adds a session
+// write, this gate goes red instead of the write silently failing in production.
+//
+// The behavioural half — what the role may actually DO — is not checkable here and lives in
+// tests/sql/bank_tx_invoices_policies.test.sql, which tries it under SET ROLE authenticated.
+
+const LINKS_TABLE = "bank_tx_invoices";
+
+/** Every .ts/.tsx under a directory, tests excluded — the same walk several gates above use. */
+function walkSourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir)) {
+    const path = `${dir}/${e}`;
+    if (statSync(path).isDirectory()) out.push(...walkSourceFiles(path));
+    else if (/\.tsx?$/.test(path)) out.push(path);
+  }
+  return out;
+}
+
+test("[ALLOCATIE-DEUR] no application code writes the allocation table with a session client", () => {
+  const files = walkSourceFiles("src").filter((f) => !f.includes(".test."));
+  const offenders: string[] = [];
+  let writeSites = 0;
+
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    if (!src.includes(LINKS_TABLE)) continue;
+    // Every `.from("bank_tx_invoices")` whose next chained call is a mutation. The receiver is
+    // whatever precedes `.from(`, which is the client the write runs on.
+    const re = new RegExp(
+      `(\\w+)\\s*\\n?\\s*\\.from\\(["']${LINKS_TABLE}["']\\)[\\s\\S]{0,400}?\\.(insert|upsert|update|delete)\\(`,
+      "g",
+    );
+    for (const m of src.matchAll(re)) {
+      // Only count it when the mutation is the FIRST chained call after .from(, not a later one in
+      // an unrelated statement the 400-char window ran into.
+      const after = src.slice(m.index! + m[0].lastIndexOf(".from("));
+      const firstCall = after.match(/\.from\([^)]*\)\s*\n?\s*\.(\w+)\(/);
+      if (!firstCall || !["insert", "upsert", "update", "delete"].includes(firstCall[1])) continue;
+      writeSites += 1;
+      const receiver = m[1];
+      // `pipeline` is the service-role client (supabase-pipeline.ts, bypasses RLS). `client` is
+      // bank-tx-links.ts's parameter, whose call sites are checked separately below.
+      if (receiver !== "pipeline" && receiver !== "client") {
+        offenders.push(`${file}: ${receiver}.from("${LINKS_TABLE}").${firstCall[1]}(...)`);
+      }
+    }
+  }
+
+  assert.ok(writeSites >= 4,
+    `only ${writeSites} write site(s) found — the matcher stopped seeing them, so this gate proves nothing`);
+  assert.deepStrictEqual(offenders, [],
+    `these write the allocation table with something other than the service-role client:\n  ${offenders.join("\n  ")}`);
+
+  // bank-tx-links.ts takes its client as a parameter, so the receiver check above cannot decide it.
+  // Every call site must hand it `pipeline`.
+  for (const fn of ["recordPaymentLinks", "clearPaymentLinks"]) {
+    const callers = files.filter((f) => !f.endsWith("bank-tx-links.ts"))
+      .flatMap((f) => [...readFileSync(f, "utf8").matchAll(new RegExp(`await ${fn}\\(\\s*\\n?\\s*(\\w+)`, "g"))]
+        .map((m) => ({ file: f, arg: m[1] })));
+    assert.ok(callers.length > 0, `${fn} has no call sites — the matcher is wrong, not the code`);
+    for (const c of callers) {
+      assert.strictEqual(c.arg, "pipeline",
+        `${c.file} calls ${fn} with "${c.arg}" — only the service-role client may write allocations`);
+    }
+  }
+});
+
+// ─── [KOLOMRECHT] A session writes three columns on bank_transactions, and no others ────────────
+//
+// [ALLOCATIE-DEUR] closed the CHILD table. The parent was still fully session-writable, and every
+// effect the child's policies used to allow was reachable one level up — measured on production,
+// rollback-only: a session could set invoice_id and status, flip a real pending line to 'matched',
+// and DELETE a booked line, taking its allocations with it. RLS scopes ROWS; those two columns sit
+// in the same row the owner may legitimately edit for categorisation.
+//
+// The privilege is now column-scoped. What a gate can hold is the other half of that bargain: that
+// no application path ever needs a fourth column, and that no migration quietly hands the whole
+// table back. The behavioural half — what the role may actually DO — lives in
+// tests/sql/bank_transactions_column_grant.test.sql, which tries it under SET ROLE authenticated.
+
+const TX_TABLE = "bank_transactions";
+/** The only columns a logged-in session may write. Same list as the migration's GRANT. */
+const SESSION_WRITABLE = ["category", "category_source", "category_confirmed"];
+
+test("[KOLOMRECHT] no session write to the bank line touches anything but the category columns", () => {
+  const files = walkSourceFiles("src").filter((f) => !f.includes(".test."));
+  const offenders: string[] = [];
+  let sessionWrites = 0;
+
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    if (!src.includes(TX_TABLE)) continue;
+    const re = new RegExp(`(\\w+)\\s*\\n?\\s*\\.from\\(["']${TX_TABLE}["']\\)[\\s\\S]{0,300}?\\.(update|upsert|insert)\\(\\s*(\\{[\\s\\S]{0,400}?\\})`, "g");
+    for (const m of src.matchAll(re)) {
+      const [, receiver, , objectLiteral] = m;
+      // `pipeline` is the service-role client and bypasses RLS entirely; this gate is about the
+      // SESSION client, which is what the column grant governs.
+      if (receiver === "pipeline") continue;
+      sessionWrites += 1;
+      const keys = [...objectLiteral.matchAll(/(?:^|[{,])\s*(?:\/\/[^\n]*\n\s*)*([a-z_][a-z0-9_]*)\s*:/gi)].map((k) => k[1]);
+      const forbidden = keys.filter((k) => !SESSION_WRITABLE.includes(k));
+      if (forbidden.length > 0) {
+        offenders.push(`${file}: ${receiver}.from("${TX_TABLE}") writes ${forbidden.join(", ")}`);
+      }
+    }
+  }
+
+  assert.ok(sessionWrites >= 3,
+    `only ${sessionWrites} session write(s) to ${TX_TABLE} found — the matcher stopped seeing them, ` +
+      "so this gate proves nothing. Three are expected, all in /api/bank/categorize.");
+  assert.deepStrictEqual(offenders, [],
+    `these write a column the session grant does not cover — the write will fail with 42501 in ` +
+      `production:\n  ${offenders.join("\n  ")}`);
+});
+
+test("[KOLOMRECHT] no migration hands the whole bank line back to a session", () => {
+  const MIGRATION_DIR = "supabase/migrations";
+  const files = readdirSync(MIGRATION_DIR).filter((f) => f.endsWith(".sql"));
+  const offenders: string[] = [];
+  for (const f of files) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f)).replace(/\s+/g, " ");
+    // A table-wide UPDATE grant, i.e. one with no column list between UPDATE and ON.
+    if (new RegExp(`GRANT[^;]*\\bUPDATE\\s+(?:,[^;(]*)?ON\\s+(?:public\\.)?${TX_TABLE}\\b[^;]*TO[^;]*authenticated`, "i").test(sql)) {
+      offenders.push(`${f} grants table-wide UPDATE on ${TX_TABLE} to authenticated`);
+    }
+    if (new RegExp(`GRANT\\s+ALL[^;]*ON\\s+(?:public\\.)?${TX_TABLE}\\b[^;]*TO[^;]*authenticated`, "i").test(sql)) {
+      offenders.push(`${f} grants ALL on ${TX_TABLE} to authenticated`);
+    }
+    if (new RegExp(`CREATE POLICY\\s+${TX_TABLE}_delete_own\\b`, "i").test(sql)) {
+      offenders.push(`${f} re-creates ${TX_TABLE}_delete_own`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    `apply order would decide whether the bank line is session-writable again:\n  ${offenders.join("\n  ")}`);
+
+  // …and the column grant is still created somewhere, or the categorise screen stops working.
+  const granting = files.filter((f) => {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f)).replace(/\s+/g, " ");
+    return new RegExp(`GRANT\\s+UPDATE\\s*\\([^)]*\\)\\s*ON\\s+(?:public\\.)?${TX_TABLE}`, "i").test(sql);
+  });
+  assert.ok(granting.length > 0,
+    `nothing grants the column-scoped UPDATE on ${TX_TABLE} — /api/bank/categorize would fail 42501`);
+  // The granted list must be exactly the three, read back out of the migration rather than assumed.
+  const granted = sqlNoComments(join(MIGRATION_DIR, granting[0])).replace(/\s+/g, " ")
+    .match(new RegExp(`GRANT\\s+UPDATE\\s*\\(([^)]*)\\)\\s*ON\\s+(?:public\\.)?${TX_TABLE}`, "i"))![1]
+    .split(",").map((c) => c.trim()).sort();
+  assert.deepStrictEqual(granted, [...SESSION_WRITABLE].sort(),
+    `the migration grants UPDATE on ${granted.join(", ")} — the contract above names a different set`);
+});
+
+test("[ALLOCATIE-DEUR] a third identical copy forces a new ruling, it is not chosen by apply order", () => {
+  // [VERPLAATS-TEKEN] made the two move_invoice_payment declarations byte-identical on purpose.
+  // migration-inventory's newest-version heuristic looks for the version whose tokens are a strict
+  // SUPERSET of the others, and identical bodies have none — so the function fell back to being
+  // measured by EXISTENCE, which is the measurement that once reported two unrun migrations as
+  // applied, one of them a money guard.
+  //
+  // The fix names the newest file in GELIJKE_BODY_NIEUWSTE rather than deriving it. That is only
+  // safe while the named copy-set is still the real one: a THIRD identical declaration makes the
+  // old ruling an assumption again, and apply order would quietly decide. So the set is recorded
+  // beside the ruling, and this gate holds the recording to what is on disk.
+  const MIGRATION_DIR = "supabase/migrations";
+  const bodies = new Map<string, Map<string, string>>();
+  for (const f of readdirSync(MIGRATION_DIR).filter((x) => x.endsWith(".sql"))) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f));
+    for (const m of sql.matchAll(/CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\s*\([\s\S]*?\bAS \$\$([\s\S]*?)\$\$;/g)) {
+      const fn = m[1].toLowerCase();
+      if (!bodies.has(fn)) bodies.set(fn, new Map());
+      bodies.get(fn)!.set(f, m[2]);
+    }
+  }
+  const identical = [...bodies].filter(([, byFile]) =>
+    byFile.size > 1 && new Set(byFile.values()).size === 1);
+  assert.ok(identical.length > 0,
+    "no function is declared identically by two migrations any more — this gate has nothing to hold, " +
+      "so either the matcher broke or GELIJKE_BODY_NIEUWSTE should go");
+
+  const script = readFileSync("scripts/migration-inventory.ts", "utf8");
+  let held = 0;
+  for (const [fn, byFile] of identical) {
+    const ruling = script.match(new RegExp(`\\b${fn}:\\s*\\{([\\s\\S]*?)\\n  \\},`));
+    if (!ruling) continue;   // not a named family: it keeps the measurement it always had
+    const newest = ruling[1].match(/nieuwste:\s*"([a-z0-9_]+\.sql)"/)?.[1];
+    const copyBlock = ruling[1].match(/kopieen:\s*\[([\s\S]*?)\]/)?.[1];
+    assert.ok(newest, `GELIJKE_BODY_NIEUWSTE.${fn} records no newest file`);
+    assert.ok(copyBlock !== undefined, `GELIJKE_BODY_NIEUWSTE.${fn} records no copy set`);
+    const recorded = [...copyBlock!.matchAll(/"([a-z0-9_]+\.sql)"/g)].map((m) => m[1]).sort();
+    const onDisk = [...byFile.keys()].sort();
+
+    // A third declaration appearing makes this red and names it, instead of riding the old ruling.
+    assert.deepStrictEqual(recorded, onDisk,
+      `${fn} is declared identically by ${onDisk.length} migration(s) on disk, but the ruling records ` +
+        `${recorded.length}. Identical text cannot say which is newest, so a new copy needs a new ` +
+        `ruling — apply order must not decide.\n  on disk:  ${onDisk.join(", ")}\n  recorded: ${recorded.join(", ")}`);
+    assert.ok(onDisk.includes(newest!), `GELIJKE_BODY_NIEUWSTE.${fn} names ${newest}, which does not declare it`);
+    held += 1;
+  }
+  assert.ok(held > 0,
+    "no identical-body family is named in GELIJKE_BODY_NIEUWSTE any more — this gate asserted nothing");
+});
+
+test("[ALLOCATIE-DEUR] no migration creates the write policies, in any apply order", () => {
+  const MIGRATION_DIR = "supabase/migrations";
+  const files = readdirSync(MIGRATION_DIR).filter((f) => f.endsWith(".sql"));
+  const creators: string[] = [];
+  for (const f of files) {
+    const sql = sqlNoComments(join(MIGRATION_DIR, f));
+    for (const pol of [`${LINKS_TABLE}_insert_own`, `${LINKS_TABLE}_delete_own`]) {
+      if (new RegExp(`CREATE POLICY\\s+${pol}\\b`).test(sql)) creators.push(`${f} creates ${pol}`);
+    }
+  }
+  assert.deepStrictEqual(creators, [],
+    `a migration re-creates a write policy on ${LINKS_TABLE}; apply order would decide whether the ` +
+      `door is open:\n  ${creators.join("\n  ")}`);
+
+  // …and the SELECT policy is still created somewhere, or the screens go blank.
+  const selectCreators = files.filter((f) =>
+    new RegExp(`CREATE POLICY\\s+${LINKS_TABLE}_select_own\\b`).test(sqlNoComments(join(MIGRATION_DIR, f))));
+  assert.ok(selectCreators.length > 0,
+    `nothing creates ${LINKS_TABLE}_select_own — the browser read on /dashboard/facturen would return nothing`);
+});
+
+
+
 // ─── [RECONCILE-VOLGORDE] The reconcile circle has one owner, and the two orchestrators obey it ──
 //
 // Measured before this existed: /api/cron/reconcile ran five passes and POST /api/reconcile/run ran
@@ -34513,4 +35039,150 @@ test("[LIJN-BUDGET] the two copies of apply_bank_payment stay byte-identical", (
   const [a, b] = LIJN_BUDGET_DOORS.map((f) => functionBody(sqlNoComments(f), "apply_bank_payment"));
   assert.equal(a, b,
     "the two declarations of apply_bank_payment have drifted; whichever migration runs last wins");
+});
+
+// ─── [HANDGESCHREVEN-BOEKING] The two hand-written bank bookings go through the door ──────────
+//
+// /api/bank/line-invoice and /api/bank/attach-invoice each wrote a bank allocation BY HAND: an
+// INSERT of an invoice already marked paid, an UPDATE of the bank line, and an INSERT into
+// bank_tx_invoices — three statements, three transactions, no row lock anywhere between them.
+//
+// Three consequences, and none of them was theoretical:
+//
+//   · the budget was read in TypeScript, unlocked, one statement before the write, so two
+//     requests (or one overlapping a confirm) read the same "already assigned" and both wrote;
+//   · the allocation write was LAST and reported-but-swallowed, so the ordinary outcome of a
+//     failure there was an invoice standing settled with no link to the money that settled it —
+//     and recompute_invoice_amount_paid would later re-derive amount_paid from the links it can
+//     find, none, and re-open the invoice at its full total;
+//   · what held the middle statement together was a hand-written compensating DELETE, which is a
+//     rollback that can itself fail.
+//
+// attach-invoice's own header said so and recorded the fix as deferred: "De race sluiten kan
+// alleen een atomaire RPC." This is that RPC — confirm_bank_payment, which /api/bank/confirm and
+// the auto-confirm pass already book through. No new door was built for it.
+//
+// What this gate watches is the thing that would quietly come back: a route growing its own
+// second payment-write path beside the door, which is exactly how the drift started.
+const HANDGESCHREVEN_DOORS = [
+  "src/app/api/bank/line-invoice/route.ts",
+  "src/app/api/bank/attach-invoice/route.ts",
+] as const;
+
+test("[HANDGESCHREVEN-BOEKING] neither route writes a bank allocation by hand any more", () => {
+  for (const f of HANDGESCHREVEN_DOORS) {
+    const route = code(f);
+
+    // 1 — the door is called, exactly once. Twice would be two money decisions on one request.
+    const calls = [...route.matchAll(/\.rpc as any\)\("confirm_bank_payment"/g)];
+    assert.equal(calls.length, 1, `${f}: the payment must be one call, not ${calls.length}`);
+
+    // 2 — with the SESSION client, the authority /api/bank/confirm books with. The function is
+    //     SECURITY DEFINER and checks auth.uid() against p_user_id; the owner's own uid is what
+    //     lets the accountant-'verwerkt' trigger fire on the invoices write. A service-role call
+    //     here would type-check, run, and silently book with no actor.
+    assert.match(route, /await \(supabase\.rpc as any\)\("confirm_bank_payment"/,
+      `${f}: the money write must carry the owner's own uid, not the pipeline client's absence of one`);
+
+    // 3 — and NOTHING of the hand-written sequence is left beside it.
+    assert.doesNotMatch(route, /recordPaymentLinks/, `${f}: no hand-written allocation row`);
+    assert.doesNotMatch(route, /from\("bank_tx_invoices"\)[\s\S]{0,160}\.(insert|upsert|update|delete)\(/,
+      `${f}: no direct write to the allocation table`);
+    assert.doesNotMatch(route, /from\("bank_transactions"\)[\s\S]{0,160}\.update\(/,
+      `${f}: the bank line's status and invoice_id are the door's to write`);
+    assert.doesNotMatch(route, /marked_paid_at: new Date\(\)/,
+      `${f}: 'paid' and its timestamps belong to the transaction that moves the money`);
+    assert.doesNotMatch(route, /payment_method: "bank"/,
+      `${f}: likewise — the door writes it, or nothing does`);
+
+    // 4 — the only rollback left deletes an INVOICE the route created a moment earlier. That is a
+    //     document that never became a payment, not a payment being undone: the distinction is
+    //     the whole point, and a compensating write to invoices' MONEY columns would erase it.
+    assert.match(route, /from\("invoices"\)\s*\.delete\(\)|from\("invoices"\)\.delete\(\)/,
+      `${f}: a refused booking must not leave its invoice behind`);
+    assert.doesNotMatch(route, /from\("invoices"\)[\s\S]{0,200}\.update\(\{[\s\S]{0,200}amount_paid/,
+      `${f}: no compensating payment write — that is the path this slice removed`);
+  }
+
+  // 5 — the routes read the line's siblings BEFORE the call and refuse early. That read is
+  //     unlocked and cannot be the enforcement, but it is what makes the owner's 409 a true
+  //     sentence instead of the door's "payment fully applied" on a line nothing was applied to.
+  assert.match(code("src/app/api/bank/attach-invoice/route.ts"), /if \(budgetLeft <= 0\.01\) \{/,
+    "attach-invoice's own floor is the door's floor");
+  assert.match(code("src/lib/line-invoice.ts"), /Math\.abs\(amount\) <= 0\.01/,
+    "line-invoice's own floor is the door's floor");
+});
+
+test("[HANDGESCHREVEN-BOEKING] the door locks the line BEFORE it measures the siblings", () => {
+  // Both routes now hand their whole money decision to this function, so the ORDER inside it is
+  // the whole of their concurrency safety. Measured with two real connections on one EUR 100 line
+  // and two EUR 100 invoices: with FOR UPDATE, B waits, re-reads, and comes back empty — EUR 100
+  // allocated, one link row. With FOR UPDATE removed, both commit — EUR 200 allocated against a
+  // EUR 100 line, two link rows, two invoices standing paid.
+  //
+  // A single-session test cannot see this at all: one connection never blocks on itself, so the
+  // sibling sum is correct either way. Hence a STRUCTURAL assertion here, beside the behavioural
+  // one — the lock must be taken on the bank line before anything is read that the lock protects,
+  // and before the invoice_id claim that decides whether this call may proceed.
+  for (const f of ["supabase/migrations/bank_confirm_atomic.sql",
+                   "supabase/migrations/bank_rpc_never_payable_states.sql"]) {
+    const body = functionBody(sqlNoComments(f), "confirm_bank_payment");
+    const lineLock = body.indexOf("FROM public.bank_transactions");
+    assert.ok(lineLock > -1, `${f}: the bank line is not read at all`);
+    const lockAt = body.indexOf("FOR UPDATE", lineLock);
+    const claimAt = body.indexOf("v_tx_invoice_id IS NOT NULL");
+    const siblingAt = body.indexOf("FROM public.bank_tx_invoices l");
+    const firstWrite = body.indexOf("UPDATE public.invoices");
+    assert.ok(lockAt > -1, `${f}: the bank line is read WITHOUT a row lock`);
+    assert.ok(siblingAt > -1, `${f}: the sibling allocations are not read`);
+    assert.ok(firstWrite > -1, `${f}: the invoice write is not where it was`);
+    assert.ok(lockAt < claimAt,
+      `${f}: the invoice_id claim is decided on an UNLOCKED read of the line`);
+    assert.ok(lockAt < siblingAt,
+      `${f}: the sibling sum is read before the line is locked — a concurrent booking can ` +
+      "invalidate it between the read and the write, which is the whole defect");
+    assert.ok(siblingAt < firstWrite,
+      `${f}: money is written before the budget that bounds it has been measured`);
+  }
+});
+
+test("[HANDGESCHREVEN-BOEKING] one cent is one number, on both sides of the seam", () => {
+  // The routes refuse at EUR 0.01 because the door does, and the door does because v_eps — a
+  // ROUNDING tolerance, "covered within a cent counts as paid" — is the same constant that
+  // decides whether a line still has anything worth giving. Two constants that must agree and
+  // live in two languages are two constants that will disagree, so this asserts them together.
+  //
+  // Measured in production before this was chosen: the only line at or under a cent is a EUR 0.01
+  // Mollie account-verification deposit (pending, unlinked); no invoice anywhere has a total that
+  // small; and no allocation has ever been written from such a line. Nothing historical moves.
+  for (const f of ["supabase/migrations/bank_confirm_atomic.sql",
+                   "supabase/migrations/bank_rpc_never_payable_states.sql"]) {
+    const body = functionBody(sqlNoComments(f), "confirm_bank_payment");
+    assert.match(body, /v_eps\s+numeric := 0\.01;/, `${f}: the door's floor`);
+    assert.match(body, /IF v_available <= v_eps THEN/, `${f}: …and that it is what refuses a spent line`);
+  }
+  // Half a cent is what both routes used to accept, and it is now nowhere near this decision.
+  assert.doesNotMatch(code("src/lib/line-invoice.ts"), /Math\.abs\(amount\) < 0\.005/,
+    "the old half-cent floor would accept a line the door then refuses, with the wrong sentence");
+  assert.doesNotMatch(code("src/app/api/bank/attach-invoice/route.ts"), /budgetLeft <= 0\.005/,
+    "likewise on the attach door");
+});
+
+test("[HANDGESCHREVEN-BOEKING] the two copies of confirm_bank_payment stay byte-identical", () => {
+  // Same reason as every other twice-declared function here: the fix goes into one file, the
+  // header explains the reasoning, and the other declaration is left alone — because nothing in
+  // the repo runs either of them. Whichever migration lands last is what production gets.
+  const [a, b] = ["supabase/migrations/bank_confirm_atomic.sql",
+                  "supabase/migrations/bank_rpc_never_payable_states.sql"]
+    .map((f) => {
+      const raw = readFileSync(f, "utf8");
+      const start = raw.indexOf("CREATE OR REPLACE FUNCTION public.confirm_bank_payment");
+      assert.ok(start > -1, `${f} no longer declares confirm_bank_payment`);
+      const end = raw.indexOf("\n$$;", start);
+      assert.ok(end > start, `${f}: the body is not closed — the window would run to end of file`);
+      return raw.slice(start, end + 4);
+    });
+  assert.equal(a, b,
+    "the two declarations of confirm_bank_payment have diverged. Comments included: a difference " +
+    "in the REASONING is how the next reader learns the wrong thing about the copy they opened.");
 });

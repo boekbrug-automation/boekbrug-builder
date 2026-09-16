@@ -20,7 +20,13 @@ CREATE TABLE public.bank_transactions (
   amount     numeric,      -- SIGNED: negative is money out
   date       date,
   status     text,
-  invoice_id uuid
+  invoice_id uuid,
+  -- [KOLOMRECHT] The only three columns a logged-in session may write on this table. They are here
+  -- because the privilege boundary is measured against the REAL shape: a column grant cannot be
+  -- tested on a table that lacks the columns it names.
+  category           text,
+  category_source    text,
+  category_confirmed boolean
 );
 
 CREATE TABLE public.invoices (

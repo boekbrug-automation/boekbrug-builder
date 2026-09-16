@@ -40,8 +40,6 @@ import { gateFairUseForRead } from "@/lib/fair-use-gate";
 import { looksLikeInvoiceXmlBytes, E_INVOICE_XML_MIME } from "@/lib/e-invoice";
 import { normalizeToIso, findSemanticDuplicate, normalizeInvoiceNumber, normalizeVendor } from "@/lib/safecore";
 import { collectPossibleDuplicate } from "@/lib/possible-duplicate-collect";
-import { recordPaymentLinks } from "@/lib/bank-tx-links";
-import { reportHandledFailure } from "@/lib/report-handled";
 import { allocatedOnLine } from "@/lib/bank-line-budget";
 import { readOverApplied, overAppliedNotice } from "@/lib/bank-overapplied";
 import { fetchAllRowsForIds } from "@/lib/supabase-paginate";
@@ -730,7 +728,10 @@ async function runAttachInvoice(req: NextRequest) {
     );
   }
   const budgetLeft = Math.max(0, bankAmount - spent.allocated);
-  if (budgetLeft <= 0.005) {
+  // [HANDGESCHREVEN-BOEKING] One cent, not half a cent — the floor confirm_bank_payment applies
+  // to the same number under the row lock (its v_eps). Repeated here so the owner reads THIS
+  // sentence, which names the actual situation, rather than the door's "payment fully applied".
+  if (budgetLeft <= 0.01) {
     return NextResponse.json(
       {
         error:
@@ -739,12 +740,16 @@ async function runAttachInvoice(req: NextRequest) {
       { status: 409 },
     );
   }
-  // The invoice keeps ITS OWN total (the document is the truth about what was billed); only the
-  // APPLIED amount is capped by what the line still has. A document bigger than the remaining
-  // budget is then genuinely partially paid — and says so, instead of claiming 'paid' with money
-  // the line never had.
-  const appliedNow = Math.min(Math.abs(totalIncBtw), budgetLeft);
-  const fullySettled = appliedNow + 0.005 >= Math.abs(totalIncBtw);
+  // [HANDGESCHREVEN-BOEKING] These two are an EXPECTATION, not the booking. The invoice keeps ITS
+  // OWN total (the document is the truth about what was billed) and the applied amount is capped
+  // by what the line still has — but that cap is decided by confirm_bank_payment under the line's
+  // row lock, because this read is unlocked and a concurrent confirm can invalidate it between
+  // here and the write. What they are still used for is the review flag below: a document this
+  // line cannot fully cover is one a human must look at, and that is worth marking from the best
+  // knowledge available at insert time. The door's own answer corrects it afterwards if it
+  // disagrees.
+  const expectedApplied = Math.min(Math.abs(totalIncBtw), budgetLeft);
+  const expectedFullySettled = expectedApplied + 0.005 >= Math.abs(totalIncBtw);
 
   const isOutgoing = direction === "outgoing";
   const { data: invoice, error: dbError } = await pipeline
@@ -753,29 +758,21 @@ async function runAttachInvoice(req: NextRequest) {
       sender_id: isOutgoing ? user.id : null,
       receiver_id: isOutgoing ? null : user.id,
       direction,
-      // Attached to a real, visible bank payment — maar alleen "paid" wanneer het resterende
-      // budget van de bankregel het document ook echt dekt. Zie [BANK-BUDGET] hierboven.
+      // [HANDGESCHREVEN-BOEKING] Created OPEN. Whether this document is covered by the line is a
+      // question only confirm_bank_payment can answer correctly, because only it holds the line's
+      // row lock while it asks — so 'paid', amount_paid, payment_method, marked_paid_at and
+      // payment_date are written by the door, in the same transaction as the allocation row, or
+      // not at all. On partial coverage the invoice stays open at this status with amount_paid
+      // set and no payment_method, which is what it is: an invoice this payment part-settled.
       // (Geen apostrof in dit commentaar: de [BRON-VOCABULAIRE]-scanner volgt quotes door de
       // object-body heen en een ongepaarde apostrof slokte de source-regel hieronder op.)
-      status: fullySettled ? "paid" : "received",
-      payment_method: "bank",
-      marked_paid_at: new Date().toISOString(),
-      // [PARTIAL-PAY] The MONEY side of 'paid', written here rather than left to a reversal.
-      //
-      // status said paid and amount_paid stayed at its 0 default, and the two are read by
-      // different things. recompute_invoice_amount_paid re-derives amount_paid from Σ
-      // amount_applied — but it runs on UNLINK, so until someone undid this attachment the row
-      // claimed to be settled and showed nothing settled. Every reader that asks "what does this
-      // invoice still owe" answers with the full total: payment-plan.ts's openOf (total − paid),
-      // the money invariants, and any screen offering it up to be paid AGAIN out of a second bank
-      // line. The one that matters most is the last: this invoice exists because a payment was
-      // already seen on the statement.
-      //
-      // Set to the invoice's own total, which is exactly what this route writes on the link row a
-      // few dozen lines down — same number, same reason, and now they agree from the first moment
-      // instead of only after a reversal.
-      amount_paid: appliedNow,
-      payment_date: normalizeToIso(tx.date) ?? invoiceDate,
+      status: isOutgoing ? "sent" : "received",
+      // [PARTIAL-PAY] amount_paid and status must agree from the first moment — a row that says
+      // paid and shows nothing settled is read as fully open by payment-plan.ts's openOf, by the
+      // money invariants, and by every screen that could offer it up to be paid a SECOND time out
+      // of another bank line. That agreement is now structural rather than careful: both fields
+      // are written by the one statement that decides the amount, so there is no arrangement of
+      // failures that leaves one without the other.
       source: "upload",
       client_name: verification.vendor || (isOutgoing ? "Onbekende klant" : "Onbekende afzender"),
       invoice_date: invoiceDate,
@@ -795,7 +792,7 @@ async function runAttachInvoice(req: NextRequest) {
       // coverage all mean a human must look. amount < 0.7 is the existing channel:
       // classifyImportHealth turns it into needs-review on every list this row appears on.
       field_confidence:
-        splitDropped || amountWarning || !fullySettled || btwZeroUnexplained
+        splitDropped || amountWarning || !expectedFullySettled || btwZeroUnexplained
           ? {
               ...(verification.field_confidence ?? {}),
               // [NUL-BTW-STIL] The fact travels with the row; import-health turns it into the
@@ -820,95 +817,86 @@ async function runAttachInvoice(req: NextRequest) {
   // 9. Link document → invoice (bidirectional).
   await pipeline.from("documents").update({ invoice_id: invoice.id }).eq("id", documentId);
 
-  // 10. [BANK-ATTACH-MULTI] Do NOT mark the transaction 'matched' here. One
-  //     payment can cover SEVERAL invoices (a supplier groups them); marking it
-  //     matched after the FIRST file would hide the transaction while other
-  //     invoices are still unlinked — and lose them (the Oz+Er bug: paid 3,
-  //     linked 1, all disappeared). Instead the transaction STAYS 'pending'
-  //     (visible in "Geen factuur") and the owner dismisses it with "Negeren"
-  //     once they've attached everything they have for it. We only record the
-  //     latest linked invoice_id as a soft reference; status is untouched.
+  // 10. [HANDGESCHREVEN-BOEKING] THE money mutation, and the only one.
   //
-  //     This is deliberate: matching is a LIGHT tool here, not a reconciliation
-  //     engine. We don't compute whether the linked invoices' total "covers" the
-  //     transaction (that would reintroduce amount-matching we chose not to
-  //     build). The owner decides when the transaction is dealt with.
-  const { data: linkedRows, error: linkErr } = await pipeline
-    .from("bank_transactions")
-    .update({ invoice_id: invoice.id })
-    .eq("id", transactionId)
-    .eq("user_id", user.id)
-    .eq("status", "pending") // never touch an already-settled row
-    .select("id");
+  //     What stood here was three statements in three transactions: UPDATE the line's invoice_id,
+  //     then INSERT the allocation row, with a hand-written rollback of the invoice + document +
+  //     file in between. The allocation write was last and reported-but-swallowed, so the ordinary
+  //     outcome of a failure there was an invoice standing settled with no link to the money that
+  //     settled it — and recompute_invoice_amount_paid would later re-derive amount_paid from the
+  //     links it could find, none, and re-open the invoice at its full total.
+  //
+  //     The budget read a few dozen lines up is unlocked. Two requests, or one overlapping a
+  //     confirm, both read the same "already assigned" and both wrote. The file's own
+  //     [BANK-OVERAPPLIED-LOUD] note said so and recorded the fix as deferred: "De race sluiten
+  //     kan alleen een atomaire RPC." This is that RPC — the same door /api/bank/confirm and the
+  //     auto-confirm pass already book through.
+  //
+  //     [BANK-ATTACH-MULTI] is preserved, and by the door rather than by abstaining: one payment
+  //     can cover several invoices, so the line must NOT go 'matched' while money is left on it.
+  //     confirm_bank_payment flips it to 'matched' only when the line is spent to the cent, and
+  //     leaves it 'pending' with invoice_id set otherwise — which is exactly the shape this route
+  //     wrote by hand. The difference is that "is it spent" is now measured under the row lock
+  //     instead of not measured at all. When it IS spent the line is hidden, and that is right:
+  //     the budget check above would refuse the next document on it anyway.
+  //
+  //     The SESSION client, deliberately — the authority /api/bank/confirm books with, and the
+  //     uid the accountant-'verwerkt' trigger needs on the invoices write.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: bookedRows, error: bookErr } = await (supabase.rpc as any)("confirm_bank_payment", {
+    p_user_id: user.id,
+    p_tx_id: transactionId,
+    p_invoice_id: invoice.id,
+    p_pay_date: normalizeToIso(tx.date) ?? invoiceDate,
+  }) as { data: unknown; error: { code?: string; message?: string } | null };
 
   // [DOUBLE-COUNT GUARD] The engine excludes a bank line from the kosten/omzet leg ONLY when its
-  // invoice_id column is set (financial-result.ts:345). If this write errored OR matched 0 rows (the
-  // tx is no longer 'pending' — e.g. a concurrent settle, which the .eq filter drops WITHOUT an
-  // error), the still-categorized bank line stays counted. Leaving the freshly-'paid' invoice — now
-  // carrying the FULL gross cost, not the old €0 — in place would DOUBLE-COUNT the money. So we do
-  // NOT return ok: roll the invoice + document + file back (as the dbError path above does) and ask
-  // the owner to retry, so nothing is ever half-booked. (Adversarial review, CONFIRMED double-count.)
-  if (linkErr || !linkedRows || linkedRows.length === 0) {
-    console.error(
-      "[BANK-ATTACH] transaction link failed:",
-      linkErr?.message ?? "0 rows matched (transaction not pending)",
-    );
+  // invoice_id column is set (financial-result.ts:345). If the door booked nothing, that column is
+  // untouched and the still-categorised bank line stays counted — so leaving the invoice in place
+  // would DOUBLE-COUNT the money. Roll the document back and ask the owner to retry, so nothing is
+  // ever half-booked. This is NOT a compensating payment write: the door is atomic, so there is no
+  // partial payment to undo — only a document that never became one.
+  const booked = bookErr ? undefined
+    : (Array.isArray(bookedRows) ? (bookedRows[0] as { applied: number; is_paid: boolean } | undefined) : undefined);
+  if (bookErr || !booked) {
+    const reason = bookErr?.message ?? "0 rows returned (transaction not claimable)";
+    console.error("[BANK-ATTACH] payment door refused:", reason);
     await pipeline.from("invoices").delete().eq("id", invoice.id);
     await pipeline.from("documents").delete().eq("id", documentId);
     await supabase.storage.from("documents").remove([storagePath]);
-    return NextResponse.json(
-      {
-        error: "Koppelen aan de banktransactie is niet gelukt — probeer het opnieuw.",
-        link_failed: true,
-      },
-      { status: 409 },
-    );
+    const msg = reason.toLowerCase();
+    const dutch = msg.includes("fully applied") || msg.includes("no allocation backs")
+      ? "Deze betaling is inmiddels al volledig aan facturen toegewezen. Koppel dit bestand aan een andere betaling, of maak eerst een koppeling ongedaan."
+      : "Koppelen aan de banktransactie is niet gelukt — probeer het opnieuw.";
+    return NextResponse.json({ error: dutch, link_failed: true }, { status: 409 });
   }
 
-  // [BANK-TX-INVOICES] Record THIS invoice in the reversal index. Attach supports several invoices
-  // on one pending tx, but tx.invoice_id only ever holds the LAST one — so without the join row a
-  // later unlink would restore only the last-attached invoice, stranding the earlier ones paid with
-  // no bank line. Recording every attached invoice here makes the whole set reversible by id.
-  // [PARTIAL-PAY] Write the applied amount with it: recompute_invoice_amount_paid re-derives
-  // invoices.amount_paid as SUM(amount_applied) over the surviving links on every unlink/undo, so a
-  // link with a NULL amount makes this invoice — created 'paid' by this very payment — recompute to
-  // amount_paid 0 and re-open at its full total. The invoice is created fully settled by this
-  // transaction, so the applied amount is its own total.
-  // [LINKS-WRITE-HONEST] The boolean is read. recordPaymentLinks returns one so a failed write can
-  // be reported, and this route — the one that CREATES an already-'paid' invoice out of a bank
-  // line — threw it away. Without the join row, recompute_invoice_amount_paid re-derives
-  // amount_paid as SUM(amount_applied) over the surviving links on the next unlink or undo, finds
-  // none, and re-opens this invoice at its full total: money that was received, standing as owed.
-  const linksRecorded = await recordPaymentLinks(pipeline, user.id, transactionId, [invoice.id], {
-    // [BANK-BUDGET] The applied amount is what the LINE gave, which is not always the invoice's
-    // total: on partial coverage the invoice stays open for the remainder, and Σ amount_applied
-    // over this transaction can never exceed the money that actually moved.
-    [invoice.id]: appliedNow,
-  });
-
-  if (!linksRecorded) {
-    // Not fatal to the request — the invoice exists and is paid, which is the truth of what
-    // happened — but the reversal index is now incomplete, and that is invisible by construction.
-    reportHandledFailure({
-      tag: "BANK-TX-INVOICES",
-      message: "payment link not recorded for an invoice created paid from a bank line",
-      severity: "data-integrity",
-      context: { userId: user.id, invoiceId: invoice.id, transactionId },
-    });
+  // The door decided the amount under the lock. Where that disagrees with the unlocked
+  // expectation the insert used, the DOOR is right, and the row must carry the review flag the
+  // expectation would have given it — otherwise a document the line turned out not to cover
+  // reaches no list as needing a human. A flag, not money: the amounts are already correct.
+  if (!booked.is_paid && expectedFullySettled) {
+    await pipeline
+      .from("invoices")
+      .update({
+        field_confidence: {
+          ...(verification.field_confidence ?? {}),
+          ...(btwZeroUnexplained ? { _btw_zero_unexplained: true } : {}),
+          amount: Math.min(verification.field_confidence?.amount ?? 1, 0.4),
+        },
+      })
+      .eq("id", invoice.id);
   }
 
-  // [BANK-OVERAPPLIED-LOUD] De derde deur. /api/bank/allocate gaat door een atomaire RPC die het
-  // budget onder een rijvergrendeling herberekent, en /api/bank/confirm herleest de som ná de
-  // eigen schrijving en slaat alarm. Deze route had geen van beide: ze leest het budget in JS en
-  // schrijft daarna een gewone insert, dus twee gelijktijdige verzoeken — of één die met een
-  // confirm overlapt — lezen allebei dezelfde "al toegewezen" en schrijven allebei.
+  // [BANK-OVERAPPLIED-LOUD] De race die deze controle ving, is hierboven gesloten: de boeking gaat
+  // nu door dezelfde atomaire RPC als /api/bank/allocate, die het budget onder een rijvergrendeling
+  // herberekent. De oude tekst hier zei "deze route had geen van beide" en dat klopt niet meer.
   //
-  // En dit is de deur waar dat het meest kost: ze MAAKT een factuur die meteen op 'betaald' staat.
-  // Over-besteden betekent hier een factuur die is voldaan uit geld dat de regel niet had, op een
-  // rij die niemand nog met een document kan vergelijken.
-  //
-  // De race sluiten kan alleen een atomaire RPC (gedocumenteerd als uitgesteld). Wat hier bij komt
-  // is dezelfde belofte als bij confirm: de stand kan nooit STIL verkeerd zijn.
+  // De controle BLIJFT staan, en niet uit voorzichtigheid. bank_tx_invoices accepteert nog steeds
+  // een rechtstreekse INSERT die langs elke betaaldeur gaat — dat is een open bevinding, niet iets
+  // wat deze slice repareert. Een toewijzing die daar vandaan komt, ziet geen enkele deur, en dan
+  // is dit het enige wat de eigenaar het nog vertelt. De belofte blijft dus dezelfde: de stand kan
+  // nooit STIL verkeerd zijn.
   try {
     const verdict = await readOverApplied({
       client: pipeline, userId: user.id, transactionId, txAmount: bankAmount,
@@ -953,7 +941,12 @@ async function runAttachInvoice(req: NextRequest) {
   await createNotification({
     userId: user.id,
     title: "Factuur gekoppeld",
-    body: `Een bestand is gekoppeld aan een banktransactie en opgeslagen als betaalde ${isOutgoing ? "verkoopfactuur" : "inkoopfactuur"} (${verification.vendor || "onbekend"}).`,
+    // [HANDGESCHREVEN-BOEKING] "betaalde" alleen wanneer de deur de factuur ook echt heeft
+    // voldaan. Bij gedeeltelijke dekking blijft de factuur openstaan, en een bel die dan "betaald"
+    // zegt is precies de mededeling waardoor niemand meer kijkt.
+    body: booked.is_paid
+      ? `Een bestand is gekoppeld aan een banktransactie en opgeslagen als betaalde ${isOutgoing ? "verkoopfactuur" : "inkoopfactuur"} (${verification.vendor || "onbekend"}).`
+      : `Een bestand is gekoppeld aan een banktransactie en opgeslagen als ${isOutgoing ? "verkoopfactuur" : "inkoopfactuur"} (${verification.vendor || "onbekend"}). Deze betaling dekte € ${(booked.applied ?? 0).toFixed(2)}; de factuur staat nog open voor de rest.`,
     type: "payment",
     // [NOTIF-DEADEND] This route CREATES a paid invoice out of a bank line — the one
     // row the owner is most likely to want to check — and the bell announcing it had
