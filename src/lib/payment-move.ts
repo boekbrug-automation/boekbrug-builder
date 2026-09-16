@@ -174,6 +174,15 @@ export function moveFailureText(rawMessage: string | null | undefined, code?: st
   if (m.includes("is less than payment")) {
     return "Op die factuur staat minder open dan het bedrag van deze betaling. Verplaatsen zou hem overbetalen — kies een andere factuur, of draai de betaling terug en boek hem in delen.";
   }
+  // [VERPLAATS-TEKEN] Matched on the RPC's own fragment, same convention as the creditnota sentence
+  // above. Without a branch this refusal would reach the owner as the generic "probeer het opnieuw",
+  // which is the one thing that is not true: retrying does exactly the same.
+  if (m.includes("change what the bank line has spent")) {
+    return "Deze betaling telt andersom mee op de bankregel dan de factuur die je kiest — een creditnota geeft geld terug aan die regel, een gewone factuur haalt het eraf. Verplaatsen zou de regel meer laten uitgeven dan erop staat. Draai de betaling terug en boek hem opnieuw op de juiste factuur.";
+  }
+  if (m.includes("bank line behind this payment is gone")) {
+    return "De banktransactie van deze betaling bestaat niet meer — ververs de pagina.";
+  }
   if (m.includes("not found") || m.includes("not owned")) {
     return "Een van beide facturen bestaat niet meer — ververs de pagina.";
   }

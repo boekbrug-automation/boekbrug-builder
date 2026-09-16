@@ -139,4 +139,136 @@ END $$;
 
 DROP FUNCTION _expect_refused(uuid, text);
 
+
+-- ═══ 4. [VERPLAATS-TEKEN] A move may not change which way the link counts against the line ═══════
+--
+-- The line's budget is SIGNED. A link either spends the line or gives money back to it, decided by
+-- whether the invoice moves money the same way the line did. move_invoice_payment refuses a
+-- creditnota TARGET but deliberately allows a creditnota SOURCE, and those two sit on opposite
+-- sides of that test — so before this guard a move across them flipped the link from -a to +a and
+-- the line's spend rose by 2a, with no budget check anywhere in the function.
+--
+-- The fixture is the measured one: an EUR 850 debit carrying a EUR 1.000 purchase invoice and a
+-- EUR 150 supplier credit is EXACTLY TIED at 850. That exactness is the point — it is the state
+-- every door leaves, and the state the flip breaks.
+TRUNCATE public.invoices, public.invoice_lines, public.bank_transactions, public.bank_tx_invoices;
+
+-- The invariant as the four doors compute it, over the TABLES.
+CREATE OR REPLACE FUNCTION t_signed_spend(p_tx uuid, p_user uuid) RETURNS numeric
+LANGUAGE sql AS $f$
+  SELECT coalesce(sum(
+    CASE WHEN ((i.direction = 'incoming')
+                <> (coalesce(i.invoice_type, 'factuur') = 'creditnota'
+                    OR coalesce(i.total_inc_btw, 0) < 0))
+              = (coalesce(t.amount, 0) < 0)
+         THEN  abs(coalesce(l.amount_applied, 0))
+         ELSE -abs(coalesce(l.amount_applied, 0)) END), 0)
+  FROM public.bank_tx_invoices l
+  JOIN public.invoices i ON i.id = l.invoice_id
+  JOIN public.bank_transactions t ON t.id = l.transaction_id
+  WHERE l.transaction_id = p_tx AND l.user_id = p_user;
+$f$;
+
+INSERT INTO public.invoices (id, receiver_id, direction, invoice_type, status, total_inc_btw, amount_paid) VALUES
+  ('a0000000-0000-0000-0000-0000000000a1', :'U', 'incoming', 'factuur',     'paid',     1000, 1000),  -- SPENDS the debit
+  ('a0000000-0000-0000-0000-0000000000c1', :'U', 'incoming', 'creditnota',  'paid',     -150,  150),  -- GIVES money back
+  ('a0000000-0000-0000-0000-0000000000b1', :'U', 'incoming', 'factuur',     'received',  500,    0),  -- an ordinary target
+  ('a0000000-0000-0000-0000-0000000000d1', :'U', 'incoming', 'factuur',     'received', 1200,    0);  -- a same-sign target, with room for the whole 1.000
+INSERT INTO public.bank_transactions (id, user_id, amount, date, status, invoice_id) VALUES
+  ('ba000000-0000-0000-0000-0000000000a1', :'U', -850, '2026-03-01', 'matched', 'a0000000-0000-0000-0000-0000000000a1');
+INSERT INTO public.bank_tx_invoices (id, user_id, transaction_id, invoice_id, amount_applied) VALUES
+  ('11110000-0000-0000-0000-0000000000a1', :'U', 'ba000000-0000-0000-0000-0000000000a1', 'a0000000-0000-0000-0000-0000000000a1', 1000),
+  ('11110000-0000-0000-0000-0000000000c1', :'U', 'ba000000-0000-0000-0000-0000000000c1'::uuid, 'a0000000-0000-0000-0000-0000000000c1', 150);
+-- the credit's link belongs to the SAME line (written separately so the id above stays readable)
+UPDATE public.bank_tx_invoices SET transaction_id = 'ba000000-0000-0000-0000-0000000000a1'
+WHERE id = '11110000-0000-0000-0000-0000000000c1';
+
+SELECT set_config('test.uid', '', false);
+
+DO $$
+DECLARE before_spend numeric; after_spend numeric; c_inv uuid; c_amt numeric; tgt_paid numeric; tgt_st text;
+BEGIN
+  before_spend := t_signed_spend('ba000000-0000-0000-0000-0000000000a1', '11111111-1111-1111-1111-111111111111');
+  IF before_spend IS DISTINCT FROM 850 THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] fixture is not the tied state: signed spend is %, expected 850', before_spend;
+  END IF;
+
+  -- THE FLIP: the credit's 150 onto an ordinary invoice of the same direction. Every other guard in
+  -- the function passes — same direction, target payable, target not a creditnota, 150 fits in 500.
+  BEGIN
+    PERFORM public.move_invoice_payment('11111111-1111-1111-1111-111111111111'::uuid,
+      '11110000-0000-0000-0000-0000000000c1'::uuid, 'a0000000-0000-0000-0000-0000000000b1'::uuid);
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] the sign-flipping move was ACCEPTED — the line would carry 1150 of an 850 line';
+  EXCEPTION WHEN sqlstate '55000' THEN
+    IF position('change what the bank line has spent' in SQLERRM) = 0 THEN
+      RAISE EXCEPTION '[VERPLAATS-TEKEN] refused for a different reason: %', SQLERRM;
+    END IF;
+  END;
+
+  -- …and it left everything exactly as it found it.
+  after_spend := t_signed_spend('ba000000-0000-0000-0000-0000000000a1', '11111111-1111-1111-1111-111111111111');
+  IF after_spend IS DISTINCT FROM 850 THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] a refusal moved money: signed spend is now %, was 850', after_spend;
+  END IF;
+  SELECT invoice_id, amount_applied INTO c_inv, c_amt FROM public.bank_tx_invoices WHERE id='11110000-0000-0000-0000-0000000000c1';
+  IF c_inv IS DISTINCT FROM 'a0000000-0000-0000-0000-0000000000c1'::uuid THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] the link moved anyway, to %', c_inv;
+  END IF;
+  IF c_amt IS DISTINCT FROM 150 THEN RAISE EXCEPTION '[VERPLAATS-TEKEN] the amount changed to %', c_amt; END IF;
+  SELECT amount_paid, status INTO tgt_paid, tgt_st FROM public.invoices WHERE id='a0000000-0000-0000-0000-0000000000b1';
+  IF tgt_paid IS DISTINCT FROM 0 OR tgt_st IS DISTINCT FROM 'received' THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] the refused target was written anyway: paid=% status=%', tgt_paid, tgt_st;
+  END IF;
+  RAISE NOTICE '  ok · the sign-flipping move is refused, and the line is still tied at % ', after_spend;
+
+  -- SAME SIGN: the 1.000 invoice's own link onto another ordinary purchase invoice. Both spend the
+  -- line, so the line's total spend is unchanged and the move must go through untouched.
+  PERFORM public.move_invoice_payment('11111111-1111-1111-1111-111111111111'::uuid,
+    '11110000-0000-0000-0000-0000000000a1'::uuid, 'a0000000-0000-0000-0000-0000000000d1'::uuid);
+  after_spend := t_signed_spend('ba000000-0000-0000-0000-0000000000a1', '11111111-1111-1111-1111-111111111111');
+  IF after_spend IS DISTINCT FROM 850 THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] a same-sign move changed the line spend to %, must stay 850', after_spend;
+  END IF;
+  SELECT invoice_id INTO c_inv FROM public.bank_tx_invoices WHERE id='11110000-0000-0000-0000-0000000000a1';
+  IF c_inv IS DISTINCT FROM 'a0000000-0000-0000-0000-0000000000d1'::uuid THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] the same-sign move did NOT happen — the guard is too wide';
+  END IF;
+  RAISE NOTICE '  ok · a same-sign move still goes through, and the line still reads %', after_spend;
+
+  -- The line's own pointer must still be backed by an allocation on that line.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.bank_transactions t
+    JOIN public.bank_tx_invoices l
+      ON l.transaction_id = t.id AND l.invoice_id = t.invoice_id AND l.user_id = t.user_id
+    WHERE t.id = 'ba000000-0000-0000-0000-0000000000a1'
+  ) THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] the line now names an invoice no allocation backs';
+  END IF;
+  RAISE NOTICE '  ok · the line''s named invoice is still backed by an allocation on that line';
+END $$;
+
+-- A MANUAL instalment has no bank line, so the sign rule cannot apply to it and must not block it.
+TRUNCATE public.invoices, public.invoice_lines, public.bank_transactions, public.bank_tx_invoices;
+INSERT INTO public.invoices (id, receiver_id, direction, invoice_type, status, total_inc_btw, amount_paid) VALUES
+  ('a0000000-0000-0000-0000-0000000000e1', :'U', 'incoming', 'creditnota', 'paid',     -100, 100),
+  ('a0000000-0000-0000-0000-0000000000f1', :'U', 'incoming', 'factuur',    'received',  300,   0);
+INSERT INTO public.bank_tx_invoices (id, user_id, transaction_id, invoice_id, amount_applied, paid_on, method) VALUES
+  ('11110000-0000-0000-0000-0000000000e1', :'U', NULL, 'a0000000-0000-0000-0000-0000000000e1', 100, '2026-02-01', 'kas');
+
+DO $$
+DECLARE moved uuid;
+BEGIN
+  PERFORM public.move_invoice_payment('11111111-1111-1111-1111-111111111111'::uuid,
+    '11110000-0000-0000-0000-0000000000e1'::uuid, 'a0000000-0000-0000-0000-0000000000f1'::uuid);
+  SELECT invoice_id INTO moved FROM public.bank_tx_invoices WHERE id='11110000-0000-0000-0000-0000000000e1';
+  IF moved IS DISTINCT FROM 'a0000000-0000-0000-0000-0000000000f1'::uuid THEN
+    RAISE EXCEPTION '[VERPLAATS-TEKEN] a manual instalment belongs to no line, yet the line guard blocked it';
+  END IF;
+  RAISE NOTICE '  ok · a manual instalment (transaction_id NULL) is not measured against any line';
+END $$;
+
+DROP FUNCTION t_signed_spend(uuid, uuid);
+
+SELECT '[VERPLAATS-TEKEN] held: a move that would change the sign of the line''s spend is refused and writes nothing, a same-sign move is untouched, the line stays backed, and a manual instalment is unaffected' AS result;
+
 SELECT '[MOVE-PAYMENT] held: both sides re-derive over stored drift to the cent, dates re-derive for the kasstelsel, money is conserved, and every refusal leaves the payment where it was' AS result;
