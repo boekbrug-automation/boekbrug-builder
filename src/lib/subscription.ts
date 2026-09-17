@@ -148,8 +148,9 @@ export function decidePlan(input: PlanInput): PlanDecision {
     return { plan: "plus", reason: "grace_period" };
   }
 
-  // 5. [TOEKENNING] Een lopende toekenning: de welkomstperiode van 90 dagen, een pilot van een
-  //    kantoor, een verlenging. Staat hier en niet hoger om twee redenen: wie betaalt hoort
+  // 5. [TOEKENNING] Een lopende toekenning: een pilot van een kantoor, een verlenging, een open
+  //    toekenning. [LAUNCH-CONTRACT] Niet meer de automatische welkomstperiode — die is ingetrokken
+  //    (welcome_grant_retired.sql); wie er een HEEFT, houdt hem. Staat hier en niet hoger om twee redenen: wie betaalt hoort
   //    "active" te lezen en niet "toekenning" (het scherm zou hem anders vertellen dat zijn
   //    periode afloopt terwijl hij een abonnement heeft), en een onleesbare datum mag nooit Plus
   //    opleveren — parseTimestamp geeft dan null en we vallen door naar gratis.

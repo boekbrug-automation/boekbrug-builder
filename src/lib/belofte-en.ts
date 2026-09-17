@@ -39,9 +39,13 @@ export const PROMISE_SHORT =
  * The reassurance under a button. Each part is a contractual commitment, not a slogan:
  * "free" and "never automatically charged" are in voorwaarden §5.2, and "no trial" is why
  * `trial_ends_at` deliberately does not exist in billing_subscription.sql.
+ *
+ * [LAUNCH-CONTRACT] This line promised "your first 90 days with everything on" for one release.
+ * welcome_grant_retired.sql removed the automatic grant, so it promises the free plan again —
+ * see the same note in belofte.ts, which is the source this translates.
  */
 export const PROMISE_REASSURE =
-  "Your first 90 days with everything on · free after that · never charged automatically" as const;
+  "Try it free · no trial that expires · never charged automatically" as const;
 
 /** The only task left for you. Three steps, because nobody reads more — and these are all. */
 export const PROMISE_STEPS: readonly { head: string; text: string }[] = [

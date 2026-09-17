@@ -28,26 +28,40 @@ test("the same number of steps — a step added in one language must land in bot
 });
 
 test("the reassurance carries the same THREE contractual commitments", () => {
-  // BELOFTE_GERUST is not a slogan, it is three commitments. They changed once, on purpose, and
-  // the change is worth reading before this test is "fixed" back:
+  // BELOFTE_GERUST is not a slogan, it is three commitments. It changed twice, and both moves are
+  // worth reading before this test is "fixed" in either direction:
   //
   //   WAS  free · no trial that expires · never charged automatically
-  //   NOW  your first 90 days with everything on · free after that · never charged automatically
+  //   THEN your first 90 days with everything on · free after that · never charged automatically
+  //   NOW  try it free · no trial that expires · never charged automatically
   //
   // [WELKOM-90] gave every new account ninety days of the Plus ceilings, so "no trial that
-  // expires" stopped being true and had to go — a promise left standing after the product moved
-  // is exactly the untruth belofte.ts exists to prevent. What that clause was PROTECTING is
-  // still promised, and now in words: the period does not become a subscription, nothing is
-  // charged, and afterwards the free plan applies. §5.2 is intact.
+  // expires" stopped being true and had to go. [LAUNCH-CONTRACT] welcome_grant_retired.sql then
+  // removed that automatic grant again — the free plan IS the trial now — so the ninety days
+  // became a promise the product no longer keeps, on the home page, the English page, the Arabic
+  // page and the sales deck at once. This test PINNED the obsolete wording while it was wrong,
+  // which is how a test stops protecting a contract and starts protecting a mistake.
+  //
+  // What is asserted here is therefore the CURRENT contract, in both languages: three parts, a
+  // free start, no expiring trial, and no automatic charge. Nothing promises a period.
   assert.equal(BELOFTE_GERUST.split("·").length, 3, "the Dutch line still has three parts");
   assert.equal(PROMISE_REASSURE.split("·").length, 3, "so must the English");
-  assert.match(PROMISE_REASSURE, /90 days/, "the English drops the period the Dutch promises");
   assert.match(PROMISE_REASSURE, /[Ff]ree/);
   assert.match(PROMISE_REASSURE, /automatically/);
-  // And the one word that must not come back: there is no trial here, because nothing at the end
-  // of it asks for a card.
-  assert.doesNotMatch(PROMISE_REASSURE, /trial/i,
-    "the English calls the welcome period a trial — a trial is a thing that ends in a charge");
+  // The three commitments the Dutch makes, in the Dutch line itself — this file is where the two
+  // languages are compared, and a Dutch line that quietly loses one of them must fail here too.
+  assert.match(BELOFTE_GERUST, /[Gg]ratis/);
+  assert.match(BELOFTE_GERUST, /geen proefperiode die afloopt/);
+  assert.match(BELOFTE_GERUST, /nooit automatisch afgeschreven/);
+  // And the words that must not come back. A trial is a thing that ends in a charge, and this
+  // product has none; a period promised in one language and not the other is the drift this file
+  // exists to catch.
+  assert.doesNotMatch(PROMISE_REASSURE, /\btrial\b(?! that expires)/i,
+    "the English calls something a trial that does not end in a charge");
+  for (const [naam, zin] of [["Dutch", BELOFTE_GERUST], ["English", PROMISE_REASSURE]] as const) {
+    assert.doesNotMatch(zin, /\b90\b|\bninety\b|\bnegentig\b/i,
+      `the ${naam} reassurance promises a welcome period that new accounts no longer receive`);
+  }
 });
 
 test("no promise of a feature the Dutch page does not make", () => {

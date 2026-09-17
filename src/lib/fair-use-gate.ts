@@ -73,8 +73,9 @@ export async function planForUser(client: ProfileReader, userId: string): Promis
       return basic?.role === "accountant" ? "boekhouder" : "free";
     }
 
-    // [TOEKENNING] Lopende toekenningen erbij: de welkomstperiode van 90 dagen, een pilot van een
-    // kantoor, een verlenging. Eigen query en eigen try: is de tabel er nog niet ([DEPLOY-SAFE])
+    // [TOEKENNING] Lopende toekenningen erbij: een pilot van een kantoor, een verlenging, een open
+    // toekenning. [LAUNCH-CONTRACT] De automatische welkomstperiode staat hier niet meer bij: die is
+    // ingetrokken (welcome_grant_retired.sql). Bestaande toekenningen blijven gewoon gelden. Eigen query en eigen try: is de tabel er nog niet ([DEPLOY-SAFE])
     // of hapert hij, dan telt er geen toekenning en valt het account terug op gratis — dezelfde
     // faalrichting als de rest van deze functie, en die ontzegt niemand zijn gegevens.
     let standing: GrantStanding = { grantedPlusUntil: null, grantOpenEnded: false };

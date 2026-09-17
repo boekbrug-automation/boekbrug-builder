@@ -39,9 +39,13 @@ export const BELOFTE_UITLEG_AR =
  * The reassurance under a button. Each part is a contractual commitment, not a marketing line:
  * "free" and "never auto-charged" are voorwaarden §5.2, and "no trial" is why `trial_ends_at`
  * deliberately does not exist in billing_subscription.sql.
+ *
+ * [LAUNCH-CONTRACT] The ninety days this line promised for one release are gone with the
+ * automatic grant (welcome_grant_retired.sql). «فترة تجريبية» is the wording the plan screen
+ * already uses for a trial period, so the sentence says it the way the app says it elsewhere.
  */
 export const BELOFTE_GERUST_AR =
-  "أول 90 يوماً بكل شيء · ثم تتابع مجاناً · ولا خصم تلقائي أبداً" as const;
+  "جرّبه مجاناً · ولا فترة تجريبية تنتهي · ولا خصم تلقائي أبداً" as const;
 
 /** The one task the owner keeps, in three steps. */
 export const BELOFTE_STAPPEN_AR: readonly { kop: string; tekst: string }[] = [

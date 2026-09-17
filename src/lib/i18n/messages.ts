@@ -10596,13 +10596,16 @@ export const MESSAGES = {
     ar: 'ولا توجد فترة تجريبية تتحول بصمت إلى اشتراك. فوق الاستخدام العادل يتوقف مؤقتًا فقط ما يكلفنا مالًا؛ أما الاطلاع على إدارتك والبحث فيها وتصديرها فتبقى متاحة دائمًا.',
     en: 'and there is no trial period that silently becomes a subscription. Beyond fair use only what costs us money pauses; viewing, searching and exporting your administration always keep working.',
   },
-  // [WELKOM-90] De eerste 90 dagen. Geen "proef": er hangt geen kaart aan en er volgt geen
-  // incasso — na afloop geldt gewoon het gratis plan. Daarom heet het hier een welkomstperiode
-  // en nergens een proefperiode.
+  // [LAUNCH-CONTRACT] Het label van een LOPENDE toekenning — een pilot, een verlenging, of een
+  // open toekenning zonder einddatum. Het noemde een periode van negentig dagen, en dat was na
+  // welcome_grant_retired.sql op twee manieren onwaar: nieuwe accounts krijgen die periode niet
+  // meer, en een toekenning zonder einddatum heeft er nooit een gehad. De einddatum staat in de
+  // rij eronder (plan.welkomTot) en alleen wanneer er een IS — dus het label hoort er niet ook
+  // nog een te beweren.
   'plan.welkomstperiode': {
-    nl: 'Je eerste 90 dagen — alles van Plus',
-    ar: 'أول 90 يوماً — كل ما في Plus',
-    en: 'Your first 90 days — everything in Plus',
+    nl: 'Alles van Plus — toegekend',
+    ar: 'كل ما في Plus — ممنوح',
+    en: 'Everything in Plus — granted',
   },
   'plan.welkomTot': {
     nl: 'Nog tot',

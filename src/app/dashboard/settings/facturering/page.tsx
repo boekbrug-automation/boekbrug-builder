@@ -195,7 +195,13 @@ export default async function FactureringPage({
             </>
           ) : (
             <>
-              {decision.reason === 'toekenning' && <>{t('plan.welkomDaarna')}{' '}</>}
+              {/* [LAUNCH-CONTRACT] Alleen bij een toekenning MET einddatum. "Daarna ga je verder
+                  op het gratis plan" is waar voor een pilot die afloopt en onwaar voor een open
+                  toekenning: daar is geen "daarna". Dezelfde voorwaarde als de rij hierboven die
+                  de einddatum toont, zodat de zin en de datum nooit uit elkaar lopen. */}
+              {decision.reason === 'toekenning' && standing.grantedPlusUntil !== null && (
+                <>{t('plan.welkomDaarna')}{' '}</>
+              )}
               {t('plan.jeWordt')} <strong>{t('plan.nooitAfgeschreven')}</strong> {t('plan.geenProefperiode')}{' '}
               <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>
                 {t('plan.beleid')}

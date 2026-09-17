@@ -59,19 +59,24 @@ export const BELOFTE_MINI = "Niets kwijtraken. De rest doen wij." as const;
  * reden dat `trial_ends_at` bewust NIET in billing_subscription.sql staat. Verandert een van
  * deze drie, dan verandert er een contract mee.
 
- * ── [WELKOM-90] Waarom "geen proefperiode die afloopt" hier weg is ──────────────────────────
+ * ── [LAUNCH-CONTRACT] Why the ninety days are gone from this line ───────────────────────────
  *
- * Omdat het sinds de welkomstperiode niet meer waar is: elk nieuw account heeft negentig dagen
- * de Plus-grenzen. De toezegging die eronder zat is dat wel, en die staat er nu voluit — de
- * periode wordt GEEN abonnement en er wordt niets afgeschreven; na negentig dagen geldt het
- * gratis plan, en alles wat er staat blijft leesbaar, doorzoekbaar en exporteerbaar.
+ * They were here for one release. [WELKOM-90] gave every new account ninety days of the Plus
+ * ceilings, so "geen proefperiode die afloopt" stopped being true and this line was rewritten to
+ * promise the period out loud. Then welcome_grant_retired.sql removed the trigger: the free plan
+ * IS the trial now, and a NEW account receives no automatic grant at all.
  *
- * De oude zin is niet "verzacht": hij is vervangen door de zin die klopt. Een belofte die
- * blijft staan nadat het product veranderde, is precies het soort onwaarheid waar dit bestand
- * tegen bestaat.
+ * So the line went back — not because the old words read better, but because they are true again.
+ * A promise that outlives the product is the exact untruth this file exists to prevent, and it
+ * survived one migration here: the database had stopped granting the ninety days while the
+ * home page, the English page, the Arabic page and the sales deck all still promised them.
+ *
+ * Grants themselves did NOT disappear. A pilot, an extension and the owner's own open-ended row
+ * still exist in plan_grants and are still honoured — see subscription.ts. What disappeared is the
+ * AUTOMATIC one, and with it the only reason to promise a period to someone who does not have one.
  */
 export const BELOFTE_GERUST =
-  "Je eerste 90 dagen met alles erop · daarna gratis verder · nooit automatisch afgeschreven" as const;
+  "Gratis uitproberen · geen proefperiode die afloopt · nooit automatisch afgeschreven" as const;
 
 /**
  * Wat de gebruiker zelf moet doen — de enige taak die overblijft. Drie stappen, want meer

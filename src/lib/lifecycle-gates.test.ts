@@ -22,6 +22,11 @@ import { LOCALE_BOOT_SCRIPT } from "./i18n/locale-boot";
 // [TAAL] The catalogue as a VALUE. An entity in a message survives every source-level check
 // there is; only the shipped string shows it.
 import { MESSAGES } from "./i18n/messages";
+// [LAUNCH-CONTRACT] The three promise sentences themselves, not their source text: a value gate
+// cannot be fooled by a comment that still says the retired thing.
+import { BELOFTE_GERUST } from "./belofte";
+import { PROMISE_REASSURE } from "./belofte-en";
+import { BELOFTE_GERUST_AR } from "./belofte-ar";
 import { AR_SETTLED, AR_DELIBERATE_SPLITS, AR_RETIRED, AR_RETIRED_EVERYWHERE, NL_RETIRED, EN_VAT_KEEPS_BTW } from "./i18n/ar-decisions";
 import { DOCUMENT_REFERRERS } from "./document-references";
 // [RECONCILE-VOLGORDE] The reconcile pass list as DATA — the gates below ask it rather than
@@ -33485,36 +33490,44 @@ test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought i
 });
 
 
-// ─── [WELKOM-90] Ninety days of Plus, and the promise that survived the change ────────────────
+// ─── [WELKOM-90] The automatic welcome period is retired — grants stay, and stay unforgeable ──
 //
-// Every new account starts with the Plus ceilings for ninety days and then lands on the free
-// plan. The free plan stays: it is published in voorwaarden §5.2, and it is what lets an office
-// put twenty clients into BoekBrug without any of them being asked for a card.
+// This gate used to hold the OPPOSITE of what it holds now, and the reversal is the point.
 //
-// Three things have to hold together, and the third is the one that rots quietly:
+// [WELKOM-90] gave every new account ninety days of the Plus ceilings, written by a trigger on
+// profiles so that no signup path could miss it. Then welcome_grant_retired.sql dropped that
+// trigger: the free plan IS the trial, a new account receives no automatic grant, and Plus starts
+// only when someone buys it.
 //
-//   1. NO SIGNUP PATH CAN MISS IT. The grant is written by a trigger on profiles, not by the
-//      register route — there is more than one way a profile row comes into existence, and a
-//      grant living in one path is a grant the other paths skip. Measured in production: the
-//      profile row is itself created by a trigger on auth.users, so a route-level grant would
-//      have missed every signup that does not go through our own form.
+// What did NOT change is everything else in this file's subject, and it is the half that still
+// decides money:
+//
+//   1. THE RETIREMENT IS THE MECHANISM, NOT A DECISION IN A ROUTE. plan_grants.sql still carries
+//      the function and the historical CREATE TRIGGER — deliberately, so re-arming a welcome
+//      period is one CREATE TRIGGER rather than an archaeology exercise — and the retirement is a
+//      second migration that drops the trigger and keeps the function. Both facts are asserted,
+//      because "retired" that lives only in a comment is not retired.
 //   2. NOBODY CAN GRANT IT TO HIMSELF. plan_grants has a SELECT policy and no other, so under
 //      RLS an owner cannot extend his own period. Proven against production inside a rolled-back
-//      transaction: insert refused, update wrote nothing, own row readable.
-//   3. THE PROMISE STILL MATCHES THE PRODUCT. belofte.ts used to say "geen proefperiode die
-//      afloopt", and after this it would have been false. A promise left standing after the
-//      product moved is exactly the untruth that file exists to prevent — so the line changed,
-//      in all three languages, and what the old clause protected is now said in words: nothing
-//      becomes a subscription, nothing is charged, afterwards the free plan applies.
-test("[WELKOM-90] the welcome period is unmissable, ungrantable by its holder, and honestly said", () => {
+//      transaction: insert refused, update wrote nothing, own row readable. Grants did not go
+//      away — a pilot, an extension and the owner's own open-ended row are all still honoured —
+//      so this is if anything more load-bearing than before.
+//   3. THE PROMISE MATCHES THE PRODUCT AGAIN. belofte.ts said "geen proefperiode die afloopt",
+//      which [WELKOM-90] made false and this gate then forbade in all three languages. With the
+//      automatic grant gone the clause is true again and the ninety days are the untruth — so the
+//      assertions are inverted rather than deleted, and [LAUNCH-CONTRACT] at the end of this file
+//      guards the same fact from the customer's side.
+test("[WELKOM-90] the automatic welcome period is retired, and no holder can grant himself one", () => {
   const migratie = readFileSync("supabase/migrations/plan_grants.sql", "utf8");
+  const intrekking = readFileSync("supabase/migrations/welcome_grant_retired.sql", "utf8");
 
-  // 1 — a trigger on profiles, not a line in a route.
+  // 1 — the function is kept where it was, and the trigger that called it is dropped.
   assert.match(migratie, /CREATE TRIGGER profiles_welcome_plus\s+AFTER INSERT ON public\.profiles/,
-    "the welcome grant left the table and moved into a route — the other signup paths now skip it");
-  assert.match(migratie, /interval '90 days'/, "the period is no longer ninety days");
-  assert.match(migratie, /IF NEW\.role = 'accountant' THEN\s+RETURN NEW;/,
-    "an accountant gets a welcome grant — an expiry date on a portal that is free anyway");
+    "plan_grants.sql no longer carries the historical trigger — re-arming a welcome period becomes archaeology");
+  assert.match(intrekking, /DROP TRIGGER IF EXISTS profiles_welcome_plus ON public\.profiles/,
+    "the retirement migration no longer drops the trigger — new accounts would silently get ninety days again");
+  assert.doesNotMatch(intrekking, /DROP FUNCTION/,
+    "grant_welcome_plus is kept on purpose; dropping it turns re-arming into a rewrite");
 
   // 2 — read-only for everyone who is not the service role.
   const beleid = migratie.match(/CREATE POLICY [a-z_]+ ON public\.plan_grants\s+FOR (\w+)/g) ?? [];
@@ -33524,20 +33537,18 @@ test("[WELKOM-90] the welcome period is unmissable, ungrantable by its holder, a
     "plan_grants gained a write policy — an owner who can write here can grant himself Plus forever",
   );
 
-  // 3 — the promise, in all three languages, and the retired clause gone from each.
-  const nl = code("src/lib/belofte.ts");
-  const en = code("src/lib/belofte-en.ts");
-  const ar = code("src/lib/belofte-ar.ts");
-  assert.match(nl, /90 dagen/, "the Dutch promise no longer mentions the period the app gives");
-  assert.match(en, /90 days/);
-  assert.match(ar, /90/);
-  for (const [taal, bron] of [["nl", nl], ["en", en], ["ar", ar]] as const) {
-    assert.doesNotMatch(bron, /geen proefperiode die afloopt|no trial that expires|بلا فترة تجريبية تنتهي/,
-      `the retired clause is back in ${taal} — it stopped being true when the welcome period shipped`);
-  }
+  // 3 — the promise, in all three languages. Inverted with the product: the period is gone from
+  //     the sentence, and the clause it displaced is back because it is true again.
+  assert.doesNotMatch(BELOFTE_GERUST, /90 dagen/,
+    "the Dutch promise still gives ninety days the database stopped granting");
+  assert.doesNotMatch(PROMISE_REASSURE, /90 days/, "so does the English");
+  assert.doesNotMatch(BELOFTE_GERUST_AR, /90/, "so does the Arabic");
+  assert.match(BELOFTE_GERUST, /geen proefperiode die afloopt/,
+    "the Dutch promise dropped the clause that is true again: the free plan does not expire");
+  assert.match(PROMISE_REASSURE, /no trial that expires/, "the English dropped it too");
   // The half that must never be dropped while shortening: no automatic charge.
-  assert.match(nl, /nooit automatisch afgeschreven/, "§5.2 fell out of the Dutch promise");
-  assert.match(en, /never charged automatically/);
+  assert.match(BELOFTE_GERUST, /nooit automatisch afgeschreven/, "§5.2 fell out of the Dutch promise");
+  assert.match(PROMISE_REASSURE, /never charged automatically/);
 
   // ── The reduction, exercised rather than read ──────────────────────────────────────────────
   // A grant decides ceilings, so a bug here is somebody's month. The pure module is tested in
@@ -36177,4 +36188,78 @@ test("[KIES-TERMIJN] the period is chosen at the button, and no published word c
     "[KIES-TERMIJN] §5.6 keeps the rule that actually matters: Plus starts only when you choose it");
   assert.ok(av.includes("**Je wordt nooit onaangekondigd gefactureerd.**"),
     "[KIES-TERMIJN] and the sentence a reader remembers survives the rewrite");
+});
+
+
+// ── [LAUNCH-CONTRACT] The offer on the screen is the offer the database gives ──────────────────
+//
+// WHAT WENT WRONG, AND WHY A GATE AND NOT A PROOFREAD
+//
+// welcome_grant_retired.sql dropped the trigger that gave every new account ninety days of the
+// Plus ceilings. The reason is written in the migration: "Free is the trial now." The migration
+// was applied to production.
+//
+// The offer did not follow. The home page, the English page, the Arabic page and the sales deck
+// all kept promising "je eerste 90 dagen met alles erop", and the plan screen still labelled a
+// grant "Je eerste 90 dagen — alles van Plus". A new entrepreneur was therefore told, in three
+// languages, that they would receive something the database had stopped granting — and the plan
+// screen told the one account with an OPEN-ENDED grant that it would end.
+//
+// Worse than the drift: belofte-en.test.ts ASSERTED the obsolete sentence (`assert.match(
+// PROMISE_REASSURE, /90 days/)`). The suite was holding the mistake in place. That is the failure
+// this gate is shaped against — a promise and its mechanism drifting apart with a green test in
+// between — so it checks the VALUES a customer reads, and ties them to the migration that is the
+// reason they say what they say.
+//
+// Grants themselves are untouched. A pilot, an extension and an open-ended row still live in
+// plan_grants, are still honoured by subscription.ts, and are still shown on the plan screen —
+// with their end date when they have one, and without the claim of one when they do not.
+test("[LAUNCH-CONTRACT] no customer-facing surface promises the retired welcome period", () => {
+  // The claim in every alphabet the offer is published in. Deliberately narrow: "90" is legitimate
+  // elsewhere (a PSD2 consent lasts at most 90 days, the admin panel measures 90-day windows, and
+  // voorwaarden §10.4 promises 90 days' notice if we ever close). This gate never looks there.
+  const WELKOMPERIODE = /\b90\b|\bninety\b|\bnegentig\b|٩٠/;
+
+  // 1. The reassurance under the button, in all three languages that render one.
+  for (const [taal, zin] of [
+    ["Dutch (/)", BELOFTE_GERUST],
+    ["English (/en)", PROMISE_REASSURE],
+    ["Arabic (/ar)", BELOFTE_GERUST_AR],
+  ] as const) {
+    assert.doesNotMatch(zin, WELKOMPERIODE,
+      `${taal} promises a welcome period no new account receives — welcome_grant_retired.sql dropped the trigger`);
+  }
+
+  // 2. The plan screen's own vocabulary. Every plan.* value, in every language it carries.
+  for (const [sleutel, waarden] of Object.entries(MESSAGES)) {
+    if (!sleutel.startsWith("plan.")) continue;
+    for (const [taal, waarde] of Object.entries(waarden as Record<string, string>)) {
+      if (typeof waarde !== "string") continue;
+      assert.doesNotMatch(waarde, WELKOMPERIODE,
+        `${sleutel} [${taal}] still names the ninety-day welcome period`);
+    }
+  }
+
+  // 3. The page that sells the account, in its <meta> as well — a search result is a promise too.
+  assert.doesNotMatch(code("src/app/register/layout.tsx"), WELKOMPERIODE,
+    "the register page's description promises the retired welcome period");
+
+  // 4. The sales deck may not write its own version of the sentence. It takes both promise lines
+  //    from the modules above, which is why fixing them fixed the deck.
+  const deck = code("src/lib/deck.ts");
+  assert.match(deck, /closeBody: BELOFTE_GERUST/, "the Dutch deck stopped quoting belofte.ts");
+  assert.match(deck, /closeBody: PROMISE_REASSURE/, "the English deck stopped quoting belofte-en.ts");
+
+  // 5. And the mechanism this is all measured against, so the gate dies with the fact rather than
+  //    outliving it: the trigger is dropped and the function is kept, on purpose.
+  const migratie = readFileSync(join(process.cwd(), "supabase/migrations/welcome_grant_retired.sql"), "utf8");
+  assert.match(migratie, /DROP TRIGGER IF EXISTS profiles_welcome_plus ON public\.profiles/,
+    "the migration that retires the automatic grant no longer drops the trigger");
+  assert.doesNotMatch(migratie, /DROP FUNCTION/,
+    "grant_welcome_plus is kept deliberately — re-arming a welcome period must stay one CREATE TRIGGER");
+
+  // 6. The free plan the promise now points at is the published one, from the one source of truth.
+  //    A line that says "gratis" while the free plan grants nothing would be the same lie inverted.
+  assert.ok(fairUseLimit("invoicesSent").free > 0 && fairUseLimit("aiDocuments").free > 0,
+    "[LAUNCH-CONTRACT] the free plan must actually give something for 'gratis uitproberen' to be true");
 });
