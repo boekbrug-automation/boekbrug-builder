@@ -131,3 +131,40 @@ test("[JAARPRIJS] een leeg prijsobject komt er niet doorheen — de controle faa
   assert.equal(checkPlusPrice("month", leeg).ok, false);
   assert.equal(checkPlusPrice("year", leeg).ok, false);
 });
+
+test("[KIES-TERMIJN] the wire value the button sends decides the amount that is charged", () => {
+  // THE WHOLE CHAIN, END TO END, for both periods — because the defect this closes was not a
+  // wrong amount but a period nobody could choose: SubscribeButton posted an empty body, the
+  // route defaulted to month, and €179,91 per jaar was published and unbuyable.
+  //
+  // What this test covers is the part that needs no Stripe client:
+  //     what the button puts on the wire  ->  what the route parses  ->  what we publish for it.
+  // The last link — that billing.ts turns "year" into STRIPE_PRICE_ID_PLUS_YEAR and charges THAT
+  // id in line_items — is pinned structurally by [JAARPRIJS] in lifecycle-gates.test.ts, because
+  // it cannot be exercised without a Stripe client. Named here so the seam is visible rather
+  // than assumed.
+  const monthly = parsePlusInterval(JSON.parse(JSON.stringify({ interval: "month" })).interval);
+  const annual = parsePlusInterval(JSON.parse(JSON.stringify({ interval: "year" })).interval);
+
+  assert.equal(monthly, "month", "a monthly button selects monthly");
+  assert.equal(annual, "year", "an annual button selects annual");
+  assert.notEqual(monthly, annual, "the two buttons must not resolve to the same thing");
+
+  // And each resolves to ITS OWN published amount. Asserting both in one place is the point:
+  // a swap that maps both to the same cents is the failure that looks fine on either page alone.
+  assert.equal(publishedCentsFor(monthly!), 1999);
+  assert.equal(publishedCentsFor(annual!), 17991);
+
+  // A correct price object for one interval must be REFUSED for the other — the swapped-id case,
+  // restated here as the two buttons rather than as two environment variables.
+  assert.equal(checkPlusPrice(monthly!, goodPrice("month")).ok, true);
+  assert.equal(checkPlusPrice(annual!, goodPrice("year")).ok, true);
+  assert.equal(checkPlusPrice(monthly!, goodPrice("year")).ok, false);
+  assert.equal(checkPlusPrice(annual!, goodPrice("month")).ok, false);
+
+  // An absent field is the ONLY thing that may mean month (the route's documented default for a
+  // body-less legacy post); a present-but-unknown value must not resolve at all.
+  assert.equal(parsePlusInterval(undefined), null, "absent is not parsed — the ROUTE decides that");
+  assert.equal(parsePlusInterval("yearly"), null);
+  assert.equal(parsePlusInterval("maand"), null);
+});

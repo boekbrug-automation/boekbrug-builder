@@ -11,6 +11,7 @@ import { PLUS } from '@/lib/plan'
 import { fairUseLimit } from '@/lib/fair-use'
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR } from '@/lib/bewaarkluis'
 import SubscribeButton from '@/app/prijzen/SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
   title: 'Fiyatlar — sizin ve muhasebeciniz için ücretsiz | BoekBrug',
@@ -45,6 +46,15 @@ const INCLUDED = [
 
 export default function TrPricingPage() {
   const ai = fairUseLimit('aiDocuments')
+  // [JAARPRIJS] Server-side: a missing annual price costs one button, never the monthly flow,
+  // and the Stripe price id never crosses to the browser — only this boolean does.
+  //
+  // ⚠ THIS PAGE IS STATIC (○ in the build output), so this boolean is baked in AT BUILD TIME.
+  // The Dutch /prijzen is dynamic (ƒ) and re-reads it per request; these three do not. Setting
+  // STRIPE_PRICE_ID_PLUS_YEAR after a deploy therefore lights up the annual button on /prijzen
+  // immediately and on this page only after the next build. Set the variable before deploying,
+  // or redeploy once it is set — see docs/JOUW_LIJST.md.
+  const annualAvailable = isAnnualBillingConfigured()
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: 'var(--font-sans), system-ui, sans-serif' }}>
@@ -90,11 +100,18 @@ export default function TrPricingPage() {
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>{PLUS.priceLabel}</span>
               <span style={{ fontSize: 15, color: '#5f6368' }}>ayda</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>KDV dahil · aylık iptal edilebilir</div>
-            <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
-              Veya yılda {PLUS.annualPriceLabel} — dokuz ayın fiyatına on iki ay.
-            </p>
-            <SubscribeButton />
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>KDV dahil · istediğiniz zaman iptal edilebilir</div>
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                Veya yılda {PLUS.annualPriceLabel} — dokuz ayın fiyatına on iki ay.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton interval="month" label={`Plus al — ayda ${PLUS.priceLabel}`} />
+              {annualAvailable && (
+                <SubscribeButton interval="year" variant="secondary" label={`Yıllık Plus — ${PLUS.annualPriceLabel}`} />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
               {/* [EERLIJK-WOORD] Burada "Plus her sınırı {ai.plus}'e yükseltir" yazıyordu; Plus
                   bir tavan yayımlamadığı için ai.plus sıfırdır ve cümle "her sınırı 0'a yükseltir"
@@ -160,8 +177,8 @@ export default function TrPricingPage() {
             <Faq q="Muhasebecim de öder mi?">
               Hayır ve bu değişmez. Muhasebeci portalı, yüz bağlı müşteriyle bile ücretsizdir. Ücretli bir muhasebeci planı yoktur.
             </Faq>
-            <Faq q="Aylık iptal edebilir miyim?">
-              Evet. Plus&apos;ı kendi ayarlarınızdan kendiniz iptal edersiniz — e-posta yok, telefon yok. Zaten ödediğiniz dönemin sonuna kadar Plus&apos;ta kalır, sonra ücretsiz plana dönersiniz. Hiçbir veri kaybetmezsiniz.
+            <Faq q="İptal edebilir miyim?">
+              Evet, istediğiniz zaman ve hemen — Plus&apos;ı kendi ayarlarınızdan kendiniz iptal edersiniz, e-posta yok, telefon yok. Zaten ödediğiniz dönemin sonuna kadar Plus&apos;ta kalırsınız: aylık ödüyorsanız o ayın sonuna, yıllık ödüyorsanız o yılın sonuna kadar. Sonra ücretsiz plana dönersiniz. Ödenmiş bir dönem otomatik olarak iade edilmez; hizmet bizim yüzümüzden uzun süre kullanılamaz kaldıysa bu istisnadır. Hiçbir veri kaybetmezsiniz.
             </Faq>
             <Faq q="KDV&apos;li fatura alır mıyım?">
               Evet. Her ödeme, kendiniz indirebileceğiniz adınıza bir KDV faturası oluşturur. KDV numaranız varsa, ödeme sırasında onu eklersiniz.

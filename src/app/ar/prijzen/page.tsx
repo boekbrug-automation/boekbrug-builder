@@ -11,6 +11,7 @@ import { PLUS } from '@/lib/plan'
 import { fairUseLimit } from '@/lib/fair-use'
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR } from '@/lib/bewaarkluis'
 import SubscribeButton from '@/app/prijzen/SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
   title: 'الأسعار — مجاني لك ولمحاسبك | BoekBrug',
@@ -46,6 +47,15 @@ const INCLUDED = [
 
 export default function ArPricingPage() {
   const ai = fairUseLimit('aiDocuments')
+  // [JAARPRIJS] Server-side: a missing annual price costs one button, never the monthly flow,
+  // and the Stripe price id never crosses to the browser — only this boolean does.
+  //
+  // ⚠ THIS PAGE IS STATIC (○ in the build output), so this boolean is baked in AT BUILD TIME.
+  // The Dutch /prijzen is dynamic (ƒ) and re-reads it per request; these three do not. Setting
+  // STRIPE_PRICE_ID_PLUS_YEAR after a deploy therefore lights up the annual button on /prijzen
+  // immediately and on this page only after the next build. Set the variable before deploying,
+  // or redeploy once it is set — see docs/JOUW_LIJST.md.
+  const annualAvailable = isAnnualBillingConfigured()
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: arFont }}>
@@ -91,12 +101,19 @@ export default function ArPricingPage() {
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>{PLUS.priceLabel}</span>
               <span style={{ fontSize: 15, color: '#5f6368' }}>شهرياً</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>شامل الضريبة · يمكن الإلغاء شهرياً</div>
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>شامل الضريبة · يمكن الإلغاء في أي وقت</div>
             {/* [JAARPRIJS] السعر السنوي: اثنا عشر شهراً بسعر تسعة. الرقم مشتقّ من plan.ts. */}
-            <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
-              أو {PLUS.annualPriceLabel} سنوياً — اثنا عشر شهراً بسعر تسعة.
-            </p>
-            <SubscribeButton />
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                أو {PLUS.annualPriceLabel} سنوياً — اثنا عشر شهراً بسعر تسعة.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton interval="month" label={`اشترك في Plus — ${PLUS.priceLabel} شهرياً`} />
+              {annualAvailable && (
+                <SubscribeButton interval="year" variant="secondary" label={`Plus سنوياً — ${PLUS.annualPriceLabel}`} />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.7 }}>
               {/* [EERLIJK-WOORD] كان هنا «ترفع كل حدّ إلى {ai.plus}»، و ai.plus يساوي صفراً لأن
                   Plus لا تنشر سقفاً — فكانت الجملة تُعرض «ترفع كل حدّ إلى 0»: أضيق رقم ممكن في
@@ -162,8 +179,8 @@ export default function ArPricingPage() {
             <Faq q="هل يدفع محاسبي أيضاً؟">
               لا، ولن يتغيّر ذلك. بوابة المحاسب مجانية، حتى مع مئة عميل مرتبط. لا توجد باقة محاسب مدفوعة.
             </Faq>
-            <Faq q="هل يمكنني الإلغاء شهرياً؟">
-              نعم. تلغي Plus بنفسك من إعداداتك — بلا بريد ولا مكالمة. تبقى Plus حتى نهاية المدّة التي دفعتها، ثم تعود إلى الباقة المجانية. لا تفقد أي بيانات.
+            <Faq q="هل يمكنني الإلغاء؟">
+              نعم، في أي وقت وفوراً — تلغي Plus بنفسك من إعداداتك، بلا بريد ولا مكالمة. تبقى Plus حتى نهاية المدّة التي دفعتها: حتى نهاية الشهر إن كنت تدفع شهرياً، وحتى نهاية السنة إن كنت تدفع سنوياً. بعدها تعود إلى الباقة المجانية. المدّة المدفوعة لا تُرَدّ تلقائياً، إلا إذا تعذّر استعمال الخدمة مدّة طويلة بسببنا. لا تفقد أي بيانات.
             </Faq>
             <Faq q="هل أحصل على فاتورة بالضريبة؟">
               نعم. كل دفعة تُنتج تلقائياً فاتورة ضريبية باسمك يمكنك تنزيلها بنفسك. إن كان لديك رقم ضريبي، تضيفه عند الدفع.

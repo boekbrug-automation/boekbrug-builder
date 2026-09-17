@@ -34,6 +34,8 @@ import { isExpectedBookingRefusal } from "./incasso-settle";
 import { destinationsFor, railDestinations, DOOR_LOOK } from "./nav-destinations";
 // [WAAROM-VASTGEHOUDEN] De zinnen bij de machinecodes — gescand tegen de plekken die ze maken.
 import { HOLD_LABELS } from "./hold-reasons";
+// [KIES-TERMIJN] The published cancellation note must be true for both billing terms.
+import { PLUS } from "./plan";
 // [WAAROM-WACHT] …en de zin die de eigenaar leest bij dezelfde code.
 import { explainableReasons, explainWaiting } from "./why-waiting";
 import { categoryHint } from "./category-wait";
@@ -36055,4 +36057,124 @@ test("[EERLIJK-WOORD] the trial is gone from every surface, and no sentence prin
   assert.ok(av.includes("5.5.1"), "[EERLIJK-WOORD] the grandfather clause must still exist");
   assert.ok(av.includes("17 september 2026"),
     "[EERLIJK-WOORD] and the day the limits changed must be named in the binding text");
+});
+
+// [KIES-TERMIJN] The customer chooses the period that is charged, and every published word is
+// true for both of them.
+//
+// Five release mismatches, found by the owner on the finished branch, all of the same family: the
+// backend learned to sell two billing intervals and the surface around it still described one.
+//
+//  1. NOBODY COULD BUY THE ANNUAL PRICE. SubscribeButton posted an empty body, so the route fell
+//     back to "month". /prijzen advertised €179,91 per jaar, billing.ts would have charged it
+//     correctly, and no screen could ask for it. A price published and unsellable is the mirror
+//     of a price charged and unpublished — and it is the one nobody reports, because the customer
+//     simply does not buy.
+//  2. "Maandelijks opzegbaar" / "Facturatie maandelijks vooruit" / "einde van de betaalde maand"
+//     are all FALSE for an annual subscriber, and false in the expensive direction: he reads
+//     "monthly" and believes one month ends his year.
+//  3. The Terms carried TWO clauses numbered 5.5.2 — one of them mine, added the day before.
+//  4. §5.3 promised SEPA-incasso, which billing.ts explicitly defers; checkout offers iDEAL and
+//     card. A published contract naming a payment method the checkout does not offer is a
+//     promise made to someone who then cannot use it.
+//  5. §5.6 still said Plus "is nog niet geactiveerd" and that the start of the paid service would
+//     be announced later — which stops being true the moment this branch deploys.
+//
+// ONE PRODUCT, TWO INTERVALS — never two products. Same limits, same features, same Plus; only
+// the moment of payment differs. Everything below is written to hold that line.
+test("[KIES-TERMIJN] the period is chosen at the button, and no published word contradicts it", () => {
+  // ── 1. THE PURCHASE DOOR NAMES ITS PERIOD ───────────────────────────────────────────────
+  const button = code("src/app/prijzen/SubscribeButton.tsx");
+  assert.match(
+    button,
+    /body: JSON\.stringify\(\{ interval \}\)/,
+    "[KIES-TERMIJN] the button must send the interval it charges; an empty body silently means month",
+  );
+  assert.match(button, /interval: PlusInterval/,
+    "[KIES-TERMIJN] interval is a REQUIRED prop — there must be no SubscribeButton that does not " +
+      "say what it charges");
+  assert.doesNotMatch(button, /STRIPE_PRICE_ID/,
+    "[KIES-TERMIJN] no Stripe price id may reach the browser; the client sends a period, the " +
+      "server maps it to an id");
+
+  // Every pricing page offers BOTH, and the annual one only when it can actually be bought.
+  for (const page of [
+    "src/app/prijzen/page.tsx",
+    "src/app/en/prijzen/page.tsx",
+    "src/app/ar/prijzen/page.tsx",
+    "src/app/tr/prijzen/page.tsx",
+  ]) {
+    const src = code(page);
+    assert.match(src, /<SubscribeButton\s+interval="month"/,
+      `[KIES-TERMIJN] ${page} must offer the monthly purchase explicitly`);
+    assert.match(src, /<SubscribeButton\s+interval="year"/,
+      `[KIES-TERMIJN] ${page} must offer the annual purchase — publishing the amount without a ` +
+        "way to buy it is the defect this gate exists for");
+    assert.match(src, /const annualAvailable = isAnnualBillingConfigured\(\)/,
+      `[KIES-TERMIJN] ${page} must read availability on the SERVER`);
+    // The annual button must sit behind that flag. An annual button with no price configured
+    // opens a checkout that can only throw — the same broken promise, one click later.
+    const yearAt = src.indexOf('interval="year"');
+    const guardBefore = src.lastIndexOf("{annualAvailable && (", yearAt);
+    assert.ok(
+      guardBefore > 0 && yearAt - guardBefore < 400,
+      `[KIES-TERMIJN] ${page} must not offer an annual button when no annual price is configured`,
+    );
+  }
+
+  // ── 2. NO PUBLISHED WORD IS MONTH-ONLY ──────────────────────────────────────────────────
+  assert.equal(PLUS.cancelNote, "altijd opzegbaar");
+  const av = code("src/content/legal/algemene-voorwaarden.ts");
+  for (const [phrase, why] of [
+    ["Facturatie maandelijks vooruit", "billing is monthly OR yearly in advance"],
+    // The BARE phrase, not the long form. The long form only appeared in §5.4; the §5.1 table
+    // row said "Maandelijks opzegbaar" on its own and survived the first version of this gate —
+    // found by rendering the document rather than reading the diff.
+    ["Maandelijks opzegbaar", "cancelling is always possible, not monthly"],
+    ["einde van de betaalde maand", "an annual subscriber keeps Plus to the end of his YEAR"],
+    ["Reeds betaalde maanden worden niet gerestitueerd", "the unit is a paid TERM, not a month"],
+  ] as const) {
+    assert.ok(!av.includes(phrase), `[KIES-TERMIJN] Terms still say "${phrase}" — ${why}`);
+  }
+  assert.ok(av.includes("Altijd opzegbaar"), "[KIES-TERMIJN] §5.4 says cancelling is always possible");
+  assert.ok(
+    av.includes("bij de maandtermijn per maand vooruit, bij de jaartermijn per jaar vooruit"),
+    "[KIES-TERMIJN] §5.3 must name both terms rather than one of them",
+  );
+  for (const page of ["src/app/prijzen/page.tsx", "src/app/en/prijzen/page.tsx"]) {
+    assert.doesNotMatch(code(page), /Faq q="(Kan ik maandelijks opzeggen\?|Can I cancel monthly\?)"/,
+      `[KIES-TERMIJN] ${page} must not ask a month-only cancellation question`);
+  }
+
+  // ── 3. EVERY TERMS CLAUSE NUMBER IS USED ONCE ───────────────────────────────────────────
+  // Two clauses numbered 5.5.2 is not a typo in a contract: a reference to "§5.5.2" then points
+  // at two different promises, and the reader picks.
+  const numbers = [...av.matchAll(/\*\*(\d+\.\d+(?:\.\d+)?) /g)].map((m) => m[1]);
+  const seen = new Set<string>();
+  for (const n of numbers) {
+    assert.ok(!seen.has(n), `[KIES-TERMIJN] clause ${n} is numbered twice in the Terms`);
+    seen.add(n);
+  }
+  assert.ok(seen.has("5.5.1") && seen.has("5.5.2") && seen.has("5.5.3"),
+    "[KIES-TERMIJN] the grandfather clause, what changed on 17 September, and why — three numbers");
+
+  // ── 4. THE CONTRACT NAMES ONLY METHODS THE CHECKOUT OFFERS ──────────────────────────────
+  // billing.ts defers SEPA deliberately ("het needs a mandate flow we deliberately keep out of
+  // v1"), so promising it in §5.3 is a promise to someone who then cannot use it.
+  assert.ok(!av.includes("SEPA-incasso"),
+    "[KIES-TERMIJN] the Terms must not promise a payment method the checkout does not offer");
+  assert.doesNotMatch(code("src/lib/billing.ts"), /payment_method_types: \["ideal", "card", "sepa/,
+    "[KIES-TERMIJN] …and if SEPA is ever added, §5.3 is written to cover it without an edit");
+  assert.ok(av.includes("met de betaalmethoden die op dat moment bij het afrekenen worden aangeboden"),
+    "[KIES-TERMIJN] §5.3 describes the checkout rather than enumerating a list that will drift");
+
+  // ── 5. NO FUTURE-LAUNCH WORDING IN A LIVE CONTRACT ──────────────────────────────────────
+  assert.ok(!av.includes("Zolang Plus nog niet is geactiveerd"),
+    "[KIES-TERMIJN] §5.6 may not say the paid service has not started once it has");
+  assert.ok(!av.includes("kondigen de start van de betaalde dienst"),
+    "[KIES-TERMIJN] nor promise to announce a launch that already happened");
+  assert.ok(av.includes("Een gratis account wordt **nooit** automatisch een betaald account"),
+    "[KIES-TERMIJN] §5.6 keeps the rule that actually matters: Plus starts only when you choose it");
+  assert.ok(av.includes("**Je wordt nooit onaangekondigd gefactureerd.**"),
+    "[KIES-TERMIJN] and the sentence a reader remembers survives the rewrite");
 });

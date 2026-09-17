@@ -26,6 +26,7 @@ import { FAIR_USE_LIMITS, formatLimit, fairUseLimit, ACCOUNTANT_FREE_CLIENTS } f
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR, KLUIS_YEAR_PRICE_EUR, KLUIS_SHUTDOWN_NOTICE_DAYS } from '@/lib/bewaarkluis'
 import { BELOFTE_KOP, BELOFTE_KOP_2, BELOFTE_UITLEG } from '@/lib/belofte'
 import SubscribeButton from './SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
   title: 'Prijzen — gratis uitproberen, Plus om op te draaien | BoekBrug',
@@ -78,6 +79,11 @@ export default async function PrijzenPage({
   const params = await searchParams
   const cancelled = params.geannuleerd === '1'
   const ai = fairUseLimit('aiDocuments')
+  // [JAARPRIJS] Read on the SERVER. A missing annual price must cost one button, never the
+  // monthly flow — and the price id behind it never crosses to the browser, only this boolean.
+  // Offering an annual button that cannot open a checkout is the same broken promise as
+  // publishing the amount with no way to buy it, one click later.
+  const annualAvailable = isAnnualBillingConfigured()
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: 'var(--font-sans), system-ui, sans-serif' }}>
@@ -163,10 +169,24 @@ export default async function PrijzenPage({
             </div>
             {/* [JAARPRIJS] Twaalf maanden voor de prijs van negen. Het bedrag komt uit plan.ts,
                 dat het afleidt uit fair-use.ts — hier wordt niets overgetypt. */}
-            <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
-              Of {PLUS.annualPriceLabel} {PLUS.annualPeriod} — twaalf maanden voor de prijs van negen.
-            </p>
-            <SubscribeButton />
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                Of {PLUS.annualPriceLabel} {PLUS.annualPeriod} — twaalf maanden voor de prijs van negen.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton
+                interval="month"
+                label={`Plus nemen — ${PLUS.priceLabel} ${PLUS.period}`}
+              />
+              {annualAvailable && (
+                <SubscribeButton
+                  interval="year"
+                  variant="secondary"
+                  label={`Plus per jaar — ${PLUS.annualPriceLabel}`}
+                />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
               {/* [LIMIET-ZIN] `ai.free`, niet formatLimit(): die geeft "10 per maand" terug, en in
                   een zin die zelf al "per maand" zegt las dat als "meer dan 10 per maand documenten
@@ -336,12 +356,21 @@ export default async function PrijzenPage({
               constructie met gratis maanden erin.
             </Faq>
 
-            <Faq q="Kan ik maandelijks opzeggen?">
-              Ja. Je zegt Plus zelf op in je eigen instellingen — geen mailtje, geen telefoontje. Je
-              houdt Plus tot het einde van de periode die je al hebt betaald, en valt daarna terug
-              op het gratis plan. Je verliest geen enkel gegeven: er wordt niets verwijderd, je
-              mailbox blijft gekoppeld, en alles blijft leesbaar en exporteerbaar. Alleen nieuwe
-              groei boven de gratis grenzen pauzeert.
+            {/* [JAARPRIJS] Deze vraag heette "Kan ik maandelijks opzeggen?" en dat antwoord was
+                onwaar geworden voor wie per jaar betaalt: hij leest "maandelijks" en denkt dat
+                hij na een maand van zijn jaarbedrag af is. Eén Plus, twee termijnen — dus de
+                vraag gaat over opzeggen en het antwoord noemt beide termijnen bij naam. */}
+            <Faq q="Kan ik opzeggen?">
+              Ja, altijd en per direct — je zegt Plus zelf op in je eigen instellingen, geen
+              mailtje en geen telefoontje. Je houdt Plus tot het einde van de periode die je al
+              hebt betaald: bij maandelijks betalen tot het einde van die maand, bij jaarlijks
+              betalen tot het einde van dat jaar. Daarna val je terug op het gratis plan. Een al
+              betaalde periode wordt niet automatisch terugbetaald — tenzij de dienst door ons
+              toedoen langdurig onbruikbaar was ({''}
+              <Link href="/voorwaarden" style={{ color: '#1A73E8' }}>Voorwaarden §5.4</Link>).
+              Je verliest geen enkel gegeven: er wordt niets verwijderd, je mailbox blijft
+              gekoppeld, en alles blijft leesbaar en exporteerbaar. Alleen nieuwe groei boven de
+              gratis grenzen pauzeert.
             </Faq>
 
             <Faq q="Krijg ik een factuur met btw?">

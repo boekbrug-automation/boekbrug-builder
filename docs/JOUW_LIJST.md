@@ -371,6 +371,12 @@ Laat je `STRIPE_PRICE_ID_PLUS_YEAR` leeg, dan is er simpelweg geen jaarknop en w
 maandprijs gewoon door. Dat is met opzet: een halve inrichting mag de maandflow nooit
 meenemen.
 
+> **Zet de variabele vóórdat je deployt, of deploy opnieuw nadat je hem hebt gezet.**
+> `/prijzen` is een dynamische pagina en leest hem bij elk bezoek, dus daar verschijnt de
+> jaarknop meteen. `/en/prijzen`, `/ar/prijzen` en `/tr/prijzen` zijn statisch: daar wordt bij
+> het BOUWEN vastgelegd of er een jaarprijs is. Zet je de variabele ná een deploy, dan blijft de
+> jaarknop op die drie pagina's weg tot de volgende build.
+
 **☐ Stripe: iDEAL aan, Invoicing aan, Billing Portal met zelf-opzeggen aan**
 Kaart-alleen verliest echte Nederlandse klanten bij de laatste klik. Zelf kunnen opzeggen is
 onder EU-consumentenrecht geen keuze.

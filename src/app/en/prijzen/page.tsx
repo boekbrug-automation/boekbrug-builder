@@ -11,6 +11,7 @@ import { PLUS } from '@/lib/plan'
 import { FAIR_USE_LIMITS, fairUseLimit } from '@/lib/fair-use'
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR } from '@/lib/bewaarkluis'
 import SubscribeButton from '@/app/prijzen/SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
   title: 'Pricing — try it free, run your business on Plus | BoekBrug',
@@ -51,6 +52,15 @@ const INCLUDED = [
 
 export default function EnPricingPage() {
   const ai = fairUseLimit('aiDocuments')
+  // [JAARPRIJS] Server-side: a missing annual price costs one button, never the monthly flow,
+  // and the Stripe price id never crosses to the browser — only this boolean does.
+  //
+  // ⚠ THIS PAGE IS STATIC (○ in the build output), so this boolean is baked in AT BUILD TIME.
+  // The Dutch /prijzen is dynamic (ƒ) and re-reads it per request; these three do not. Setting
+  // STRIPE_PRICE_ID_PLUS_YEAR after a deploy therefore lights up the annual button on /prijzen
+  // immediately and on this page only after the next build. Set the variable before deploying,
+  // or redeploy once it is set — see docs/JOUW_LIJST.md.
+  const annualAvailable = isAnnualBillingConfigured()
   const otherLimits = FAIR_USE_LIMITS.length - 1
 
   return (
@@ -97,11 +107,18 @@ export default function EnPricingPage() {
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>{PLUS.priceLabel}</span>
               <span style={{ fontSize: 15, color: '#5f6368' }}>per month</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>incl. VAT · cancel monthly</div>
-            <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
-              Or {PLUS.annualPriceLabel} per year — twelve months for the price of nine.
-            </p>
-            <SubscribeButton />
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>incl. VAT · cancel any time</div>
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                Or {PLUS.annualPriceLabel} per year — twelve months for the price of nine.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton interval="month" label={`Get Plus — ${PLUS.priceLabel} per month`} />
+              {annualAvailable && (
+                <SubscribeButton interval="year" variant="secondary" label={`Plus per year — ${PLUS.annualPriceLabel}`} />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
               {/* [EERLIJK-WOORD] This said "Plus raises every limit to {ai.plus}". Since Plus
                   publishes no ceiling, ai.plus is 0 — so that sentence rendered "raises every
@@ -172,8 +189,8 @@ export default function EnPricingPage() {
             <Faq q="Does my accountant pay too?">
               No, and that will not change. The accountant portal is free, even with a hundred linked clients. There is no paid accountant plan.
             </Faq>
-            <Faq q="Can I cancel monthly?">
-              Yes. You cancel Plus yourself in your own settings — no email, no phone call. You keep Plus until the end of the period you already paid, and then fall back to the free plan. You lose no data: nothing is deleted, your mailbox stays connected, and everything stays readable and exportable. Only new growth beyond the free limits pauses.
+            <Faq q="Can I cancel?">
+              Yes, at any time and with immediate effect — you cancel Plus yourself in your own settings, no email and no phone call. You keep Plus until the end of the period you already paid: to the end of that month if you pay monthly, to the end of that year if you pay yearly. After that you fall back to the free plan. An already-paid period is not automatically refunded, unless the service was unusable for a long time through our doing (<Link href="/voorwaarden" style={{ color: '#1A73E8' }}>Terms §5.4</Link>). You lose no data: nothing is deleted, your mailbox stays connected, and everything stays readable and exportable. Only new growth beyond the free limits pauses.
             </Faq>
             <Faq q="Do I get an invoice with VAT?">
               Yes. Every payment automatically produces a VAT invoice in your name that you can download yourself. If you have a VAT number, you add it at checkout.

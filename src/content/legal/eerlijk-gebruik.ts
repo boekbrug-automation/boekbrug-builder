@@ -68,7 +68,7 @@ stilzwijgend verlagen, en nooit je eigen gegevens op slot.
 |---|---|
 | **Boekhouder / administratiekantoor** | **Gratis tot en met 10 gekoppelde klanten** — het volledige portaal, het werkbord en het ophalen van het kwartaal per klant. Geen proefperiode en geen klok: blijf je onder de tien, dan blijft het gratis. Daarboven een tarief per gekoppelde klant per maand, dat pas gaat gelden nadat wij het minstens 30 dagen vooraf hebben aangekondigd — zie voorwaarden §5.8 |
 | **Ondernemer — Gratis** | **€ 0.** Alle functies, om uit te proberen, binnen de grenzen hieronder |
-| **Ondernemer — Plus** | **€ ${prijs} per maand** of **€ ${jaarprijs} per jaar**, inclusief btw. Maandelijks opzegbaar |
+| **Ondernemer — Plus** | **€ ${prijs} per maand** of **€ ${jaarprijs} per jaar**, inclusief btw. Altijd opzegbaar; je houdt Plus tot het einde van de termijn die je al betaald hebt |
 
 De jaarprijs is twaalf maanden voor de prijs van negen (9 × € ${prijs}). Het is één bedrag per
 jaar: geen constructie met gratis maanden erin, en geen abonnement dat halverwege van vorm
@@ -115,8 +115,8 @@ Kom je er toch overheen, dan pauzeert alléén de handeling die geld kost:
 ${gevolgen}
 
 En dan heb je twee keuzes, allebei goed: **wachten tot de volgende maand** (de tellers gaan
-naar nul en alles werkt weer), of **overstappen naar Plus** (per direct, maandelijks
-opzegbaar).
+naar nul en alles werkt weer), of **overstappen naar Plus** (per direct; je kiest zelf of je
+per maand of per jaar betaalt, en opzeggen kan altijd).
 
 **En als je Plus later weer opzegt?** Dan wordt er niets verwijderd, blijft je gekoppelde
 mailbox gekoppeld en blijft alles leesbaar en exporteerbaar. Wat je boven de gratis grenzen

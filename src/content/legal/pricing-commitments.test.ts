@@ -54,9 +54,20 @@ test("the grandfathering promise names the three ways it could be eroded, and re
 test("the Terms record why the promise was made at zero customers", () => {
   // Not decoration. It is what lets a later reader tell the difference between a promise made from
   // strength and one extracted after the fact — and it is the sentence a future rewrite drops first.
-  assert.ok(
-    voorwaarden.includes("**5.5.2 Waarom dit er staat op het moment dat het niets kost.**"),
-    "§5.5.2 — the note that this was written before there was a reason to want it narrower",
+  //
+  // [KIES-TERMIJN] This pinned the clause NUMBER (5.5.2) and broke when the clause was renumbered
+  // to 5.5.3 — which happened because the Terms had briefly carried TWO clauses numbered 5.5.2.
+  // So the number was the thing that was wrong, and a test asserting one exact number could not
+  // tell "the promise was deleted" from "the promise was renumbered after a collision". It now
+  // asserts what actually matters — the sentence is present, under SOME §5.5.x number, exactly
+  // once — and the no-duplicate-numbers rule lives in [KIES-TERMIJN] where it belongs.
+  const heading = [...voorwaarden.matchAll(
+    /\*\*(5\.5\.\d+) Waarom dit er staat op het moment dat het niets kost\.\*\*/g,
+  )];
+  assert.equal(
+    heading.length,
+    1,
+    "§5.5.x — the note that this was written before there was a reason to want it narrower, once",
   );
 });
 

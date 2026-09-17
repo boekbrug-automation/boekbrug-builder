@@ -49,8 +49,9 @@ function euroLabel(amount: number): string {
 }
 
 /**
- * Het enige betaalde maandplan voor de ondernemer. Nodig zodra iemand structureel boven het
- * eerlijk gebruik uitkomt — nooit eerder, en nooit automatisch.
+ * Het enige betaalde plan voor de ondernemer, in twee betaaltermijnen — per maand of per jaar.
+ * ÉÉN product, niet twee: dezelfde grenzen, dezelfde functies, alleen een ander moment van
+ * afrekenen. Nodig zodra iemand zijn onderneming op BoekBrug draait — nooit automatisch.
  */
 export const PLUS = {
   id: "plus",
@@ -63,8 +64,16 @@ export const PLUS = {
   annualPeriod: "per jaar",
   /** Nederlandse consumentenprijzen zijn inclusief btw; de Stripe-prijs moet dat ook zijn. */
   btwNote: "incl. btw",
-  /** Maandelijks opzegbaar, per direct. Geen opzegtermijn. */
-  cancelNote: "maandelijks opzegbaar",
+  /**
+   * [JAARPRIJS] Opzeggen kan altijd, per direct, zonder opzegtermijn.
+   *
+   * Dit zei "maandelijks opzegbaar", en dat was waar toen er één termijn bestond. Voor wie per
+   * jaar betaalt is het onwaar op de manier die telt: hij leest "maandelijks" en denkt dat hij
+   * na een maand van zijn jaarbedrag af is. Hetzelfde Plus, twee betaaltermijnen — dus de zin
+   * beschrijft de handeling (opzeggen kan altijd) en niet de termijn, en wat er daarna met je
+   * toegang gebeurt staat in de zin ernaast en in voorwaarden §5.4.
+   */
+  cancelNote: "altijd opzegbaar",
 } as const;
 
 /** Het archiefproduct. Loopt door nadat de klant is vertrokken — zie bewaarkluis.ts. */
