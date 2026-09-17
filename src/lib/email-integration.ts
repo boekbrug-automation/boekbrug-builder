@@ -68,6 +68,13 @@ import { eInvoiceContradictsRead, looksLikeInvoiceXml, isEInvoiceXmlMime, E_INVO
 // [EERLIJK-GEBRUIK] De maandteller. Zie de toelichting bij de poort in syncUserEmails: dit was
 // de enige betaalde weg naar Anthropic die er niet langs kwam.
 import { consumeFairUseUpTo, releaseFairUse } from '@/lib/fair-use-usage'
+import { storageRoom, storageFits, type StorageRoom } from '@/lib/fair-use-gate'
+
+/**
+ * [OPSLAG-DEUR] "There was no room for this file" — distinct from null, which means "keeping it
+ * failed". The difference decides the watermark: a failure may be given up on, a full disk may not.
+ */
+const STORAGE_FULL = 'storage_full' as const
 import { planForUser } from '@/lib/fair-use-gate'
 // [BON-EMAIL] The payment question, answered in ONE place for every door. The camera path and this
 // one must never disagree about whether a bon was paid — a second copy of that reasoning here is
@@ -2434,6 +2441,13 @@ export async function syncUserEmails(
   // voortgang": een bijlage die blijft hangen (opnieuw proberen helpt) en een MAANDgrens (opnieuw
   // proberen kan per definitie niets opleveren).
   heldByFairUse: number
+  /**
+   * [OPSLAG-DEUR] Attachments this run refused to write because the account is out of room. They
+   * are still in the mailbox and the mark still stands behind them — this is the number that makes
+   * a held sync visible instead of merely quiet. A sync that holds has no `errors` to show for it
+   * and would otherwise look like a sync that found nothing.
+   */
+  storageHeld: number
   // [LEZER-STIL] Did the READER refuse this run for a reason that is app-wide — an empty balance,
   // a wrong key or model, our own spend fuse, or a capacity outage that took the whole batch?
   //
@@ -2584,7 +2598,7 @@ export async function syncUserEmails(
   const accessToken = await refreshAccessToken(userId)
   if (!accessToken) {
     console.error('[BOEK-011] Could not obtain a fresh access_token', { userId })
-    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, readerOutage: false, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
+    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, storageHeld: 0, readerOutage: false, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
   }
 
   // [H3] The per-message "already done" skip set was removed — it was prefix-matched on
@@ -2635,7 +2649,7 @@ export async function syncUserEmails(
     }
   } catch (error) {
     console.error('[BOEK-011] Fetch failed:', error)
-    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, readerOutage: false, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
+    return { provider: tokens.provider, fetched: 0, verified: 0, saved: 0, autoAdvanced: 0, errors: 1, remaining: 0, heldByFairUse: 0, storageHeld: 0, readerOutage: false, skipped: 0, couldNotRead: 0, keptForBooking: 0, balance: { fetched: 0, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: 0, balanced: true } }
   }
 
   // [MAILTEKST] The invoices that never had an attachment. A separate, bounded pass appended to
@@ -3070,7 +3084,11 @@ export async function syncUserEmails(
   // en erger, echte facturen uit de maandgrens duwen die wél gelezen moeten worden. Ze gaan er dus
   // altijd doorheen, ook wanneer de grens bereikt is; de volgorde van de rest blijft gelijk.
   const aiCandidates = batchCandidates.filter((a) => !isEInvoiceXmlMime(a.mimeType))
-  const fairUsePlan = aiCandidates.length > 0 ? await planForUser(supabase, userId) : 'free'
+  // [OPSLAG-DEUR] `batchCandidates`, not `aiCandidates`: an e-factuur XML costs no AI read but it
+  // still takes room on the disk, so the plan has to be known whenever there is anything to STORE.
+  // The "don't add a query to an empty sync" rule the comment above is about is untouched — a sync
+  // with nothing to save still asks nothing.
+  const fairUsePlan = batchCandidates.length > 0 ? await planForUser(supabase, userId) : 'free'
   const fairUse = await consumeFairUseUpTo({
     userId,
     metric: 'aiDocuments',
@@ -3078,6 +3096,27 @@ export async function syncUserEmails(
     wanted: aiCandidates.length,
   })
   const hold = fairUseHold(aiCandidates.length, fairUse.granted, fairUsePlan === 'plus' ? 'plus' : 'free')
+
+  // [OPSLAG-DEUR] The room on the disk, measured ONCE for this run.
+  //
+  // WHY THE E-MAIL SYNC HOLDS INSTEAD OF REFUSING. Every other storage door answers a person who is
+  // waiting on a screen, and a 402 tells them exactly what happened. This one is a background job:
+  // there is nobody to tell, and the thing in its hands is somebody's incoming invoice. So a full
+  // disk must never turn into a discarded attachment, a could_not_read row, or a watermark that
+  // walks past mail we never stored — all three lose a document for good. It HOLDS: the attachment
+  // stays in the mailbox, the mark stays behind it, and the next sync picks it up the moment there
+  // is room again. That is the same shape as the [COST-GUARD] outage hold a few lines down.
+  //
+  // Measured once and then accounted in BYTES across the run (see storageFits): re-measuring per
+  // attachment would paginate every document row the owner has, once per file.
+  const room: StorageRoom = batchCandidates.length > 0
+    ? await storageRoom({ client: supabase, userId, plan: fairUsePlan })
+    : { measurable: false, usedMb: 0, limitMb: 0, plan: 'free' }
+  let storedBytesThisRun = 0
+  let storageHeld = 0
+  /** Room for this file, counting everything this run has already written. */
+  const roomFor = (bytes: number): boolean => storageFits(room, bytes, storedBytesThisRun)
+  const tookRoom = (bytes: number): void => { storedBytesThisRun += Math.max(0, bytes) }
   if (hold) {
     console.warn('[EERLIJK-GEBRUIK] maandgrens bereikt — rest van de batch wordt bewaard, niet gelezen', {
       userId,
@@ -3194,7 +3233,12 @@ export async function syncUserEmails(
     aiDocType: string = DOC_TYPE_COULD_NOT_READ,
     // [HERINNERING-NOOIT] A reminder WAS read; the caller says so. Every other kept file was not.
     opts: { aiProcessed?: boolean } = {},
-  ): Promise<string | null> => {
+    // [OPSLAG-DEUR] STORAGE_FULL is a THIRD answer, not a flavour of null. `null` here already
+    // means "could not keep it" and four of the five callers answer that by letting the watermark
+    // pass — which is right for a failure and catastrophic for a full disk, because the mail would
+    // be marked done while nothing was stored. A distinct value makes the compiler ask each caller
+    // what it wants to do, exactly as it did for the AI account id.
+  ): Promise<string | null | typeof STORAGE_FULL> => {
     try {
       const buf = Buffer.from(att.data, 'base64')
       const hash = computeContentHash(buf)
@@ -3204,12 +3248,20 @@ export async function syncUserEmails(
       // [DUP-TRASHED] Ook het onleesbare-bijlage-pad: botst het op een weggegooide rij, dan is er
       // niets meer om naar te verwijzen en hoort de bijlage gewoon opnieuw bewaard te worden.
       if (dupDoc && !(await trashedDuplicateCleared(supabase, userId, dupDoc))) return dupDoc.id
+      // [OPSLAG-DEUR] AFTER the duplicate check, deliberately: these exact bytes are already on the
+      // disk, so handing back the row that holds them costs nothing and must keep working on a full
+      // account. The limit is about ADDING, never about reaching what is already there.
+      if (!roomFor(buf.length)) {
+        storageHeld++
+        return STORAGE_FULL
+      }
       {
         const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
         const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
         const { error: upErr } = await supabase.storage
           .from('documents').upload(storagePath, buf, { contentType: att.mimeType, upsert: false })
         if (!upErr) {
+          tookRoom(buf.length)
           const folderId = await resolveImportTarget(userId, null, 'facturen', 'pipeline')
           const { data: docRow, error: docErr } = await supabase.from('documents').insert({
             user_id: userId,
@@ -3304,7 +3356,10 @@ export async function syncUserEmails(
     }
     if (next < SYNC_MAX_ATTEMPTS) return false
     console.warn('[POISON-PILL] giving up on attachment after repeated failures', { key, attempts: next })
-    await saveKeptAttachment(att, 'repeatedly_failed')
+    // [OPSLAG-DEUR] Giving up on a broken attachment still KEEPS its bytes, so a full disk means we
+    // cannot give up either: returning true would retire it with nothing stored. Stay un-given-up
+    // and let the next sync try again once there is room.
+    if (await saveKeptAttachment(att, 'repeatedly_failed') === STORAGE_FULL) return false
     return true
   }
 
@@ -3547,7 +3602,14 @@ export async function syncUserEmails(
         // read is recoverable (the file is in bestanden, with a re-read button); losing the file is
         // not, and this is a till closing that a quarter's aangifte waits on.
         if (attachment.fromArchive) {
-          await saveKeptAttachment(attachment, 'could_not_read')
+          if (await saveKeptAttachment(attachment, 'could_not_read') === STORAGE_FULL) {
+          // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
+          // all do not let the mark walk past it — the attachment is still in the mailbox and the
+          // next sync takes it the moment there is room. Marking it complete here is the silent
+          // loss this gate exists to prevent.
+            errors++
+            continue
+          }
           couldNotRead++
           completedKeys.add(wmKey)
           continue
@@ -3570,7 +3632,14 @@ export async function syncUserEmails(
       // owner is told, and register it with reason 'could_not_read' (still stops the
       // costly per-sync re-send, but is honest about WHY).
       if (!classification.isInvoice && !((classification.confidence ?? 0) > 0)) {
-        await saveKeptAttachment(attachment, 'could_not_read')
+        if (await saveKeptAttachment(attachment, 'could_not_read') === STORAGE_FULL) {
+          // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
+          // all do not let the mark walk past it — the attachment is still in the mailbox and the
+          // next sync takes it the moment there is room. Marking it complete here is the silent
+          // loss this gate exists to prevent.
+          errors++
+          continue
+        }
         couldNotRead++
         completedKeys.add(wmKey) // handled (kept + registered) = complete
         continue
@@ -3594,7 +3663,14 @@ export async function syncUserEmails(
           await loadBookableReaders(),
         )
         if (houden.keep && houden.kind) {
-          await saveKeptAttachment(attachment, houden.reason, houden.kind)
+          if (await saveKeptAttachment(attachment, houden.reason, houden.kind) === STORAGE_FULL) {
+          // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
+          // all do not let the mark walk past it — the attachment is still in the mailbox and the
+          // next sync takes it the moment there is room. Marking it complete here is the silent
+          // loss this gate exists to prevent.
+            errors++
+            continue
+          }
           keptForBooking++
           skipped++
           completedKeys.add(wmKey) // [watermark] kept + registered = complete
@@ -4196,6 +4272,17 @@ export async function syncUserEmails(
       // kennen — anders blijft de XML als wees achter terwijl zijn rij verdwijnt.
       let uploadedPath: string | null = null
 
+      // [OPSLAG-DEUR] The main door, and the one that matters most: this is the invoice itself.
+      // No room means HOLD — the mark stays behind this message, the attachment stays in the
+      // mailbox, and the next sync imports it once the owner has space again. Checked before the
+      // try-block so the hold is an ordinary `continue` and cannot be swallowed by the catch below,
+      // which exists to clean up a HALF-written document and would read a refusal as a failure.
+      if (!roomFor(fileBuffer.length)) {
+        storageHeld++
+        errors++
+        continue
+      }
+
       try {
         // [BRIDGE-EXTRACT] fileBuffer already computed above for the byte-hash gate
         const safeName = attachment.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -4209,6 +4296,7 @@ export async function syncUserEmails(
           })
 
         if (!uploadErr) {
+          tookRoom(fileBuffer.length)
           // [BOEK-011] Resolve the correct folder via BOEK-033's function
           // ctx='pipeline' — background job, service_role, no user session
           // Never returns null — falls back to "Geïmporteerde bestanden"
@@ -4299,12 +4387,26 @@ export async function syncUserEmails(
               try {
                 const { extractEmbeddedPdf } = await import('@/lib/ubl-embedded-pdf')
                 const ingesloten = extractEmbeddedPdf(Buffer.from(attachment.data, 'base64').toString('utf8'))
-                if (ingesloten) {
+                // [OPSLAG-DEUR] The only door that may be refused WITHOUT holding, and the reason is
+                // that the invoice is already saved: the e-factuur XML above IS the document, with
+                // every amount, the BTW and the supplier already read from it. This PDF is the
+                // rendering the owner opens — a real loss of convenience, no loss of money or
+                // paper. Holding the whole invoice for it would be worse than skipping it, and
+                // skipping it silently would be the overflow this gate refuses, so it is counted.
+                if (ingesloten && !roomFor(ingesloten.bytes.length)) {
+                  storageHeld++
+                  console.warn('[OPSLAG-DEUR] geen ruimte voor de ingesloten PDF — e-factuur is bewaard, de PDF niet', {
+                    userId, filename: attachment.filename,
+                  })
+                } else if (ingesloten) {
                   const pdfPad = `${storagePath.replace(/\.[^./]*$/, '')}.pdf`
                   const { error: pdfErr } = await supabase.storage
                     .from('documents')
                     .upload(pdfPad, ingesloten.bytes, { contentType: 'application/pdf', upsert: false })
-                  if (!pdfErr) pdfUrl = pdfPad
+                  if (!pdfErr) {
+                    tookRoom(ingesloten.bytes.length)
+                    pdfUrl = pdfPad
+                  }
                 }
               } catch (e) {
                 console.error('[XML-PDF] ingesloten PDF uit e-factuur halen mislukt (niet-fataal)', e)
@@ -4355,7 +4457,16 @@ export async function syncUserEmails(
       // number, or by supplier + amount + date/number-prefix — the reader dropped a digit on every
       // one of the thirteen measured), and the owner gets one notice. It never reaches the queue.
       if (classification.isReminder === true) {
-        const reminderDocId = await saveKeptAttachment(attachment, 'reminder', DOC_TYPE_REMINDER, { aiProcessed: true })
+        const reminderKept = await saveKeptAttachment(attachment, 'reminder', DOC_TYPE_REMINDER, { aiProcessed: true })
+        if (reminderKept === STORAGE_FULL) {
+          // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
+          // all do not let the mark walk past it — the attachment is still in the mailbox and the
+          // next sync takes it the moment there is room. Marking it complete here is the silent
+          // loss this gate exists to prevent.
+          errors++
+          continue
+        }
+        const reminderDocId = reminderKept
         let filedReason = 'herinnering — bewaard in je bestanden, niet als factuur geboekt'
         if (reminderDocId) {
           try {
@@ -5299,6 +5410,7 @@ export async function syncUserEmails(
     // the no-progress guard still stops it if a round genuinely advances nothing.
     remaining: windowNarrowed ? Math.max(remainingAfterBatch, 1) : remainingAfterBatch,
     heldByFairUse: hold?.held ?? 0,
+    storageHeld,
     // [LEZER-STIL] Exactly the four app-wide refusals the save loop already holds on. Not the same
     // thing as `errors`: those are per-mailbox failures, and a held run has none of them.
     readerOutage: configOutageAny || budgetOutageAny || creditOutageAny || transientOutage,

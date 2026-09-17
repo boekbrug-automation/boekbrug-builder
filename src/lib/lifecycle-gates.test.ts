@@ -35554,17 +35554,6 @@ test("[OPSLAG-DEUR] every documents write measures the allowance, or says why no
     "src/app/api/feedback/route.ts":
       "a screenshot on a bug report — sent to us, not stored as the owner's own file",
 
-    // KNOWN GAP, deliberately left rather than closed badly. The e-mail sync DOES create a
-    // documents row, so it can carry an account past its allowance. Refusing here is not a 402 to
-    // a person waiting on a screen: it is a background job holding somebody's incoming invoice,
-    // and the branch beside it already shows what a mishandled failure costs — an invoice in the
-    // books with no reachable paper. The correct behaviour is the HOLD that isAiBudgetError
-    // already earns in this same file (leave the attachment, do not advance past it, retry next
-    // sync), and wiring that belongs in its own change with its own evidence. Until then the
-    // owner-initiated doors are bounded and this one is not, and that is written down here rather
-    // than quietly true.
-    "src/lib/email-integration.ts":
-      "background sync — a refusal must HOLD the attachment like a budget outage, not drop it; see [COST-GUARD] outageHold",
   };
 
   // NOT IN SCOPE, and worth saying once so the next reader does not go looking: the invoice PDF
@@ -35581,7 +35570,11 @@ test("[OPSLAG-DEUR] every documents write measures the allowance, or says why no
     const src = code(file);
     if (!UPLOAD.test(src)) continue;
     if (EXEMPT[file]) continue;
-    if (/gateStorage\s*\(/.test(src)) continue;
+    // Two shapes, one rule. A route answers a waiting person, so it uses gateStorage and gets a 402
+    // it can return. The e-mail sync answers nobody, so it takes the same measurement through
+    // storageRoom/storageFits and HOLDS instead. Both are "asked whether there is room"; only the
+    // reply differs, and the stricter half of the sync's contract is asserted further down.
+    if (/gateStorage\s*\(/.test(src) || /storageRoom\s*\(\{/.test(src)) continue;
     offenders.push(file);
   }
 
@@ -35631,9 +35624,75 @@ test("[OPSLAG-DEUR] every documents write measures the allowance, or says why no
 
   // The measurement must be the meter's own, not a second opinion. Two ways of counting the same
   // megabytes is how an owner gets told he has room on one screen and refused on another.
+  const gate = code("src/lib/fair-use-gate.ts");
   assert.match(
-    code("src/lib/fair-use-gate.ts"),
+    gate,
     /measureUsage\(/,
     "[OPSLAG-DEUR] gateStorage must measure with measureUsage — the same numbers the owner reads",
   );
+  // …and both callers must share ONE arithmetic. gateStorage answers a person with a 402 and the
+  // sync answers nobody with a hold, but "is there room" has to be the same question or the screen
+  // and the background job will disagree about the same megabytes.
+  assert.match(gate, /export function storageFits\(/, "[OPSLAG-DEUR] the rule must be shared, not copied");
+  assert.match(
+    gate,
+    /alreadyTakenBytes[\s\S]{0,400}?Math\.ceil\(\(Math\.max\(0, alreadyTakenBytes\) \+ Math\.max\(0, bytes\)\) \/ \(1024 \* 1024\)\)/,
+    "[OPSLAG-DEUR] the run's total is rounded ONCE. Rounding each file up on its own charges a 10 kB " +
+      "receipt a whole megabyte, and a hundred of them would fill a 50 MB plan holding almost nothing.",
+  );
+
+  // ── The e-mail sync: the one door that HOLDS instead of refusing ────────────────────────────
+  //
+  // It was exempt while this gate was first written, because a background job cannot answer with a
+  // 402 and getting the alternative wrong loses an incoming invoice for good. It is not exempt now,
+  // and these are the four things that make the hold real rather than nominal.
+  const sync = code("src/lib/email-integration.ts");
+  assert.match(sync, /storageRoom\(\{/, "[OPSLAG-DEUR] the sync must measure the room it has");
+  assert.match(
+    sync,
+    /const roomFor = \(bytes: number\): boolean => storageFits\(room, bytes, storedBytesThisRun\)/,
+    "[OPSLAG-DEUR] the sync must weigh each file against what this run has ALREADY written, or the " +
+      "second attachment of a batch is measured against room the first one already took",
+  );
+  // Every upload in that file asks first. Three doors: the kept attachment, the invoice itself, and
+  // the PDF embedded in an e-factuur.
+  const syncUploads = [...sync.matchAll(/\.upload\(/g)].map((m) => m.index ?? -1);
+  assert.equal(syncUploads.length, 3, "[OPSLAG-DEUR] the sync's upload count changed — re-point this gate");
+  const roomChecks = [...sync.matchAll(/roomFor\(/g)].map((m) => m.index ?? -1);
+  // ONE check per door, and each one NEAR its own door.
+  //
+  // The first version of this asserted only "some roomFor appears earlier in the file", and a
+  // mutation proved it worthless: the kept-attachment check sits before all three uploads, so
+  // deleting the invoice door's check left the gate green. A door is guarded by the check standing
+  // at it, not by a check standing anywhere above it. The real gaps are 319, 445 and 515
+  // characters, so 1200 leaves room for the comment each one carries without reaching the door
+  // above it — the closest two doors are ~6000 apart.
+  assert.equal(
+    roomChecks.length, 3,
+    "[OPSLAG-DEUR] expected exactly one room check per upload door in the sync",
+  );
+  for (const at of syncUploads) {
+    assert.ok(
+      roomChecks.some((r) => r < at && at - r < 1200),
+      `[OPSLAG-DEUR] the sync writes bytes at ${at} with no allowance check AT that door. A check ` +
+        "further up the file guards the door it belongs to, not this one.",
+    );
+  }
+  // A refusal is a THIRD answer, never `null`. Four of the five callers of saveKeptAttachment answer
+  // null by letting the watermark pass — which is right for a failure and is silent loss for a full
+  // disk, because the mail would be marked done with nothing stored.
+  assert.match(
+    sync,
+    /const STORAGE_FULL = 'storage_full' as const/,
+    "[OPSLAG-DEUR] a full disk must be distinguishable from a failure to keep",
+  );
+  assert.equal(
+    (sync.match(/=== STORAGE_FULL/g) ?? []).length,
+    5,
+    "[OPSLAG-DEUR] all five saveKeptAttachment callers must decide what a full disk means. A caller " +
+      "that ignores it retires the attachment and lets the mark walk past mail we never stored.",
+  );
+  // And the hold has to be visible. A held sync has no errors to show for it and would otherwise
+  // look exactly like a sync that found nothing.
+  assert.match(sync, /storageHeld,/, "[OPSLAG-DEUR] the sync must report what it held");
 });
