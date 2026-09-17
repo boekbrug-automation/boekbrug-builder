@@ -47,7 +47,7 @@ export interface FairUsePayload {
 export interface FairUseNotice {
   /** Names the event. The toast never did. */
   title: string;
-  /** "Je hebt deze maand 50 van de 50 documenten laten lezen." Null when the count is unknown. */
+  /** "Je hebt deze maand 10 van de 10 documenten laten lezen." Null when the count is unknown. */
   count: string | null;
   /** What is NOT broken — first, because that is the owner's real question. */
   stillWorks: string;

@@ -68,6 +68,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const result = await composeDraftEmail(
+      user.id,
       profile?.full_name || profile?.company_name || 'Boekhouder',
       prompt,
       [prompt],

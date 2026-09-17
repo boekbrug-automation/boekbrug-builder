@@ -259,10 +259,14 @@ kort na de 5e van januari/april/juli/oktober.
   het "geëxploiteerd door BoekBrug, gevestigd te Tilburg, KVK-nummer (volgt)". Alleen `_KVK` en
   `_BTW` horen bij "voordat je geld aanneemt"; `_LEGAL_NAME` en `_ADDRESS` staan in de
   privacyverklaring als verwerkingsverantwoordelijke en gelden vanaf de eerste gebruiker.
-- **Twee Stripe-prijzen**, exact gelijk aan wat de voorwaarden publiceren: Plus **€ 12,99 per
-  maand** (terugkerend) en de Bewaarkluis **€ 19 per bewaarjaar** (eenmalig). De checkout dwingt
-  acceptatie van die voorwaarden af, dus een verschil is precies het gat waar de klant gelijk in
-  krijgt. En zet **iDEAL** aan: kaart-alleen verliest Nederlandse klanten bij de laatste klik.
+- **Drie Stripe-prijzen**, exact gelijk aan wat de voorwaarden publiceren: Plus **€ 19,99 per
+  maand** (terugkerend, interval `month`), Plus **€ 179,91 per jaar** (terugkerend, interval
+  `year`, één doorlopende prijs — géén constructie met gratis maanden) en de Bewaarkluis
+  **€ 19 per bewaarjaar** (eenmalig). De checkout dwingt acceptatie van die voorwaarden af, dus
+  een verschil is precies het gat waar de klant gelijk in krijgt. Verwissel de twee Plus-id's
+  niet: de app vergelijkt sinds [JAARPRIJS] óók het interval en weigert dan de checkout, maar een
+  geweigerde checkout is nog steeds een verkoop die niet doorgaat. En zet **iDEAL** aan:
+  kaart-alleen verliest Nederlandse klanten bij de laatste klik.
 - **`xlsx` naar 0.20.3** — *bijgewerkt 30 juli.* Nog steeds niet via npm te doen: de reparatie
   staat alleen op `cdn.sheetjs.com`. Wat er sindsdien bij is gekomen, is dat de containment nu
   bewaakt wordt in plaats van beloofd: een test loopt de broncode af en faalt zodra één bestand

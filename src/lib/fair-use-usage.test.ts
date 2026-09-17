@@ -115,9 +115,17 @@ test("de stand combineert getelde en gemeten metrieken", async () => {
     "administraties worden niet gemeten zolang de functie niet bestaat",
   );
 
-  // En die stand hoort gewoon door evaluateFairUse te komen.
+  // [PROEF-WERKPLEK] En die stand gaat door evaluateFairUse heen — maar NIET meer als "binnen de
+  // grens". 37 gelezen documenten en 8 facturen was ruim binnen het oude gratis plan (50 en 100)
+  // en ligt boven het nieuwe (10 en 5). Dat is geen regressie maar de beslissing zelf: gratis is
+  // de proefwerkplek, niet de goedkope versie. Wat deze test bewaakt is dat de METING ongemoeid
+  // blijft — die telt wat er gebeurd is en velt geen oordeel — en dat het oordeel erna klopt.
   const status = evaluateFairUse(usage);
-  assert.equal(status.withinLimits, true);
+  assert.equal(status.withinLimits, false, "37 gelezen documenten past niet in de proefwerkplek");
+  assert.deepEqual(status.exceeded.sort(), ["aiDocuments", "invoicesSent"]);
+  // Dezelfde stand op Plus: geen plafond, dus niets overschreden. Dat is het hele verschil tussen
+  // de twee plannen, in één regel.
+  assert.equal(evaluateFairUse(usage, "plus").withinLimits, true);
 });
 
 test("een onbereikbare tabel kost niemand een handeling", async () => {

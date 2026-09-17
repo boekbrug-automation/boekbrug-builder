@@ -65,6 +65,76 @@ function budgetMicros(): number {
   return Math.round(eur * 1_000_000);
 }
 
+// ── [EIGEN-AANDEEL] The per-account share of that day ────────────────
+//
+// WHY A GLOBAL FUSE IS NOT ENOUGH, AND WHY IT IS STILL THE FLOOR.
+//
+// The ceiling above is one number for the whole app, so it answers "can the owner pay
+// today's bill" and nothing else. It cannot answer the other question a paid plan has to
+// answer: can ONE account take the whole day away from everybody else? Measured on
+// production, that is not theoretical — a single account read 101 documents on one day
+// (19 July 2026), and the busiest day the app has ever had cost EUR 1.02 in total. One
+// backlog import is most of a day's budget.
+//
+// Selling a year up front makes that the difference between a nuisance and a promise we
+// cannot keep: a monthly customer who exhausts the app is a customer we can talk to next
+// month, an annual one has already paid for eleven more.
+//
+// So: a SECOND ceiling, per account, per UTC day, in the same micro-euros — and it is
+// deliberately the junior of the two. The global fuse is consulted on every call whether or
+// not this one is configured, it is the only one that can refuse when this counter is
+// unreachable, and nothing below can raise it.
+//
+// ── WHERE THE SHARE IS KEPT, AND WHY THERE IS NO NEW TABLE ──
+// `usage_counters` already is a per-account, per-period, per-metric counter with an atomic
+// check-and-increment (fair_use_consume) that takes the LIMIT AS A PARAMETER and refuses
+// without incrementing, plus a matching release. Everything this needs, it already does.
+// The period is part of its primary key and is a free-text column, so a UTC DAY is simply a
+// different key in the same table — and `count` is an integer, which holds a day's spend in
+// micro-euros with three orders of magnitude to spare (int4 tops out at EUR 2.147).
+//
+// Three separate reasons the internal row can never be read as a published fair-use number:
+// the metric is not in COUNTED_METRICS, the period is 'YYYY-MM-DD' where measureUsage() asks
+// for 'YYYY-MM', and the SELECT policy excludes the `internal.` prefix (see
+// usage_counters_internal_metrics.sql). Any one of them would do; they are independent.
+
+/** The metric key of the per-account daily share. `internal.` is what the RLS policy hides. */
+export const ACCOUNT_SHARE_METRIC = "internal.aiSpendDay";
+
+/**
+ * The share's period key: a UTC calendar day, 'YYYY-MM-DD'.
+ *
+ * UTC and not local time, for the same reason ai_budget_consume() uses it — the day must
+ * begin at the same instant everywhere, and it must be the SAME instant as the global fuse's
+ * day, or an account could be refused on a day the fuse thinks is already over. Pure.
+ */
+export function accountSharePeriod(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+/**
+ * The per-account daily share in micro-euros. Default 0.
+ *
+ * ── WHY THE DEFAULT IS OFF, AND WHY THAT IS THE POINT ──
+ * 0 means COUNT BUT DO NOT LIMIT — the same standing the global fuse shipped in
+ * (AI_DAILY_BUDGET_EUR=0) and the same standing Plus has in fair_use_consume(). Shipping
+ * this mechanism therefore changes nothing an account can do today; it starts writing down
+ * what accounts actually spend per day, which is the only honest basis for choosing a
+ * number. A threshold picked before that measurement exists is a guess wearing a fuse's
+ * clothes.
+ *
+ * AI_DAILY_SHARE_EUR must be read as a share OF the global ceiling: the ratio
+ * AI_DAILY_BUDGET_EUR / AI_DAILY_SHARE_EUR is the smallest number of accounts that can
+ * exhaust the app between them. A share at or above the global ceiling is decoration.
+ */
+export function accountShareMicros(): number {
+  const raw = (process.env.AI_DAILY_SHARE_EUR || "").trim();
+  if (raw === "") return 0;
+  const eur = Number(raw);
+  if (!Number.isFinite(eur) || eur < 0) return 0;
+  return Math.round(eur * 1_000_000);
+}
+
 // ── Cost model ───────────────────────────────────────────────────────
 //
 // Haiku 4.5 (the app's default model): $1.00 / MTok input, $5.00 / MTok output;
@@ -128,7 +198,13 @@ export type BudgetVerdict = {
   /** The ceiling in euros; 0 means "counting only, no ceiling". */
   budgetEur: number;
   /** Why it was allowed — useful in logs. */
-  reason: "within_budget" | "no_ceiling" | "exceeded" | "guard_unavailable";
+  reason:
+    | "within_budget"
+    | "no_ceiling"
+    | "exceeded"
+    /** [EIGEN-AANDEEL] The APP still had budget; this ACCOUNT had used its share of the day. */
+    | "account_exceeded"
+    | "guard_unavailable";
   /** What was actually put on the day's tab, in micro-euros. */
   reservedMicros: number;
   /**
@@ -139,7 +215,72 @@ export type BudgetVerdict = {
    * subtract money that was never charged. settleAiBudget() checks this.
    */
   recorded: boolean;
+  /**
+   * [EIGEN-AANDEEL] The account the share was charged to, and the day it was charged on.
+   *
+   * Both carried rather than recomputed at settlement, because a call can start at 23:59:59
+   * and answer after midnight UTC. Recomputing would refund the NEXT day's counter for a
+   * reservation the previous day is still holding — the same mistake ai_budget_settle()
+   * refuses to make by never creating a day it does not find.
+   */
+  accountUserId?: string | null;
+  accountPeriod?: string;
+  /**
+   * Was the share really written down? Same meaning as `recorded`, for the account counter:
+   * false on fail-open and on a refusal, and nothing is ever settled against it then.
+   */
+  accountRecorded: boolean;
 };
+
+/**
+ * [EIGEN-AANDEEL] Move an account's daily share by `micros`, in whichever direction.
+ *
+ * Both directions go through a function that already exists, and the asymmetry between them
+ * is deliberate rather than tidy:
+ *
+ *   · DOWN is fair_use_release(), which clamps at zero and can only ever subtract. A refund
+ *     that arrives twice (a retry) cannot hand out free credit.
+ *   · UP is fair_use_consume() WITH p_limit = 0 — count, never refuse. A call that turned out
+ *     dearer than its reservation has already been paid for; refusing to write it down would
+ *     leave the share reading lower than what the account really spent, which is the one
+ *     direction a ceiling must not drift in.
+ *
+ * Never throws. A share that cannot be moved leaves the conservative reservation standing,
+ * which costs the account a little of its own day and costs nobody else anything.
+ */
+async function moveAccountShare(
+  userId: string,
+  period: string,
+  micros: number,
+  label: string,
+): Promise<boolean> {
+  if (!userId || micros === 0) return false;
+  try {
+    const pipeline = createPipelineClient();
+    if (micros < 0) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { error } = await (pipeline as any).rpc("fair_use_release", {
+        p_user_id: userId,
+        p_period: period,
+        p_metric: ACCOUNT_SHARE_METRIC,
+        p_amount: -micros,
+      });
+      return !error;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error } = await (pipeline as any).rpc("fair_use_consume", {
+      p_user_id: userId,
+      p_period: period,
+      p_metric: ACCOUNT_SHARE_METRIC,
+      p_limit: 0,
+      p_amount: micros,
+    });
+    return !error;
+  } catch (err) {
+    console.warn(`[EIGEN-AANDEEL] share could not be moved for ${label} — the estimate stands:`, err);
+    return false;
+  }
+}
 
 /**
  * Reserve budget for ONE Claude call. Call this BEFORE the request.
@@ -162,10 +303,88 @@ export async function reserveAiBudget(params: {
   maxOutputTokens: number;
   /** For the log line — which call site is spending. */
   label: string;
+  /**
+   * [EIGEN-AANDEEL] Whose day to charge, when there is one.
+   *
+   * Optional, and the one path that legitimately has no answer is /api/tools/scan-invoice:
+   * it is login-free, so there is no account to charge and no profile row for the counter's
+   * foreign key to point at. That path keeps its own hard per-IP ceiling
+   * (check_rate_limit_key) and the global fuse, which is what it always relied on.
+   *
+   * Absent here therefore means "no account", never "skip the share". A caller that HAS a
+   * user and does not pass it is a hole, which is why [EIGEN-AANDEEL] in
+   * lifecycle-gates.test.ts reads the call sites rather than trusting the type.
+   */
+  userId?: string | null;
+  /** Injectable clock, so the share's day boundary is testable. */
+  now?: Date;
 }): Promise<BudgetVerdict> {
   const costMicros = estimateCostMicros(params.inputTokens, params.maxOutputTokens);
   const ceiling = budgetMicros();
+  const share = accountShareMicros();
+  const accountPeriod = accountSharePeriod(params.now);
+  const userId = params.userId ?? null;
 
+  // ── 1. The account's own share, first ──────────────────────────────
+  //
+  // Before the global fuse, and that order is load-bearing in ONE direction only: a refusal
+  // here must leave the day's global tab untouched, so an account that is out of its share
+  // costs the app nothing at all. The other order would have to refund the global counter
+  // afterwards, and a refund that fails is a fuse reading too high for the rest of the day.
+  //
+  // Fails OPEN, like every other counter in this app: an unreachable share is not a reason to
+  // stop someone reading their invoice. The global fuse below is the ceiling that does not
+  // need this database call to say no.
+  let accountRecorded = false;
+  if (userId) {
+    try {
+      const pipeline = createPipelineClient();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data, error } = await (pipeline as any).rpc("fair_use_consume", {
+        p_user_id: userId,
+        p_period: accountPeriod,
+        p_metric: ACCOUNT_SHARE_METRIC,
+        p_limit: share,
+        p_amount: costMicros,
+      });
+      const row = (data && data.length > 0 ? data[0] : null) as { allowed: boolean; used: number } | null;
+      if (error || !row) {
+        console.warn(
+          `[EIGEN-AANDEEL] share counter unavailable — allowing ${params.label}`,
+          error?.message ?? "no rows",
+        );
+      } else if (!row.allowed) {
+        // Loud, but NOT the same event as the fuse blowing: the app is fine, this account is
+        // not. Whoever reads the logs has to be able to tell those apart, because one of them
+        // means "look at the bill" and the other means "talk to a customer".
+        console.error(
+          `[EIGEN-AANDEEL] account ${userId} used its daily share — refused ${params.label}. ` +
+            `share ≈ €${(share / 1_000_000).toFixed(2)}.`,
+        );
+        return {
+          allowed: false,
+          spentEur: 0,
+          budgetEur: ceiling / 1_000_000,
+          reason: "account_exceeded",
+          reservedMicros: 0, // fair_use_consume() increments nothing when it refuses
+          recorded: false,
+          accountUserId: userId,
+          accountPeriod,
+          accountRecorded: false,
+        };
+      } else {
+        accountRecorded = true;
+      }
+    } catch (err) {
+      console.warn(`[EIGEN-AANDEEL] share counter threw — allowing ${params.label}:`, err);
+    }
+  }
+
+  // ── 2. The global fuse, always ─────────────────────────────────────
+  //
+  // Unconditional: it does not ask whether a share was configured, whether one was charged,
+  // or whether there is an account at all. It is the only ceiling that stands between the
+  // owner and a bill nobody can pay, and nothing above may become a condition on reaching it.
   try {
     const pipeline = createPipelineClient();
     // ai_budget_consume is added by ai_spend_guard.sql and is not in the
@@ -188,6 +407,9 @@ export async function reserveAiBudget(params: {
         reason: "guard_unavailable",
         reservedMicros: costMicros,
         recorded: false,
+        accountUserId: userId,
+        accountPeriod,
+        accountRecorded,
       };
     }
 
@@ -201,6 +423,12 @@ export async function reserveAiBudget(params: {
         `[COST-GUARD] DAILY AI BUDGET EXHAUSTED — refused ${params.label}. ` +
           `spent ≈ €${spentEur.toFixed(2)} of €${budgetEur.toFixed(2)}.`
       );
+      // [EIGEN-AANDEEL] Hand the share back. The call is not happening, so it must not stand
+      // on this account's day — otherwise a blown global fuse would silently eat the share of
+      // every account that happened to ask afterwards.
+      if (accountRecorded && userId) {
+        await moveAccountShare(userId, accountPeriod, -costMicros, params.label);
+      }
       return {
         allowed: false,
         spentEur,
@@ -208,6 +436,9 @@ export async function reserveAiBudget(params: {
         reason: "exceeded",
         reservedMicros: 0, // a refused call reserves nothing — see ai_budget_consume()
         recorded: false,
+        accountUserId: userId,
+        accountPeriod,
+        accountRecorded: false,
       };
     }
 
@@ -218,6 +449,9 @@ export async function reserveAiBudget(params: {
       reason: budgetEur === 0 ? "no_ceiling" : "within_budget",
       reservedMicros: costMicros,
       recorded: true,
+      accountUserId: userId,
+      accountPeriod,
+      accountRecorded,
     };
   } catch (err) {
     console.warn(`[COST-GUARD] budget guard threw — allowing ${params.label}:`, err);
@@ -228,6 +462,9 @@ export async function reserveAiBudget(params: {
       reason: "guard_unavailable",
       reservedMicros: costMicros,
       recorded: false,
+      accountUserId: userId,
+      accountPeriod,
+      accountRecorded,
     };
   }
 }
@@ -329,12 +566,33 @@ export function settlementMicros(
  * a document has already been read, and nothing about it may reach the owner.
  */
 export async function settleAiBudget(params: {
-  reserved: Pick<BudgetVerdict, "reservedMicros" | "recorded">;
+  reserved: Pick<BudgetVerdict, "reservedMicros" | "recorded"> &
+    Partial<Pick<BudgetVerdict, "accountUserId" | "accountPeriod" | "accountRecorded">>;
   usage: ClaudeUsage | null | undefined;
   /** For the log line — which call site is settling. */
   label: string;
 }): Promise<void> {
+  // [EIGEN-AANDEEL] Two reservations, two corrections, and each one asks its OWN question
+  // about whether it was written down. They can genuinely disagree: the share may have been
+  // charged while the global guard was unreachable (fail-open), and then the global tab has
+  // nothing to correct while the account's day is still holding the full estimate. Deriving
+  // both from one flag would leave that account carrying an over-reservation all day for a
+  // failure that was ours.
   const delta = settlementMicros(params.reserved, params.usage);
+  const accountDelta = settlementMicros(
+    { reservedMicros: params.reserved.reservedMicros, recorded: Boolean(params.reserved.accountRecorded) },
+    params.usage,
+  );
+
+  if (accountDelta !== 0 && params.reserved.accountUserId && params.reserved.accountPeriod) {
+    await moveAccountShare(
+      params.reserved.accountUserId,
+      params.reserved.accountPeriod,
+      accountDelta,
+      params.label,
+    );
+  }
+
   if (delta === 0) return;
 
   try {
@@ -355,6 +613,21 @@ export async function settleAiBudget(params: {
     console.warn(`[COST-GUARD] settlement threw for ${params.label} — the estimate stands:`, err);
   }
 }
+
+// [EIGEN-AANDEEL] THERE IS DELIBERATELY NO SECOND MESSAGE FOR A SHARE REFUSAL.
+//
+// The three transports in ai.ts throw AI_BUDGET_EXHAUSTED_ERROR for both refusals, so a share
+// refusal arrives at all thirteen call sites as the event they already handle — and that is
+// the right handling, not a shortcut. Both are app-side, both are self-healing at midnight
+// UTC, and neither is ever the document's fault, which is precisely the combination that made
+// the e-mail sync HOLD an attachment instead of retiring it as could_not_read.
+//
+// The two are distinguished where it matters — in the log line, because "look at the bill"
+// and "talk to a customer" are different jobs — and NOT in the copy, because the share
+// threshold ships at 0 and no account can reach this state yet. Writing Dutch for a screen
+// nobody can open, in one language out of four, is how a translation starts out half
+// finished. When the owner sets a threshold, the sentence is part of that decision and
+// belongs in i18n/messages.ts with its three translations, not here.
 
 /** The Dutch message a user sees when the fuse has blown. Never blame them. */
 export const BUDGET_EXHAUSTED_MESSAGE =

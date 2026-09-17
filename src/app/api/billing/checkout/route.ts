@@ -18,7 +18,7 @@ import {
   resolveCustomerId,
   createCheckoutSession,
 } from "@/lib/billing";
-import { trialEligible } from "@/lib/subscription";
+import { parsePlusInterval, type PlusInterval } from "@/lib/plus-interval";
 import { appOrigin } from "@/lib/app-origin";
 
 export const runtime = "nodejs";
@@ -29,6 +29,32 @@ export async function POST(req: NextRequest) {
 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Niet ingelogd" }, { status: 401 });
+
+  // [JAARPRIJS] Per maand of per jaar, van de wire.
+  //
+  // Drie gevallen en drie verschillende antwoorden, want twee ervan samennemen is precies de
+  // fout die geld kost:
+  //   · geen body / geen veld → "month". De bestaande knoppen posten niets en betekenen maand;
+  //     dat mag niet veranderen omdat hier een veld bij komt.
+  //   · "month" of "year"     → dat.
+  //   · iets anders           → 400, GEEN terugval. Een onbekende waarde stil als maand lezen
+  //     schrijft iemand die "per jaar" koos maandelijks af, en andersom gaat er €179,91 per
+  //     maand af. Beide zijn een afschrijving die niemand heeft gekozen, en een weigering hier
+  //     kost hooguit een klik.
+  let interval: PlusInterval = "month";
+  try {
+    const body: unknown = await req.json();
+    const raw = body && typeof body === "object" ? (body as Record<string, unknown>).interval : undefined;
+    if (raw !== undefined && raw !== null) {
+      const parsed = parsePlusInterval(raw);
+      if (!parsed) {
+        return NextResponse.json({ error: "Onbekende betaalperiode." }, { status: 400 });
+      }
+      interval = parsed;
+    }
+  } catch {
+    // Geen body of geen geldige JSON: dat is de bestaande knop, en die betekent maand.
+  }
 
   // No Stripe keys yet → a clean, honest 503 the UI can show as a disabled
   // button, rather than a 500 stack trace in a paying customer's face.
@@ -46,15 +72,11 @@ export async function POST(req: NextRequest) {
   let existingCustomerId: string | null = null;
   let email: string | null = user.email ?? null;
   let name: string | null = null;
-  // [PROEFMAAND] Faalveilig richting GEEN proefmaand: kan de status niet worden gelezen, dan
-  // start het abonnement gewoon betaald vanaf dag één — zie trialEligible voor waarom die kant.
-  let subscriptionStatus: string | null = "onbekend";
-
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data } = await (supabase as any)
       .from("profiles")
-      .select("email, full_name, company_name, stripe_customer_id, subscription_status")
+      .select("email, full_name, company_name, stripe_customer_id")
       .eq("id", user.id)
       .single();
 
@@ -62,7 +84,6 @@ export async function POST(req: NextRequest) {
       existingCustomerId = data.stripe_customer_id ?? null;
       email = data.email ?? email;
       name = data.company_name || data.full_name || null;
-      subscriptionStatus = data.subscription_status ?? null;
     }
   } catch (err) {
     console.error("[BILLING] profile read failed (continuing without it):", err);
@@ -104,7 +125,7 @@ export async function POST(req: NextRequest) {
       // The success page waits for the webhook rather than trusting the URL.
       successUrl: `${origin}/dashboard/settings/facturering?betaald=1`,
       cancelUrl: `${origin}/prijzen?geannuleerd=1`,
-      withTrial: trialEligible(subscriptionStatus),
+      interval,
     });
 
     if (!session.url) {

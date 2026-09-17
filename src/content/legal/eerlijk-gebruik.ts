@@ -8,7 +8,9 @@
 import {
   ALWAYS_FREE,
   FAIR_USE_LIMITS,
+  FAIR_USE_NO_CEILING,
   fairUseTableMarkdown,
+  PLUS_ANNUAL_PRICE_EUR,
   PLUS_PRICE_EUR,
 } from "@/lib/fair-use";
 import {
@@ -19,22 +21,23 @@ import {
 import { fillCompanyIdentity } from "./company";
 
 const prijs = PLUS_PRICE_EUR.toFixed(2).replace(".", ",");
+const jaarprijs = PLUS_ANNUAL_PRICE_EUR.toFixed(2).replace(".", ",");
 
 const gevolgen = FAIR_USE_LIMITS.map((l) => `- **${l.label}** — ${l.onExceed}`).join("\n");
 const altijdGratis = ALWAYS_FREE.map((r) => `- ${r}`).join("\n");
 
 const md = `# Eerlijk gebruik
 
-**Laatst bijgewerkt:** 26 juli 2026
-**Versie:** 1.0
+**Laatst bijgewerkt:** 17 september 2026
+**Versie:** 2.0
 
 ---
 
 ## In één zin
 
-BoekBrug is gratis voor de ondernemer én gratis voor zijn boekhouder; wie het zo intensief
-gebruikt dat het ons echt geld kost, kan doorgaan voor **€ ${prijs} per maand** — en wordt
-daar nooit ongevraagd voor afgeschreven.
+Gratis laat je BoekBrug proberen; Plus laat je je onderneming erop draaien, voor
+**€ ${prijs} per maand** of **€ ${jaarprijs} per jaar** — en je wordt daar nooit ongevraagd
+voor afgeschreven.
 
 ---
 
@@ -45,8 +48,17 @@ het jarenlang bewaren van je bestanden. De rest kost nagenoeg niets. Zonder enig
 betaalt de rustige gebruiker mee aan de zwaarste, of gaat het product op een dag gewoon
 dicht. Met een grens die openlijk opgeschreven staat, weet je vooraf waar je aan toe bent.
 
-Wij noemen dat eerlijk gebruik: **ruim genoeg dat een normale kleine onderneming er nooit
-tegenaan loopt, en duidelijk genoeg dat je het van tevoren kunt narekenen.**
+Daarom zijn er twee vormen, en ze doen iets verschillends.
+
+**Gratis is de proefwerkplek.** Een vaste, kleine hoeveelheid per maand: genoeg om te zien hoe
+BoekBrug werkt, te weinig om er een jaar op te draaien. Dat is geen versobering maar het
+ontwerp — een gratis plan dat niemand ontgroeit heeft geen moment waarop betalen logisch wordt.
+
+**Plus is zakelijk gebruik onder eerlijk gebruik.** Daar publiceren wij géén getal voor
+facturen, gelezen documenten of opslag. Niet omdat er geen grens bestaat — een systeem heeft
+altijd een grens — maar omdat een getal dat wij niet handhaven een belofte is die niets
+betekent. Wat wij wél beloven staat hieronder in §5 en §6: nooit ongevraagd afschrijven, nooit
+stilzwijgend verlagen, en nooit je eigen gegevens op slot.
 
 ---
 
@@ -55,22 +67,36 @@ tegenaan loopt, en duidelijk genoeg dat je het van tevoren kunt narekenen.**
 | | Kosten |
 |---|---|
 | **Boekhouder / administratiekantoor** | **Gratis tot en met 10 gekoppelde klanten** — het volledige portaal, het werkbord en het ophalen van het kwartaal per klant. Geen proefperiode en geen klok: blijf je onder de tien, dan blijft het gratis. Daarboven een tarief per gekoppelde klant per maand, dat pas gaat gelden nadat wij het minstens 30 dagen vooraf hebben aangekondigd — zie voorwaarden §5.8 |
-| **Ondernemer — Gratis** | **€ 0.** Alle functies, binnen het eerlijk gebruik hieronder |
-| **Ondernemer — Plus** | **€ ${prijs} per maand**, inclusief btw. Alleen nodig als je structureel boven het eerlijk gebruik uitkomt. Maandelijks opzegbaar |
+| **Ondernemer — Gratis** | **€ 0.** Alle functies, om uit te proberen, binnen de grenzen hieronder |
+| **Ondernemer — Plus** | **€ ${prijs} per maand** of **€ ${jaarprijs} per jaar**, inclusief btw. Altijd opzegbaar; je houdt Plus tot het einde van de termijn die je al betaald hebt |
 
-Er is geen instapkorting die later verdwijnt, geen proefperiode die stilzwijgend overgaat in
-een abonnement, en geen functie die we later achter een betaalmuur schuiven zonder het
-minstens 30 dagen vooraf te melden.
+De jaarprijs is twaalf maanden voor de prijs van negen (9 × € ${prijs}). Het is één bedrag per
+jaar: geen constructie met gratis maanden erin, en geen abonnement dat halverwege van vorm
+verandert.
+
+Er is geen instapkorting die later verdwijnt, **geen proefperiode van Plus** die stilzwijgend
+overgaat in een abonnement, en geen functie die we later achter een betaalmuur schuiven zonder
+het minstens 30 dagen vooraf te melden. Wie Plus neemt, betaalt vanaf dag één — het gratis plan
+ís de proef.
 
 ---
 
-## 3. De grenzen van het gratis plan
+## 3. De grenzen
 
 ${fairUseTableMarkdown()}
+
+Waar **${FAIR_USE_NO_CEILING}** staat, publiceren wij voor Plus geen getal. Dat is de
+afspraak zelf en niet een weggelaten cijfer: het gebruik moet passen bij één onderneming, en
+wat daarbuiten valt staat in §7.
 
 **Meetperiode:** een kalendermaand. Op de 1e van elke maand beginnen de maandtellers weer
 bij nul. Opslag en aantallen die niet per maand gelden (mailboxen, ondernemingen) worden
 gemeten zoals ze op dat moment zijn.
+
+**Wat telt als "een verstuurde factuur"?** De eerste keer dat een factuur je administratie
+verlaat. Een factuur opnieuw versturen telt niet nog een keer mee, en een factuur als PDF
+downloaden telt helemaal nooit mee — opstellen, opslaan en downloaden blijven werken, ook
+boven de grens.
 
 **Wat telt als "een document dat de AI leest"?** Elke bon, inkoopfactuur of bankafschrift
 die je uploadt, fotografeert of via je gekoppelde mailbox binnenkomt en die wij automatisch
@@ -89,12 +115,17 @@ Kom je er toch overheen, dan pauzeert alléén de handeling die geld kost:
 ${gevolgen}
 
 En dan heb je twee keuzes, allebei goed: **wachten tot de volgende maand** (de tellers gaan
-naar nul en alles werkt weer), of **overstappen naar Plus** (per direct, maandelijks
-opzegbaar).
+naar nul en alles werkt weer), of **overstappen naar Plus** (per direct; je kiest zelf of je
+per maand of per jaar betaalt, en opzeggen kan altijd).
+
+**En als je Plus later weer opzegt?** Dan wordt er niets verwijderd, blijft je gekoppelde
+mailbox gekoppeld en blijft alles leesbaar en exporteerbaar. Wat je boven de gratis grenzen
+hebt staan, blijft staan. Alleen nieuwe groei daarboven pauzeert weer — precies zoals
+hierboven.
 
 ---
 
-## 5. Wat altijd gratis blijft — ook boven de grens
+## 5. Wat altijd gratis blijft — op elk plan, ook boven de grens
 
 ${altijdGratis}
 

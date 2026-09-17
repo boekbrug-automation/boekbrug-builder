@@ -26,12 +26,14 @@ import { FAIR_USE_LIMITS, formatLimit, fairUseLimit, ACCOUNTANT_FREE_CLIENTS } f
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR, KLUIS_YEAR_PRICE_EUR, KLUIS_SHUTDOWN_NOTICE_DAYS } from '@/lib/bewaarkluis'
 import { BELOFTE_KOP, BELOFTE_KOP_2, BELOFTE_UITLEG } from '@/lib/belofte'
 import SubscribeButton from './SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
-  title: 'Prijzen — gratis voor jou én je boekhouder | BoekBrug',
+  title: 'Prijzen — gratis uitproberen, Plus om op te draaien | BoekBrug',
   description:
-    `BoekBrug is gratis voor de ondernemer en gratis voor zijn boekhouder. ` +
-    `Boven het eerlijk gebruik kost Plus ${PLUS.priceLabel} per maand ${PLUS.btwNote}. ` +
+    `Gratis uitproberen: ${fairUseLimit('invoicesSent').free} facturen en ` +
+    `${fairUseLimit('aiDocuments').free} door de AI gelezen documenten per maand. ` +
+    `Plus kost ${PLUS.priceLabel} per maand of ${PLUS.annualPriceLabel} per jaar ${PLUS.btwNote}. ` +
     `Geen proefperiode, geen automatische afschrijving, en nooit een slot op je eigen administratie.`,
   keywords: ['boekbrug prijzen', 'gratis boekhoudprogramma zzp', 'boekhouden zzp kosten', 'bewaarplicht 7 jaar'],
   alternates: {
@@ -39,8 +41,10 @@ export const metadata: Metadata = {
     languages: { 'nl-NL': '/prijzen', 'en-GB': '/en/prijzen', ar: '/ar/prijzen', 'tr-TR': '/tr/prijzen' },
   },
   openGraph: {
-    title: 'BoekBrug — gratis voor jou én je boekhouder',
-    description: `Plus kost ${PLUS.priceLabel} per maand en is alleen nodig boven het eerlijk gebruik.`,
+    title: 'BoekBrug — gratis uitproberen, Plus om je zaak op te draaien',
+    description:
+      `Plus kost ${PLUS.priceLabel} per maand of ${PLUS.annualPriceLabel} per jaar — ` +
+      `twaalf maanden voor de prijs van negen.`,
     type: 'website',
   },
 }
@@ -75,6 +79,11 @@ export default async function PrijzenPage({
   const params = await searchParams
   const cancelled = params.geannuleerd === '1'
   const ai = fairUseLimit('aiDocuments')
+  // [JAARPRIJS] Read on the SERVER. A missing annual price must cost one button, never the
+  // monthly flow — and the price id behind it never crosses to the browser, only this boolean.
+  // Offering an annual button that cannot open a checkout is the same broken promise as
+  // publishing the amount with no way to buy it, one click later.
+  const annualAvailable = isAnnualBillingConfigured()
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: 'var(--font-sans), system-ui, sans-serif' }}>
@@ -91,9 +100,9 @@ export default async function PrijzenPage({
           {BELOFTE_UITLEG}
         </p>
         <p style={{ fontSize: 17, color: '#5f6368', margin: '0 0 28px', lineHeight: 1.6, maxWidth: 620 }}>
-          En dat is <strong>gratis</strong> — voor jou, en voor je boekhouder tot en met{' '}
-          {ACCOUNTANT_FREE_CLIENTS} gekoppelde klanten. Geen proefperiode die stilletjes afloopt,
-          geen creditcard vooraf, en geen slot op je eigen administratie.
+          Je probeert het <strong>gratis</strong> uit, en je boekhouder werkt gratis mee tot en
+          met {ACCOUNTANT_FREE_CLIENTS} gekoppelde klanten. Geen proefperiode die stilletjes
+          afloopt, geen creditcard vooraf, en geen slot op je eigen administratie.
         </p>
 
         {cancelled && (
@@ -110,7 +119,10 @@ export default async function PrijzenPage({
 
         {/* ── De drie plannen ────────────────────────────────────── */}
         <div style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
-          {/* Gratis — het hoofdplan, niet de instapvariant */}
+          {/* [EERLIJK-WOORD] Gratis = de proefwerkplek. Deze kaart zei het omgekeerde: "dit is
+              het plan waar de meeste gebruikers permanent op horen te blijven". Dat was waar bij
+              50 documenten en 2 GB; bij 5 facturen en 50 MB is het een belofte die de app niet
+              waarmaakt, en een bezoeker die erop afgaat komt in zijn eerste week klem te zitten. */}
           <section style={{ ...card, borderColor: '#137333', borderWidth: 2 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#137333', letterSpacing: 0.4, textTransform: 'uppercase' }}>
               Ondernemer
@@ -119,7 +131,7 @@ export default async function PrijzenPage({
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>€ 0</span>
             </div>
             <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>
-              alle functies, binnen het eerlijk gebruik
+              alle functies, om uit te proberen
             </div>
             <Link
               href="/register"
@@ -130,9 +142,16 @@ export default async function PrijzenPage({
             >
               Gratis beginnen
             </Link>
-            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-              Dit is niet de instapvariant — dit is het plan waar dit product voor gemaakt is en
-              waar de meeste gebruikers permanent op horen te blijven.
+            <ul style={{ fontSize: 13.5, color: '#3c4043', margin: '16px 0 0', paddingInlineStart: 18, lineHeight: 1.7 }}>
+              {FAIR_USE_LIMITS.filter((l) => l.key !== 'administrations').map((l) => (
+                <li key={l.key}>
+                  {l.label}: <strong>{formatLimit(l, 'free')}</strong>
+                </li>
+              ))}
+            </ul>
+            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '12px 0 0', lineHeight: 1.6 }}>
+              Genoeg om te zien hoe het werkt. Draai je er je zaak op, dan kom je hier overheen —
+              zo is het bedoeld. Alles wat je invoert blijft van jou, ook daarna.
             </p>
           </section>
 
@@ -148,21 +167,34 @@ export default async function PrijzenPage({
             <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>
               {PLUS.btwNote} · {PLUS.cancelNote}
             </div>
-            {/* [PROEFMAAND] De zin komt uit plan.ts, net als de prijs — één bron, overal
-                hetzelfde. En hij staat BOVEN de knop: wie hem pas na het klikken zou lezen,
-                heeft hem niet gehad toen het ertoe deed. */}
-            <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
-              Nieuw op Plus? Dan is {PLUS.trialNote}.
-            </p>
-            <SubscribeButton />
+            {/* [JAARPRIJS] Twaalf maanden voor de prijs van negen. Het bedrag komt uit plan.ts,
+                dat het afleidt uit fair-use.ts — hier wordt niets overgetypt. */}
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                Of {PLUS.annualPriceLabel} {PLUS.annualPeriod} — twaalf maanden voor de prijs van negen.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton
+                interval="month"
+                label={`Plus nemen — ${PLUS.priceLabel} ${PLUS.period}`}
+              />
+              {annualAvailable && (
+                <SubscribeButton
+                  interval="year"
+                  variant="secondary"
+                  label={`Plus per jaar — ${PLUS.annualPriceLabel}`}
+                />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-              {/* [LIMIET-ZIN] `ai.free`, niet formatLimit(): die geeft "50 per maand" terug, en in
-                  een zin die zelf al "per maand" zegt las dat als "meer dan 50 per maand documenten
+              {/* [LIMIET-ZIN] `ai.free`, niet formatLimit(): die geeft "10 per maand" terug, en in
+                  een zin die zelf al "per maand" zegt las dat als "meer dan 10 per maand documenten
                   per maand". formatLimit hoort thuis waar een grens LOS staat (de tabel hieronder,
                   het verbruiksscherm), niet middenin een lopende zin. */}
-              Alleen nodig als je structureel boven het eerlijk gebruik uitkomt — meer dan{' '}
-              {ai.free} documenten per maand door de AI laten lezen, bijvoorbeeld. Plus verruimt
-              elke grens naar {formatLimit(ai, 'plus')}.
+              Dit is het plan om je zaak op te draaien. Geen gepubliceerd plafond op facturen,
+              gelezen documenten of opslag — ruim, onder eerlijk gebruik. Twee mailboxen in plaats
+              van één. Vanaf meer dan {ai.free} gelezen documenten per maand is Plus het antwoord.
             </p>
           </section>
 
@@ -199,7 +231,7 @@ export default async function PrijzenPage({
         {/* ── Wat er in alles zit ────────────────────────────────── */}
         <section style={{ ...card, marginTop: 16 }}>
           <h2 style={{ fontSize: 17, fontWeight: 700, color: '#202124', margin: '0 0 14px' }}>
-            Dit zit in álle plannen — ook in het gratis plan
+            Dit zit in álle plannen — ook als je het gratis uitprobeert
           </h2>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
             {INCLUDED.map((feature) => (
@@ -210,11 +242,11 @@ export default async function PrijzenPage({
             ))}
           </ul>
           <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-            De grenzen van het gratis plan staan tot op het getal op{' '}
+            De grenzen staan tot op het getal op{' '}
             <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>/eerlijk-gebruik</Link>.
             Kom je erboven, dan pauzeert alleen de handeling die ons geld kost. Inzien, doorzoeken
             en exporteren van je eigen administratie blijven altijd werken — ook boven de grens,
-            ook nadat je stopt.
+            ook op Plus, ook nadat je stopt.
           </p>
         </section>
 
@@ -278,20 +310,23 @@ export default async function PrijzenPage({
           </h2>
 
           <div style={{ display: 'grid', gap: 14 }}>
-            <Faq q="Is het echt gratis, of is dit een proefperiode?">
-              Echt gratis. Er is <strong>geen proefperiode</strong> en er loopt geen klok. Je laat
-              geen betaalgegevens achter, dus er kan ook nooit iets worden afgeschreven. Wat er is,
-              is een eerlijk gebruik: {ai.free} documenten per maand door de AI laten
-              lezen, en {FAIR_USE_LIMITS.length - 1} andere grenzen die op{' '}
-              <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>één pagina</Link> staan.
+            <Faq q="Is het gratis plan een proefperiode?">
+              Er loopt <strong>geen klok</strong>. Het gratis plan stopt nooit uit zichzelf en je
+              laat geen betaalgegevens achter, dus er kan ook nooit iets worden afgeschreven. Wat
+              het begrenst is de hoeveelheid per maand: {fairUseLimit('invoicesSent').free} facturen
+              versturen en {ai.free} documenten door de AI laten lezen. Dat is genoeg om te zien hoe
+              BoekBrug werkt en te weinig om er een jaar op te draaien — zo is het bedoeld. Alle
+              grenzen staan op{' '}
+              <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>één pagina</Link>.
             </Faq>
 
-            <Faq q="Wat gebeurt er als ik boven het eerlijk gebruik kom?">
+            <Faq q="Wat gebeurt er als ik boven een grens kom?">
               Je krijgt een melding bij 80% van een grens, met het exacte aantal — dus vóórdat er
               iets gebeurt. Kom je erboven, dan pauzeert <em>alleen</em> de handeling die ons geld
               kost: een nieuw document automatisch laten uitlezen, een nieuwe factuur versturen.
               Alles wat er al staat blijft leesbaar en exporteerbaar. Daarna kies je zelf: wachten
-              tot de volgende maand, of Plus nemen.
+              tot de volgende maand, of Plus nemen. Zeg je Plus later weer op, dan wordt er niets
+              verwijderd en blijft je mailbox gekoppeld — alleen nieuwe groei pauzeert weer.
             </Faq>
 
             {/* [KANTOOR-STAFFEL] Dit antwoord zei "een tarief per klant". Dat was de vorige
@@ -309,20 +344,33 @@ export default async function PrijzenPage({
               <Link href="/voor-boekhouders" style={{ color: '#1a73e8' }}>voor boekhouders</Link>.
             </Faq>
 
-            <Faq q="Hoe werkt de gratis proefmaand van Plus?">
-              Neem je voor het eerst Plus, dan is de eerste maand gratis. Je legt bij het afrekenen
-              wel je betaalwijze vast, maar er wordt niets geïnd tot de maand om is — en zeg je
-              binnen die maand op, dan betaal je helemaal niets. Na de proefmaand loopt Plus gewoon
-              door voor {PLUS.priceLabel} {PLUS.period}. De proefmaand is er één keer: wie al eens Plus had,
-              start meteen betaald. En verloopt je proefmaand zonder dat je iets doet aan een
-              opzegging die je vergat? Dan val je nooit in een slot &mdash; opzeggen kan altijd, en je
-              gegevens blijven altijd van jou.
+            {/* [EERLIJK-WOORD] Hier stond "Hoe werkt de gratis proefmaand van Plus?". Die
+                proefmaand bestaat niet meer — het gratis plan IS de proef — en het antwoord is
+                samen met trial_period_days verdwenen. Een verkooppagina die een gratis maand
+                blijft beloven die de checkout niet meer geeft, is precies het verschil waarin een
+                klant gelijk krijgt. */}
+            <Faq q="Wat kost Plus per jaar?">
+              {PLUS.annualPriceLabel} {PLUS.annualPeriod} {PLUS.btwNote} — twaalf maanden voor de
+              prijs van negen, in één keer vooruit. Precies hetzelfde Plus als de maandvariant van{' '}
+              {PLUS.priceLabel}: geen ander pakket en geen andere grenzen. Eén bedrag per jaar, geen
+              constructie met gratis maanden erin.
             </Faq>
 
-            <Faq q="Kan ik maandelijks opzeggen?">
-              Ja. Je zegt Plus zelf op in je eigen instellingen — geen mailtje, geen telefoontje. Je
-              houdt Plus tot het einde van de periode die je al hebt betaald, en valt daarna terug
-              op het gratis plan. Je verliest geen enkel gegeven.
+            {/* [JAARPRIJS] Deze vraag heette "Kan ik maandelijks opzeggen?" en dat antwoord was
+                onwaar geworden voor wie per jaar betaalt: hij leest "maandelijks" en denkt dat
+                hij na een maand van zijn jaarbedrag af is. Eén Plus, twee termijnen — dus de
+                vraag gaat over opzeggen en het antwoord noemt beide termijnen bij naam. */}
+            <Faq q="Kan ik opzeggen?">
+              Ja, altijd en per direct — je zegt Plus zelf op in je eigen instellingen, geen
+              mailtje en geen telefoontje. Je houdt Plus tot het einde van de periode die je al
+              hebt betaald: bij maandelijks betalen tot het einde van die maand, bij jaarlijks
+              betalen tot het einde van dat jaar. Daarna val je terug op het gratis plan. Een al
+              betaalde periode wordt niet automatisch terugbetaald — tenzij de dienst door ons
+              toedoen langdurig onbruikbaar was ({''}
+              <Link href="/voorwaarden" style={{ color: '#1A73E8' }}>Voorwaarden §5.4</Link>).
+              Je verliest geen enkel gegeven: er wordt niets verwijderd, je mailbox blijft
+              gekoppeld, en alles blijft leesbaar en exporteerbaar. Alleen nieuwe groei boven de
+              gratis grenzen pauzeert.
             </Faq>
 
             <Faq q="Krijg ik een factuur met btw?">

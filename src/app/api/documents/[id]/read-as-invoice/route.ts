@@ -145,7 +145,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
   let v: Awaited<ReturnType<typeof verifyInvoiceFromPdf>>;
   try {
-    v = await verifyInvoiceFromPdf(buffer.toString("base64"), mimeType, doc.file_name ?? "document", 
+    v = await verifyInvoiceFromPdf(user.id, buffer.toString("base64"), mimeType, doc.file_name ?? "document", 
       me?.company_name?.trim() || me?.full_name?.trim() || null, {
         throwOnTransient: true,
         receiverKvk: me?.kvk_number?.trim() || null,

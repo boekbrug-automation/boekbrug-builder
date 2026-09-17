@@ -14,6 +14,8 @@ import {
 } from "@/lib/import-health";
 // [QUEUE-COMPLETE] pages past PostgREST's silent ~1000-row cap.
 import { fetchAllRows, fetchAllRowsForIds } from "@/lib/supabase-paginate";
+import { planForUser } from "@/lib/fair-use-gate";
+import { fairUseLimit } from "@/lib/fair-use";
 // [READING-MEMORY] Which suppliers this owner keeps having to correct — built from the audit trail.
 import { readingHintFor, vendorKey } from "@/lib/reading-memory";
 // [TARIEF-GEHEUGEN] Het tarief dat een leverancier aantoonbaar altijd rekent — zie het blok
@@ -174,18 +176,19 @@ export default async function IncomingPage() {
     // [BOEK-011] De rol, voor het Logo Universal Click-patroon.
     supabase.from("profiles").select("role").eq("id", user.id).single(),
 
-    // [ZERO-ROWS-NORMAL] .maybeSingle(): "geen mailbox gekoppeld" is de gewone toestand, en
-    // .single() meldt dat als fout. De .limit(1) BLIJFT — email_connections is
-    // UNIQUE(user_id, provider), dus iemand kan Gmail én Outlook hebben, en maybeSingle() zonder
-    // limiet geeft null zodra het er meer dan één ziet: die eigenaar zou "niet verbonden" lezen
-    // terwijl zijn mail prima binnenkomt.
+    // [MAILBOX-WAAR] ALLE koppelingen, niet één. De vorige versie las er bewust maar één met
+    // .limit(1).maybeSingle() — om te voorkomen dat maybeSingle() bij twee rijen null geeft en
+    // de eigenaar "niet verbonden" te zien krijgt terwijl zijn mail prima binnenkomt. Dat loste
+    // de crash op en liet het echte probleem staan: wie Gmail én Outlook had, zag er één, en wie
+    // er één had kreeg nooit te zien dat de tweede nog kon.
+    //
+    // [ZERO-ROWS-NORMAL] Nul rijen blijft de gewone toestand, geen fout.
     supabase
       .from("email_connections")
       // needs_reauth post-dates the generated types → cast on read (as the sync path does).
       .select("provider, email, connected_at, needs_reauth")
       .eq("user_id", user.id)
-      .limit(1)
-      .maybeSingle(),
+      .order("connected_at", { ascending: true }),
 
     // [QUEUE-COMPLETE] Ongecapt: dit is het ENIGE scherm waar een 'processing'-factuur bevestigd
     // kan worden, terwijl de badges elders de exacte koppen tellen. Met de oude .limit(100) zei
@@ -262,7 +265,12 @@ export default async function IncomingPage() {
   ]);
 
   const { data: profile } = profileRes;
-  const { data: connection } = connectionRes;
+  // [MAILBOX-WAAR] De oudste koppeling is de hoofdkoppeling op het scherm: hij is er het langst,
+  // dus het is de mailbox waar de eigenaar aan denkt als hij "mijn mail" zegt.
+  const connections = (connectionRes.data ?? []) as Array<{
+    provider: string; email: string | null; connected_at: string | null; needs_reauth: boolean | null;
+  }>;
+  const connection = connections[0] ?? null;
   // [NO-SILENT-EMPTY] `const { data }` zonder `error`: supabase-js gooit niet, het geeft
   // { data: null, error } terug — dus kwam een mislukte lezing hier aan als een leeg tabblad dat
   // zegt dat de eigenaar niets heeft bevestigd. Beide lezingen lopen nu langs dezelfde vlag.
@@ -503,6 +511,18 @@ export default async function IncomingPage() {
     // must reconnect. Surfaced as a banner so the connection can no longer rot silently green.
     needs_reauth: connection?.needs_reauth ?? false,
     pending_count: pendingInvoices.length,
+    // [MAILBOX-WAAR] De tweede aanbieder, als het plan er ruimte voor heeft. Op de SERVER beslist,
+    // met dezelfde grens die /api/email/connect handhaaft en dezelfde die op /eerlijk-gebruik
+    // staat — anders biedt het scherm een knop aan die de deur weigert, en dat is erger dan geen
+    // knop. `null` = niets aanbieden.
+    other_provider: (await (async () => {
+      const taken = new Set(connections.map((c) => c.provider));
+      const free = (["gmail", "outlook"] as const).find((p) => !taken.has(p));
+      if (!free || taken.size === 0) return null;
+      const plan = await planForUser(supabase, user.id);
+      const limit = plan === "free" ? fairUseLimit("mailboxes").free : fairUseLimit("mailboxes").plus;
+      return taken.size < limit ? free : null;
+    })()) as "gmail" | "outlook" | null,
   };
 
   return (

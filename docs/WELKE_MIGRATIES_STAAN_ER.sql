@@ -31,8 +31,8 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 156 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
---   DEEL 2  de 18 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
+--   DEEL 1  de 157 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 2  de 19 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
 -- Draai ze allebei. Deel 1 alleen is een schoon rapport met twee veiligheidsmigraties er
@@ -482,6 +482,7 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('urenregistratie.sql', 'policy', 'time_entries_insert_own', 'time_entries', 'public'),
   ('urenregistratie.sql', 'policy', 'time_entries_select_own', 'time_entries', 'public'),
   ('urenregistratie.sql', 'policy', 'time_entries_update_own', 'time_entries', 'public'),
+  ('usage_counters_internal_metrics.sql', 'policy', 'usage_counters_select_own', 'usage_counters', 'public'),
   ('vat_exemption.sql', 'constraint_def', 'invoice_lines_vat_treatment_check', 'exempt,taxed', 'public'),
   ('vat_exemption.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('vat_exemption.sql', 'column', 'vat_deduction', 'invoices', 'public'),
@@ -664,7 +665,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 18 van de 174
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 19 van de 176
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
@@ -846,6 +847,16 @@ with controle(bestand, vraag, toegepast) as (
                and file_size_limit is not null and file_size_limit <= 26214400)
     and exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
                  where n.nspname = 'storage' and c.relname = 'objects' and c.relrowsecurity)
+  )
+  union all
+  select 'welcome_grant_retired.sql'::text, 'de welkomsttrigger staat niet meer op profiles, terwijl de functie die hij aanriep er nog wél is'::text, (
+    not exists (
+     select 1 from pg_trigger
+      where tgrelid = 'public.profiles'::regclass
+        and tgname = 'profiles_welcome_plus' and not tgisinternal)
+    and exists (
+     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname = 'grant_welcome_plus')
   )
 )
 select case when toegepast then 'TOEGEPAST' else 'OPEN  <-- KIJK HIER' end as stand,

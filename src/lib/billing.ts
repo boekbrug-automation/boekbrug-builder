@@ -21,8 +21,7 @@
 
 import Stripe from "stripe";
 
-import { PLUS_TRIAL_DAYS } from "@/lib/plan";
-import { PLUS_PRICE_EUR } from "@/lib/fair-use";
+import { checkPlusPrice, type PlusInterval } from "@/lib/plus-interval";
 
 // ── Configuration ────────────────────────────────────────────────────
 //
@@ -42,6 +41,16 @@ const STRIPE_WEBHOOK_SECRET = (process.env.STRIPE_WEBHOOK_SECRET || "").trim();
 // Beide zijn per Stripe-account én per modus verschillend, dus beide staan in de omgeving
 // zonder fallback in code.
 const STRIPE_PRICE_ID_PLUS = (process.env.STRIPE_PRICE_ID_PLUS || "").trim();
+// [JAARPRIJS] Hetzelfde plan, per jaar vooruit. ÉÉN doorlopende Stripe-prijs van €179,91 — geen
+// subscription schedule, geen fase van nul euro, geen drie gratis maanden plus negen betaalde.
+// Zo'n constructie verandert halverwege van vorm, pakt per fase anders uit bij opzeggen en moet
+// per periode fiscaal worden uitgelegd; dat hoort een boekhoudpakket niet aan zijn eigen
+// facturen te hebben.
+//
+// Los van de maandprijs geconfigureerd, en met opzet NIET in isBillingConfigured(): staat hij er
+// niet, dan is er één knop minder en werkt de maandprijs gewoon door. De faalrichting is dus
+// "één optie minder", nooit "de verkeerde prijs".
+const STRIPE_PRICE_ID_PLUS_YEAR = (process.env.STRIPE_PRICE_ID_PLUS_YEAR || "").trim();
 /** Prijs van ÉÉN bewaarjaar. Het aantal jaren gaat als `quantity` mee. */
 const STRIPE_PRICE_ID_KLUIS_YEAR = (process.env.STRIPE_PRICE_ID_KLUIS_YEAR || "").trim();
 
@@ -58,6 +67,17 @@ const STRIPE_PRICE_ID_KLUIS_YEAR = (process.env.STRIPE_PRICE_ID_KLUIS_YEAR || ""
  */
 export function isBillingConfigured(): boolean {
   return STRIPE_SECRET_KEY !== "" && STRIPE_PRICE_ID_PLUS !== "";
+}
+
+/**
+ * [JAARPRIJS] Mag de jaarknop worden getoond? Alleen als er een jaarprijs is ingesteld.
+ *
+ * Een aparte vraag van isBillingConfigured(), zodat een ontbrekende jaarprijs de maandflow niet
+ * meeneemt. Of die prijs ook het JUISTE bedrag int, weet alleen Stripe — dat wordt per checkout
+ * gecontroleerd, niet hier: een id dat bestaat is geen id dat klopt.
+ */
+export function isAnnualBillingConfigured(): boolean {
+  return STRIPE_SECRET_KEY !== "" && STRIPE_PRICE_ID_PLUS_YEAR !== "";
 }
 
 /** Kan de Bewaarkluis worden afgerekend? Los van Plus: de een kan leven zonder de ander. */
@@ -149,13 +169,17 @@ export async function createCheckoutSession(params: {
   profileId: string;
   successUrl: string;
   cancelUrl: string;
-  /** [PROEFMAAND] Eerste maand gratis — alleen voor wie nog nooit een abonnement had.
-   *  De BESLISSING valt in trialEligible (subscription.ts, puur en getest); dit bestand
-   *  vertaalt haar alleen naar Stripe, zoals het hele bestand alleen Stripe spreekt. */
-  withTrial: boolean;
+  /** [JAARPRIJS] Per maand of per jaar. De route leest dit van de wire en weigert al wat geen
+   *  van beide is — parsePlusInterval valt nooit stil terug op een van de twee. */
+  interval: PlusInterval;
 }): Promise<Stripe.Checkout.Session> {
-  if (!STRIPE_PRICE_ID_PLUS) {
-    throw new Error("[BILLING] Missing STRIPE_PRICE_ID_PLUS");
+  const priceId = params.interval === "year" ? STRIPE_PRICE_ID_PLUS_YEAR : STRIPE_PRICE_ID_PLUS;
+  if (!priceId) {
+    throw new Error(
+      params.interval === "year"
+        ? "[BILLING] Missing STRIPE_PRICE_ID_PLUS_YEAR"
+        : "[BILLING] Missing STRIPE_PRICE_ID_PLUS",
+    );
   }
 
   // ── [PRIJS-KLOPT] Never open a checkout that charges an amount we did not publish ──────────
@@ -171,23 +195,31 @@ export async function createCheckoutSession(params: {
   // One extra API call per checkout — a checkout already takes several — and it turns a silent
   // mismatch into a refusal that names both numbers.
   //
-  // Currency is compared too: a price object in another currency is the same defect wearing a
-  // different hat, and 19,99 dollars is not 19,99 euro.
-  const priceObject = await getStripe().prices.retrieve(STRIPE_PRICE_ID_PLUS);
-  const stripeCents = priceObject.unit_amount;
-  const publishedCents = Math.round(PLUS_PRICE_EUR * 100);
-  if (stripeCents !== publishedCents || priceObject.currency !== "eur") {
+  // [JAARPRIJS] Since there are TWO price ids the comparison got a second half, and the second
+  // half is the one a single amount check cannot see: which interval this price actually bills
+  // on. Two opaque strings that look alike in a dashboard, swapped, produce €19,99 a YEAR or
+  // €179,91 a MONTH — and both of those pass an amount-only test against the wrong constant.
+  // The whole rule lives in plus-interval.ts because it is pure and therefore properly testable;
+  // this file only fetches the object and obeys the verdict.
+  const priceObject = await getStripe().prices.retrieve(priceId);
+  const verdict = checkPlusPrice(params.interval, {
+    unitAmount: priceObject.unit_amount,
+    currency: priceObject.currency,
+    type: priceObject.type,
+    recurringInterval: priceObject.recurring?.interval ?? null,
+    recurringIntervalCount: priceObject.recurring?.interval_count ?? null,
+  });
+  if (!verdict.ok) {
     throw new Error(
-      `[PRIJS-KLOPT] Stripe zou ${stripeCents ?? "onbekend"} ${priceObject.currency} incasseren, ` +
-        `maar BoekBrug publiceert ${publishedCents} eur. Er wordt niets afgerekend tot die twee ` +
-        `gelijk zijn: pas STRIPE_PRICE_ID_PLUS aan of zet de gepubliceerde prijs terug.`,
+      `[PRIJS-KLOPT] Er wordt niets afgerekend: ${verdict.reason} Pas de prijs in Stripe aan of ` +
+        `zet de gepubliceerde prijs terug — ze moeten gelijk zijn voordat er een kaart wordt belast.`,
     );
   }
 
   return getStripe().checkout.sessions.create({
     mode: "subscription",
     customer: params.customerId,
-    line_items: [{ price: STRIPE_PRICE_ID_PLUS, quantity: 1 }],
+    line_items: [{ price: priceId, quantity: 1 }],
     // NL market: iDEAL is how the Dutch actually pay. Offering card only would
     // lose real customers at the last click. SEPA direct debit follows later —
     // it needs a mandate flow we deliberately keep out of v1.
@@ -202,13 +234,22 @@ export async function createCheckoutSession(params: {
     tax_id_collection: { enabled: true },
     customer_update: { address: "auto", name: "auto" },
     // The webhook reads this to find the profile without trusting any URL.
-    // [PROEFMAAND] trial_period_days: Stripe int niets tot de proefmaand om is; de mandaat
-    // (iDEAL→SEPA of kaart) wordt wél meteen vastgelegd, dus na de maand loopt de incasso
-    // vanzelf en wie binnen de maand opzegt betaalt niets. 'trialing' komt bij de webhook
-    // binnen en wordt door normalizeStripeStatus al als lopend abonnement gelezen.
+    // [EERLIJK-WOORD] GEEN PROEFPERIODE MEER, op geen van beide intervallen.
+    //
+    // Er stond hier trial_period_days: 30 op de maandprijs. Drie proeven lagen toen over
+    // elkaar heen — het gratis plan, een welkomsttoekenning van 90 dagen Plus, en deze — en
+    // alledrie probeerden hetzelfde te doen. De beslissing van 17 september houdt er één over:
+    //
+    //     Gratis laat je BoekBrug proberen. Plus laat je je onderneming erop draaien.
+    //
+    // Wat dat hier concreet betekent: wie afrekent, rekent af. De kraan gaat open op dag één,
+    // er is geen 'trialing'-venster meer waarin een abonnement bestaat zonder betaling, en de
+    // zin op /prijzen die anders beloofde is mee verdwenen — die twee horen bij elkaar en zijn
+    // daarom in dezelfde wijziging weggegaan. normalizeStripeStatus blijft 'trialing' wél
+    // lezen: Stripe mag die status om andere redenen sturen, en een status die wij niet
+    // herkennen zou een betalende klant op gratis zetten.
     subscription_data: {
       metadata: { profile_id: params.profileId },
-      ...(params.withTrial ? { trial_period_days: PLUS_TRIAL_DAYS } : {}),
     },
     metadata: { profile_id: params.profileId },
     success_url: params.successUrl,

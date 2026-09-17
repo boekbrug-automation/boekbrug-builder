@@ -63,6 +63,7 @@ export async function POST(req: NextRequest) {
     // MIME type, which made the model classify off "application/pdf"). Content is the
     // filename too, since that's the only text we have here.
     const classification = await classifyDocument(
+      user.id,
       doc.file_name,
       doc.file_name
     );

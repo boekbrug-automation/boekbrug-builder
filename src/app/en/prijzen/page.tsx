@@ -11,12 +11,14 @@ import { PLUS } from '@/lib/plan'
 import { FAIR_USE_LIMITS, fairUseLimit } from '@/lib/fair-use'
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR } from '@/lib/bewaarkluis'
 import SubscribeButton from '@/app/prijzen/SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
-  title: 'Pricing — free for you and your accountant | BoekBrug',
+  title: 'Pricing — try it free, run your business on Plus | BoekBrug',
   description:
-    `BoekBrug is free for the freelancer and free for their accountant. ` +
-    `Above fair use, Plus costs ${PLUS.priceLabel} per month (incl. VAT). ` +
+    `Try BoekBrug free: ${fairUseLimit('invoicesSent').free} invoices and ` +
+    `${fairUseLimit('aiDocuments').free} AI-read documents per month. ` +
+    `Plus costs ${PLUS.priceLabel} per month or ${PLUS.annualPriceLabel} per year (incl. VAT). ` +
     `No trial period, no automatic charge, and never a lock on your own administration.`,
   keywords: ['boekbrug pricing', 'free bookkeeping software freelancer netherlands', 'zzp bookkeeping cost', 'retention obligation 7 years'],
   alternates: {
@@ -24,8 +26,10 @@ export const metadata: Metadata = {
     languages: { 'nl-NL': '/prijzen', 'en-GB': '/en/prijzen', ar: '/ar/prijzen', 'tr-TR': '/tr/prijzen' },
   },
   openGraph: {
-    title: 'BoekBrug — free for you and your accountant',
-    description: `Plus costs ${PLUS.priceLabel} per month and is only needed above fair use.`,
+    title: 'BoekBrug — try it free, run your business on Plus',
+    description:
+      `Plus costs ${PLUS.priceLabel} per month or ${PLUS.annualPriceLabel} per year — ` +
+      `twelve months for the price of nine.`,
     type: 'website',
     locale: 'en_GB',
   },
@@ -48,6 +52,15 @@ const INCLUDED = [
 
 export default function EnPricingPage() {
   const ai = fairUseLimit('aiDocuments')
+  // [JAARPRIJS] Server-side: a missing annual price costs one button, never the monthly flow,
+  // and the Stripe price id never crosses to the browser — only this boolean does.
+  //
+  // ⚠ THIS PAGE IS STATIC (○ in the build output), so this boolean is baked in AT BUILD TIME.
+  // The Dutch /prijzen is dynamic (ƒ) and re-reads it per request; these three do not. Setting
+  // STRIPE_PRICE_ID_PLUS_YEAR after a deploy therefore lights up the annual button on /prijzen
+  // immediately and on this page only after the next build. Set the variable before deploying,
+  // or redeploy once it is set — see docs/JOUW_LIJST.md.
+  const annualAvailable = isAnnualBillingConfigured()
   const otherLimits = FAIR_USE_LIMITS.length - 1
 
   return (
@@ -65,7 +78,7 @@ export default function EnPricingPage() {
           Photograph your receipts or let them arrive by email; at the end of the quarter everything is ready for your accountant.
         </p>
         <p style={{ fontSize: 17, color: '#5f6368', margin: '0 0 28px', lineHeight: 1.6, maxWidth: 620 }}>
-          And that is <strong>free</strong> — for you and for your accountant. No trial that quietly ends, no credit card up front, and no lock on your own administration.
+          You try it <strong>free</strong>, and your accountant works with you for free. No trial that quietly ends, no credit card up front, and no lock on your own administration.
         </p>
 
         {/* Three plans */}
@@ -75,10 +88,16 @@ export default function EnPricingPage() {
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '10px 0 4px' }}>
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>€ 0</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>all features, within fair use</div>
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>all features, to try out</div>
             <Link href="/register" style={{ display: 'block', textAlign: 'center', padding: '12px 20px', background: '#137333', color: '#fff', borderRadius: 8, textDecoration: 'none', fontWeight: 600, fontSize: 15 }}>Start for free</Link>
-            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-              This is not the entry tier — this is the plan the product was made for, and where most users should stay permanently.
+            <ul style={{ fontSize: 13.5, color: '#3c4043', margin: '16px 0 0', paddingInlineStart: 18, lineHeight: 1.7 }}>
+              <li>Invoices sent: <strong>{fairUseLimit('invoicesSent').free} per month</strong></li>
+              <li>Documents read by the AI: <strong>{fairUseLimit('aiDocuments').free} per month</strong></li>
+              <li>Storage: <strong>{fairUseLimit('storageMb').free} MB</strong></li>
+              <li>Linked mailbox: <strong>{fairUseLimit('mailboxes').free}</strong></li>
+            </ul>
+            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '12px 0 0', lineHeight: 1.6 }}>
+              Enough to see how it works. Run your business on it and you will pass these — that is the design. Everything you enter stays yours, after that too.
             </p>
           </section>
 
@@ -88,10 +107,25 @@ export default function EnPricingPage() {
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>{PLUS.priceLabel}</span>
               <span style={{ fontSize: 15, color: '#5f6368' }}>per month</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>incl. VAT · cancel monthly</div>
-            <SubscribeButton />
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>incl. VAT · cancel any time</div>
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                Or {PLUS.annualPriceLabel} per year — twelve months for the price of nine.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton interval="month" label={`Get Plus — ${PLUS.priceLabel} per month`} />
+              {annualAvailable && (
+                <SubscribeButton interval="year" variant="secondary" label={`Plus per year — ${PLUS.annualPriceLabel}`} />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-              Only needed if you structurally exceed fair use — more than {ai.free} documents per month read by the AI, for example. Plus raises every limit to {ai.plus}.
+              {/* [EERLIJK-WOORD] This said "Plus raises every limit to {ai.plus}". Since Plus
+                  publishes no ceiling, ai.plus is 0 — so that sentence rendered "raises every
+                  limit to 0", the strictest number imaginable in the place the widest promise
+                  belongs. A raw limit value never belongs in a sentence; formatLimit exists for
+                  exactly this. */}
+              This is the plan to run your business on. No published ceiling on invoices, AI-read documents or storage — generous, under fair use. Two mailboxes instead of one. Above {ai.free} AI-read documents a month, Plus is the answer.
             </p>
           </section>
 
@@ -110,7 +144,7 @@ export default function EnPricingPage() {
 
         {/* What's in everything */}
         <section style={{ ...card, marginTop: 16 }}>
-          <h2 style={{ fontSize: 17, fontWeight: 700, color: '#202124', margin: '0 0 14px' }}>This is in every plan — including the free plan</h2>
+          <h2 style={{ fontSize: 17, fontWeight: 700, color: '#202124', margin: '0 0 14px' }}>This is in every plan — including the free one</h2>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
             {INCLUDED.map((feature) => (
               <li key={feature} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 14.5, color: '#202124', lineHeight: 1.5 }}>
@@ -120,7 +154,7 @@ export default function EnPricingPage() {
             ))}
           </ul>
           <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-            The limits of the free plan are published to the number on <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>/eerlijk-gebruik</Link>. If you exceed one, only the action that costs us money pauses. Viewing, searching and exporting your own administration always keep working — above the limit, and after you stop.
+            The limits are published to the number on <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>/eerlijk-gebruik</Link>. If you exceed one, only the action that costs us money pauses. Viewing, searching and exporting your own administration always keep working — above the limit, and after you stop.
           </p>
         </section>
 
@@ -143,8 +177,11 @@ export default function EnPricingPage() {
         <section style={{ marginTop: 32 }}>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#202124', margin: '0 0 16px' }}>Frequently asked questions</h2>
           <div style={{ display: 'grid', gap: 14 }}>
-            <Faq q="Is it really free, or is this a trial?">
-              Really free. There is <strong>no trial period</strong> and no clock running. You leave no payment details, so nothing can ever be charged. What there is, is a fair use: {ai.free} documents per month read by the AI, and {otherLimits} other limits shown on <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>one page</Link>.
+            <Faq q="Is the free plan a trial?">
+              No clock runs. The free plan never stops by itself and you leave no payment details, so nothing can ever be charged. What it bounds is the amount per month: {fairUseLimit('invoicesSent').free} invoices sent and {ai.free} documents read by the AI. That is enough to see how BoekBrug works and too little to run a year on — by design. All {otherLimits + 1} limits are on <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>one page</Link>.
+            </Faq>
+            <Faq q="What does Plus cost per year?">
+              {PLUS.annualPriceLabel} per year incl. VAT — twelve months for the price of nine, paid up front. Exactly the same Plus as the {PLUS.priceLabel} monthly one: no different package and no different limits. One amount per year, with no free-months construction inside it.
             </Faq>
             <Faq q="What happens if I exceed fair use?">
               You get a notice at 80% of a limit, with the exact number — so before anything happens. If you exceed it, <em>only</em> the action that costs us money pauses: reading a new document automatically, sending a new invoice. Everything already there stays readable and exportable. Then you choose: wait for next month, or take Plus.
@@ -152,8 +189,8 @@ export default function EnPricingPage() {
             <Faq q="Does my accountant pay too?">
               No, and that will not change. The accountant portal is free, even with a hundred linked clients. There is no paid accountant plan.
             </Faq>
-            <Faq q="Can I cancel monthly?">
-              Yes. You cancel Plus yourself in your own settings — no email, no phone call. You keep Plus until the end of the period you already paid, and then fall back to the free plan. You lose no data.
+            <Faq q="Can I cancel?">
+              Yes, at any time and with immediate effect — you cancel Plus yourself in your own settings, no email and no phone call. You keep Plus until the end of the period you already paid: to the end of that month if you pay monthly, to the end of that year if you pay yearly. After that you fall back to the free plan. An already-paid period is not automatically refunded, unless the service was unusable for a long time through our doing (<Link href="/voorwaarden" style={{ color: '#1A73E8' }}>Terms §5.4</Link>). You lose no data: nothing is deleted, your mailbox stays connected, and everything stays readable and exportable. Only new growth beyond the free limits pauses.
             </Faq>
             <Faq q="Do I get an invoice with VAT?">
               Yes. Every payment automatically produces a VAT invoice in your name that you can download yourself. If you have a VAT number, you add it at checkout.

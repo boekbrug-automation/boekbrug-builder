@@ -34,6 +34,8 @@ import { isExpectedBookingRefusal } from "./incasso-settle";
 import { destinationsFor, railDestinations, DOOR_LOOK } from "./nav-destinations";
 // [WAAROM-VASTGEHOUDEN] De zinnen bij de machinecodes — gescand tegen de plekken die ze maken.
 import { HOLD_LABELS } from "./hold-reasons";
+// [KIES-TERMIJN] The published cancellation note must be true for both billing terms.
+import { PLUS } from "./plan";
 // [WAAROM-WACHT] …en de zin die de eigenaar leest bij dezelfde code.
 import { explainableReasons, explainWaiting } from "./why-waiting";
 import { categoryHint } from "./category-wait";
@@ -65,7 +67,13 @@ import {
 } from "./dutch-address";
 import { decidePlan as decidePlanFor } from "./subscription";
 import { PUBLIC_PATHS as PUBLIC_PATHS_FOR } from "./public-paths";
-import { PLUS_PRICE_EUR } from "./fair-use";
+import {
+  FAIR_USE_NO_CEILING,
+  PLUS_ANNUAL_PRICE_EUR,
+  PLUS_PRICE_EUR,
+  fairUseLimit,
+  fairUseTableMarkdown,
+} from "./fair-use";
 import { round2 } from "./invoice-totals";
 // [SEGMENT-VOORDEUR] De drie deuren, en alles wat ze beloven.
 import { SEGMENT_PAGES, claimedRoutes } from "./segment-pages";
@@ -1483,8 +1491,10 @@ test("[GEGROND-OCR] the second read is blind, or it is worth nothing", () => {
 
   const ai = code("src/lib/ai.ts");
   assert.match(
-    ai, /transcribeAmountsForGrounding\(fileBase64, mimeType/,
-    "the call receives the FILE and nothing derived from the first read",
+    ai, /transcribeAmountsForGrounding\(userId, fileBase64, mimeType/,
+    "the call receives the FILE and nothing derived from the first read. [EIGEN-AANDEEL] added the " +
+      "account in front of it, and that is the one argument allowed to precede the file: it says " +
+      "whose day pays for the second read, never anything about what the first read saw.",
   );
   assert.match(
     ai, /grounding\.totalIncBtw === 'unreadable' &&/,
@@ -2640,8 +2650,8 @@ test("[E-FACTUUR-XML] attaching a Peppol invoice to a bank line goes to the same
     "the reader must be handed the type the content actually is",
   );
   assert.match(
-    src, /verifyInvoiceFromPdf\(base64, readerMime,/,
-    "…and actually be given it",
+    src, /verifyInvoiceFromPdf\(user\.id, base64, readerMime,/,
+    "…and actually be given it — behind the account whose daily AI share this read spends",
   );
 });
 
@@ -27160,11 +27170,33 @@ test("[ARCHIEF-OPEN] opening an archive does not break the three invariants arou
   // the zip is never fetched again. Keeping the bytes on the spot is the only honest answer.
   assert.match(
     src,
-    /if \(attachment\.fromArchive\) \{\s*await saveKeptAttachment\(attachment, 'could_not_read'\)/,
+    // [OPSLAG-DEUR] widened: the call may now sit behind the storage check, which is a STRONGER
+    // form of this very invariant — bytes that cannot be kept because the disk is full make the
+    // branch HOLD instead of complete, so the zip is fetched again rather than lost. The thing that
+    // must never return is completing the message without keeping the bytes, asserted just below.
+    /if \(attachment\.fromArchive\) \{[\s\S]{0,200}?saveKeptAttachment\(attachment, 'could_not_read'\)/,
     "a file unpacked from an archive whose read failed is left to a retry that cannot happen — " +
       "the watermark has already passed its message, so the document is gone with no row " +
       "anywhere saying so",
   );
+
+  // …and the other half of the same promise: the mark may only pass once the bytes are SOMEWHERE.
+  // This branch completes its message unconditionally, so a keep that silently did nothing would
+  // retire the file with no row anywhere — the exact loss this gate is named for.
+  {
+    const at = src.indexOf("if (attachment.fromArchive) {");
+    assert.ok(at > -1, "[ARCHIEF-OPEN] the archive branch moved — re-point this gate");
+    const branch = src.slice(at, at + 700);
+    const fullAt = branch.indexOf("=== STORAGE_FULL");
+    const doneAt = branch.indexOf("completedKeys.add(wmKey)");
+    assert.ok(fullAt > -1, "[ARCHIEF-OPEN] an archive member that could not be STORED must hold");
+    assert.ok(doneAt > -1, "[ARCHIEF-OPEN] the branch's completion marker moved — re-point this gate");
+    assert.ok(
+      fullAt < doneAt,
+      "[ARCHIEF-OPEN] the full-disk hold must come BEFORE the message is marked complete, or the " +
+        "mark walks past a zip whose contents were never stored",
+    );
+  }
   assert.match(code("src/lib/archive-expand.ts"), /fromArchive: true,/,
     "the unpacked files no longer carry fromArchive, so the branch above can never run");
 
@@ -29535,7 +29567,14 @@ test("[HERINNERING-NOOIT] a payment reminder is never an invoice, on any door", 
   const email = code("src/lib/email-integration.ts");
   const branch = email.indexOf("if (classification.isReminder === true) {");
   assert.ok(branch > 0, "the sync has a reminder branch");
-  const branchEnd = email.indexOf("continue", branch);
+  // [LIFECYCLE-VENSTER] This window used to end at the FIRST `continue` after the branch opened.
+  // [OPSLAG-DEUR] then added an earlier one inside it — the full-disk hold — and the window shrank
+  // to a few lines, turning this gate red while the invariant it guards was untouched. It failed in
+  // the safe direction, but the lesson is the one AGENTS.md states: cut on a marker that belongs to
+  // the END of the thing being measured, and assert it was found. `completedKeys.add(wmKey)` is the
+  // reminder branch's last act before it leaves, and it is real code rather than a comment.
+  const branchEnd = email.indexOf("completedKeys.add(wmKey)", branch);
+  assert.ok(branchEnd > branch, "[HERINNERING-NOOIT] the reminder branch's end marker moved — re-point this gate");
   const branchBody = email.slice(branch, branchEnd);
   assert.match(branchBody, /saveKeptAttachment\(attachment, 'reminder', DOC_TYPE_REMINDER, \{ aiProcessed: true \}\)/,
     "the file is kept as a READ reminder document");
@@ -35185,4 +35224,957 @@ test("[HANDGESCHREVEN-BOEKING] the two copies of confirm_bank_payment stay byte-
   assert.equal(a, b,
     "the two declarations of confirm_bank_payment have diverged. Comments included: a difference " +
     "in the REASONING is how the next reader learns the wrong thing about the copy they opened.");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [EERLIJK-DEUR] Every route that makes the AI read a document spends the owner's monthly
+// allowance — or is named here with the reason it does not.
+//
+// WHY THIS GATE EXISTS. The allowance was enforced in six routes and bypassed in two, and nothing
+// in the repository could see the difference: both sets import @/lib/ai, both reach Anthropic,
+// only one reaches consumeFairUse. /api/invoice/audit transcribes up to MAX_PHOTOS_PER_RUN stored
+// documents per request at the imageDocument rate and never moved the counter once. A free plan
+// whose limit can be walked around is a published number that is not true, and "10 documents a
+// month" is about to become a commercial promise rather than a comfortable ceiling.
+//
+// So the invariant is stated over the DOORS, not over any one route: importing the AI module and
+// not accounting for it is a decision that has to be written down.
+//
+// THE ALLOWLIST IS THE POINT. A route lands there only when the call is not a document read at
+// all, and the reason travels with it — because the opposite error is just as real. Charging an
+// allowance unit for something the model never read is what [E-FACTUUR-GRATIS] was written to
+// stop: it makes the owner pay for nothing AND pushes a real invoice out of the month.
+test("[EERLIJK-DEUR] every AI-reading API route spends the monthly allowance, or says why not", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const p = `${dir}/${e}`;
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (p.endsWith(".ts")) out.push(p);
+    }
+    return out;
+  };
+
+  // Routes that reach @/lib/ai without touching the allowance, each with the reason.
+  const EXEMPT: Record<string, string> = {
+    // classifyDocument() here is handed doc.file_name TWICE — the route never fetches the file's
+    // text, and the header says so: "a filename-based folder SUGGESTION only". It goes through
+    // callClaude at TOKEN_ESTIMATE.shortText (1,200 tokens), not callClaudeWithImage's 6,000: it
+    // is a short text call about a NAME, not a reading of a document. The published allowance is
+    // "Documenten die de AI voor je leest (bonnen, inkoopfacturen, bankafschriften)" — a folder
+    // suggestion is none of those. It stays bounded by RATE_LIMITS.DOCUMENT_CLASSIFY and by the
+    // global fuse in ai-budget.ts, which is the right pair of fences for what it is.
+    "src/app/api/bestanden/classify/route.ts":
+      "filename-only folder suggestion — shortText call, no document is read",
+
+    // The three below GENERATE or TRANSLATE text. Nothing is read from a stored document at all:
+    // they go through callClaude at shortText (1,200 tokens) and are bounded by
+    // RATE_LIMITS.AI_TRANSLATE (120/hour) plus the global fuse. Counting them against
+    // "documenten die de AI voor je leest" would charge a reading allowance for writing — the
+    // exact inversion [E-FACTUUR-GRATIS] refuses, and it would push real invoices out of a month
+    // to pay for an e-mail draft.
+    "src/app/api/ai/draft-email/route.ts":
+      "composes an e-mail — shortText generation, reads no stored document",
+    "src/app/api/ai/translate/route.ts":
+      "translateToNL on text already in hand — shortText, reads no stored document",
+    "src/app/api/draft-queue/route.ts":
+      "composeDraftEmail — shortText generation, reads no stored document",
+  };
+
+  const offenders: string[] = [];
+  for (const file of walk("src/app/api")) {
+    const src = code(file);
+    if (!/from ["']@\/lib\/ai["']/.test(src)) continue;
+    if (EXEMPT[file]) continue;
+    if (/gateFairUse(ForRead)?\s*\(/.test(src)) continue;
+    offenders.push(file);
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `these routes make the AI read and never spend the allowance — gate them, or add them to ` +
+      `EXEMPT with the reason they are not a document read:\n  ${offenders.join("\n  ")}`,
+  );
+
+  // The allowlist may not rot into a bypass list. Every name on it must still exist and must still
+  // be free of a gate — an entry that has since been gated is a stale excuse, and one whose file
+  // moved is an exemption protecting nothing.
+  for (const [file, reason] of Object.entries(EXEMPT)) {
+    assert.ok(existsSync(file), `[EERLIJK-DEUR] EXEMPT names ${file}, which no longer exists`);
+    assert.ok(reason.length > 20, `[EERLIJK-DEUR] ${file} needs a real reason, not a label`);
+    assert.ok(
+      !/gateFairUse(ForRead)?\s*\(/.test(code(file)),
+      `[EERLIJK-DEUR] ${file} is gated now — remove it from EXEMPT so the list stays honest`,
+    );
+  }
+
+  // And the door this gate was built for must actually carry it, inside the loop rather than once
+  // per request: one call to that route reads up to MAX_PHOTOS_PER_RUN documents, so a single
+  // reservation at the top would charge for one and read forty.
+  const audit = code("src/app/api/invoice/audit/route.ts");
+  const gateAt = audit.indexOf("gateFairUse({");
+  const readAt = audit.indexOf("transcribeStoredDocumentAmounts(user.id, bytes");
+  assert.ok(gateAt > -1, "[EERLIJK-DEUR] the audit route must reserve before it transcribes");
+  assert.ok(readAt > -1, "[EERLIJK-DEUR] the audit route's transcription call moved — re-point this gate");
+  assert.ok(gateAt < readAt, "[EERLIJK-DEUR] the reservation must come BEFORE the AI read");
+  assert.match(
+    audit,
+    /release\(\)/,
+    "[EERLIJK-DEUR] an unusable transcription must be given back — /eerlijk-gebruik §3",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [EIGEN-AANDEEL] Every call to Anthropic names the account whose day it is spending — and the
+// global fuse is asked anyway.
+//
+// WHY THIS GATE EXISTS. [COST-GUARD] put ONE euro ceiling on the whole app per UTC day, and it
+// answers exactly one question: can the owner pay today's bill. It cannot answer the question a
+// paid plan has to answer, which is whether ONE account can take that day away from everybody
+// else. Measured on production: a single account read 101 documents on 19 July 2026, and the
+// busiest day the app has ever had cost EUR 1.02 in total — one backlog import is most of a day.
+//
+// Selling a year up front is what makes that a promise rather than a nuisance, so the share had
+// to exist before annual could be sold. It is kept in usage_counters, under a period that is a
+// UTC DAY and a metric spelled `internal.`, and it is charged and settled beside the global one.
+//
+// WHAT THE GATE ACTUALLY HOLDS, and each line of it failed in some earlier draft of this change:
+//
+//   1. Only two files in the repository may speak to Anthropic, and both reserve first. Nothing
+//      else may grow a third transport quietly. `code()` strips comments, so the half-dozen
+//      places that merely NAME api.anthropic.com in prose do not count as reaching it.
+//   2. Every transport hands reserveAiBudget a userId. A reservation that forgets it still
+//      charges the global fuse and silently charges NOBODY's share — the exact half-enforcement
+//      [EERLIJK-DEUR] was written about, one layer down.
+//   3. Every call to a transport states an account or an explicit null. The parameter is first
+//      and required so the compiler asks the question; this reads the answers, because `null` is
+//      a legitimate answer in exactly one place and a lazy one everywhere else.
+//   4. The global fuse is UNCONDITIONAL. It may not sit inside the `if (userId)` branch — a
+//      share that could switch the real ceiling off would be a downgrade wearing a fix's clothes.
+//   5. The share hands itself back when the global fuse refuses. The call is not happening, so
+//      it must not stand on anyone's day.
+//   6. The share ships at 0 — count, do not limit. Mechanism and threshold are separate
+//      decisions, and the number is the owner's.
+test("[EIGEN-AANDEEL] every Anthropic call names an account, and the global fuse is unconditional", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const p = `${dir}/${e}`;
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (p.endsWith(".ts") || p.endsWith(".tsx")) out.push(p);
+    }
+    return out;
+  };
+
+  // 1. The transports, and only the transports.
+  const TRANSPORTS = ["src/lib/ai.ts", "src/app/api/tools/scan-invoice/route.ts"];
+  const speakers = walk("src")
+    .filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".test.tsx"))
+    .filter((f) => code(f).includes("api.anthropic.com"));
+  assert.deepEqual(
+    speakers.sort(),
+    [...TRANSPORTS].sort(),
+    "a new file reaches Anthropic directly. Every paid call goes through ai.ts or the public " +
+      "scanner, because those are the two places the fuse and the share are enforced.",
+  );
+  for (const f of TRANSPORTS) {
+    assert.match(code(f), /reserveAiBudget\(/, `[EIGEN-AANDEEL] ${f} spends without reserving`);
+  }
+
+  const ai = code("src/lib/ai.ts");
+
+  // 2. Each of the three transports in ai.ts names an account in its reservation. The public
+  //    scanner deliberately does not: it is login-free, so there is no account and no profile row
+  //    for usage_counters.user_id to reference. It keeps check_rate_limit_key and the global fuse.
+  for (const label of ["callClaude", "callClaudeWithPdf", "callClaudeWithImage"]) {
+    const at = ai.indexOf(`label: '${label}',`);
+    assert.ok(at > -1, `[EIGEN-AANDEEL] the reservation for ${label} moved — re-point this gate`);
+    assert.match(
+      ai.slice(at, at + 120),
+      /userId,/,
+      `[EIGEN-AANDEEL] ${label} reserves without naming the account — the share would be charged ` +
+        "to nobody while the global fuse still pays",
+    );
+  }
+  const scanner = code("src/app/api/tools/scan-invoice/route.ts");
+  assert.ok(
+    !/userId/.test(scanner.slice(scanner.indexOf("reserveAiBudget("), scanner.indexOf("reserveAiBudget(") + 300)),
+    "[EIGEN-AANDEEL] the public scanner has no account by construction. If it grew one, the " +
+      "exemption written into reserveAiBudget's doc comment is now wrong and must be rewritten.",
+  );
+
+  // 3. Every transport CALL answers the question. Definitions match too (their first parameter is
+  //    literally `userId`), which is what we want: the shape is identical either way.
+  const unnamed: string[] = [];
+  for (const m of ai.matchAll(/\bcallClaude(WithPdf|WithImage)?\(/g)) {
+    const after = ai.slice(m.index + m[0].length).replace(/^[\s]*/, "");
+    if (!/^(userId|null)\b/.test(after)) unnamed.push(after.slice(0, 40).split("\n")[0]);
+  }
+  assert.deepEqual(
+    unnamed,
+    [],
+    "these transport calls do not say whose day they spend. Pass userId, or `null` where there " +
+      `genuinely is no account:\n  ${unnamed.join("\n  ")}`,
+  );
+
+  const budget = code("src/lib/ai-budget.ts");
+
+  // 4. The fuse is not conditional on the share. Measured from the source rather than asserted in
+  //    prose: the global RPC must sit AFTER the `if (userId)` block has closed, at function level.
+  const shareBranch = budget.indexOf("if (userId) {");
+  const globalRpc = budget.indexOf('rpc("ai_budget_consume"');
+  assert.ok(shareBranch > -1 && globalRpc > -1, "[EIGEN-AANDEEL] re-point this gate: reserveAiBudget was restructured");
+  const between = budget.slice(shareBranch, globalRpc);
+  assert.ok(
+    between.includes("\n  }"),
+    "[EIGEN-AANDEEL] ai_budget_consume must be reached whether or not there is an account. It is " +
+      "the only ceiling that stands between the owner and a bill nobody can pay, and a per-account " +
+      "share may never become a condition on reaching it.",
+  );
+
+  // 5. A blown fuse gives the share back.
+  assert.match(
+    budget,
+    /if \(accountRecorded && userId\) \{\s*await moveAccountShare\(userId, accountPeriod, -costMicros/,
+    "[EIGEN-AANDEEL] when the global fuse refuses, the call does not happen — so the share it " +
+      "already took must be handed back, or a blown fuse silently eats the share of every account " +
+      "that asked afterwards.",
+  );
+
+  // 6. Mechanism now, threshold later. The share ships counting, not limiting.
+  assert.match(
+    budget,
+    /AI_DAILY_SHARE_EUR[\s\S]{0,200}?if \(raw === ""\) return 0;/,
+    "[EIGEN-AANDEEL] the share must default to 0 — count, do not limit. A ceiling chosen before " +
+      "there is per-account evidence is a guess, and this one would refuse paying customers.",
+  );
+
+  // …and the counter it writes to must be hidden from the account it belongs to, because the row
+  // is our cost model in micro-euros, not a number the owner is entitled to read off their meter.
+  assert.match(
+    budget,
+    /ACCOUNT_SHARE_METRIC = "internal\./,
+    "[EIGEN-AANDEEL] the share's metric must carry the `internal.` prefix the RLS policy hides on",
+  );
+  assert.match(
+    code("supabase/migrations/usage_counters_internal_metrics.sql"),
+    /metric NOT LIKE 'internal\.%'/,
+    "[EIGEN-AANDEEL] usage_counters_select_own must exclude internal metrics",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [MAILBOX-WAAR] You cannot publish more mailboxes than there are doors to open one.
+//
+// WHY THIS GATE EXISTS. Three layers said three different things, and nothing could see it:
+//
+//   · /eerlijk-gebruik and the Terms published "Gekoppelde mailboxen: Free 1, Plus 3".
+//   · The table allows at most TWO — UNIQUE (user_id, provider) with the provider limited to
+//     gmail and outlook — so a second Gmail ADDRESS is not refused, it is silently upserted over
+//     the first. The owner loses a mailbox and is told nothing.
+//   · The screen showed ONE. The two connect buttons lived only in the not-connected branch, and
+//     the page read the connections with .limit(1).maybeSingle(), so a Gmail owner could not
+//     discover that Outlook was still possible on any plan.
+//
+// A published limit nobody enforces is decoration; a published limit the app CANNOT reach is a
+// promise we break by existing. The owner found this one by opening the screen and counting.
+//
+// So the invariant is stated between the published number and the code that can honour it: the
+// Plus limit equals the number of providers the connect door accepts. Raising the published
+// number now requires either a new provider or a migration off (user_id, provider) — both real
+// decisions, neither of them a constant somebody edits in passing.
+test("[MAILBOX-WAAR] the published mailbox limit is a number the app can actually reach", () => {
+  const connect = code("src/app/api/email/connect/route.ts");
+
+  // 1. The providers this door will start an OAuth flow for. Read from the refusal that is the
+  //    door's own definition of what it accepts — not from a list written down twice.
+  const accepted = [...connect.matchAll(/provider !== "(\w+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(accepted, ["gmail", "outlook"], "the connect door's provider list moved");
+
+  const limit = fairUseLimit("mailboxes");
+  assert.equal(
+    limit.plus,
+    accepted.length,
+    "the published Plus mailbox limit must equal the number of providers that can be connected. " +
+      "email_connections is UNIQUE (user_id, provider), so one row per provider is the hard " +
+      "maximum — a higher published number cannot be honoured on any plan, and a second address " +
+      "on a provider already connected is UPSERTED over the first rather than refused.",
+  );
+  assert.ok(limit.free <= limit.plus, "[MAILBOX-WAAR] Free may never be allowed more than Plus");
+
+  // 2. The door enforces it — and a RECONNECT is never an addition. A grant dies, the owner
+  //    presses "Verbind opnieuw", and that must work on Free too: counting a re-auth as a new
+  //    mailbox would lock an account out of the one it already has the moment its token expired.
+  assert.match(
+    connect, /!connected\.includes\(provider\)/,
+    "[MAILBOX-WAAR] the limit must skip a provider that is already connected — that is a " +
+      "reconnect of the same mailbox, not a second one",
+  );
+  assert.match(
+    connect, /connected\.length >= limit/,
+    "[MAILBOX-WAAR] the connect door must refuse an ADDITIONAL mailbox beyond the plan's limit",
+  );
+  assert.match(
+    connect, /status: 402/,
+    "[MAILBOX-WAAR] 402, like every other fair-use refusal: this is not 'you may not', it is " +
+      "'this costs more than your plan' — and it carries the published sentence and the way out",
+  );
+  // Before the redirect, or the owner grants Google access to their mail and is then told no.
+  assert.ok(
+    connect.indexOf("status: 402") < connect.indexOf("NextResponse.redirect"),
+    "[MAILBOX-WAAR] refuse BEFORE sending the owner to the provider",
+  );
+
+  // 3. The screen may no longer read one connection and call that the answer.
+  const page = code("src/app/dashboard/incoming/page.tsx");
+  const q = page.indexOf('.from("email_connections")');
+  assert.ok(q > -1, "[MAILBOX-WAAR] re-point this gate: the incoming page's connection query moved");
+  assert.ok(
+    !page.slice(q, q + 400).includes(".limit(1)"),
+    "[MAILBOX-WAAR] the page must read every connection. With .limit(1) an owner who has two " +
+      "sees one, and the screen cannot know whether a second is still possible.",
+  );
+
+  // 4. …and it must offer the one that is still possible, decided on the server.
+  assert.match(page, /other_provider:/, "[MAILBOX-WAAR] the page must decide the second door");
+  assert.match(
+    code("src/app/dashboard/incoming/IncomingInvoicesClient.tsx"),
+    /status\.other_provider &&/,
+    "[MAILBOX-WAAR] the connected panel must offer the remaining provider when there is one",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [OPSLAG-DEUR] Every write that fills the owner's storage asks whether there is room — or is
+// named here with the reason it does not.
+//
+// WHY THIS GATE EXISTS. /eerlijk-gebruik and the Terms publish an storage allowance (2 GB free,
+// 20 GB Plus) and NINE separate places wrote into the documents bucket. Not one of them measured
+// anything. The number was reported on the owner's own meter and enforced nowhere — the same
+// shape of hole [EERLIJK-DEUR] found for the AI allowance, in the metric the owner can see best.
+//
+// THE SPLIT, AND IT IS NOT ARBITRARY. Six of the nine create a `documents` row, and `documents`
+// is exactly what the meter measures — sum(file_size) over the rows that are not in the
+// prullenbak. Those are what an owner means by "my files", and they are gated.
+//
+// The other three write a PDF THE APP GENERATED: the invoice, the creditnota, the offerte. They
+// never make a documents row, the meter has never counted them, and charging an owner storage for
+// sending an invoice would be the same inversion [E-FACTUUR-GRATIS] refuses — making him pay to
+// bill someone. They are named below with that reason.
+//
+// The allowlist may not rot into a bypass list, so each entry is re-checked: the file must still
+// exist, the reason must be a reason, and a door that HAS since been gated must leave the list.
+test("[OPSLAG-DEUR] every documents write measures the allowance, or says why not", () => {
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const e of readdirSync(dir)) {
+      const p = `${dir}/${e}`;
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (p.endsWith(".ts")) out.push(p);
+    }
+    return out;
+  };
+
+  const EXEMPT: Record<string, string> = {
+    // The offerte PDF this app generated. It lands in <owner>/offertes/ and creates no documents
+    // row, so the meter has never counted it and the owner has never seen it there. Charging
+    // storage for sending a quotation would make him pay to try to win work — the same inversion
+    // [E-FACTUUR-GRATIS] refuses. If it ever starts writing a documents row, it must be gated.
+    "src/app/api/invoice/[id]/send-offerte/route.ts":
+      "uploads the offerte PDF this app generated — no documents row, never on the owner's meter",
+
+    // A screenshot attached to a bug report. It goes to <user>/feedback/, creates no documents row
+    // and is never listed among the owner's files — it is a message to US, not part of his
+    // administration. Refusing it would mean telling someone he cannot report that the app is
+    // broken because his disk is full, which is the wrong way round in every direction.
+    "src/app/api/feedback/route.ts":
+      "a screenshot on a bug report — sent to us, not stored as the owner's own file",
+
+  };
+
+  // NOT IN SCOPE, and worth saying once so the next reader does not go looking: the invoice PDF
+  // (/api/invoice/send) and the creditnota (/api/invoice/creditnota) are written to PDF_BUCKET, a
+  // DIFFERENT bucket. The published allowance is measured from documents rows — measureUsage()
+  // sums documents.file_size — so nothing in that bucket has ever been on the owner's meter, and
+  // this gate is not the place to decide whether it should be. They are absent below because the
+  // pattern only finds the documents bucket, not because anyone judged them exempt.
+
+  const UPLOAD = /\.storage\s*\.from\(["']documents["']\)\s*\.upload\(/;
+
+  const offenders: string[] = [];
+  for (const file of [...walk("src/app/api"), "src/lib/email-integration.ts"]) {
+    const src = code(file);
+    if (!UPLOAD.test(src)) continue;
+    if (EXEMPT[file]) continue;
+    // Two shapes, one rule. A route answers a waiting person, so it uses gateStorage and gets a 402
+    // it can return. The e-mail sync answers nobody, so it takes the same measurement through
+    // storageRoom/storageFits and HOLDS instead. Both are "asked whether there is room"; only the
+    // reply differs, and the stricter half of the sync's contract is asserted further down.
+    if (/gateStorage\s*\(/.test(src) || /storageRoom\s*\(\{/.test(src)) continue;
+    offenders.push(file);
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    "these doors fill the owner's storage and never ask whether there is room — gate them with " +
+      `gateStorage, or name them in EXEMPT with the reason they are not the owner's files:\n  ${offenders.join("\n  ")}`,
+  );
+
+  for (const [file, reason] of Object.entries(EXEMPT)) {
+    assert.ok(existsSync(file), `[OPSLAG-DEUR] EXEMPT names ${file}, which no longer exists`);
+    assert.ok(reason.length > 20, `[OPSLAG-DEUR] ${file} needs a real reason, not a label`);
+    assert.ok(
+      UPLOAD.test(code(file)),
+      `[OPSLAG-DEUR] ${file} no longer writes to storage — remove it so the list stays honest`,
+    );
+  }
+
+  // And the gate must run BEFORE the bytes are written, in each door that carries it. Measuring
+  // after the upload would refuse a file that is already stored — the owner is charged for it and
+  // told he could not have it.
+  for (const file of [
+    "src/app/api/bank/attachment/route.ts",
+    "src/app/api/bank/attach-invoice/route.ts",
+    "src/app/api/email/upload/route.ts",
+    "src/app/api/intake/route.ts",
+    "src/app/api/invoice/[id]/document/route.ts",
+  ]) {
+    const src = code(file);
+    const uploads = [...src.matchAll(new RegExp(UPLOAD.source, "g"))].map((m) => m.index ?? -1);
+    const gates = [...src.matchAll(/gateStorage\(\{/g)].map((m) => m.index ?? -1);
+    assert.ok(uploads.length > 0, `[OPSLAG-DEUR] ${file}'s upload moved — re-point this gate`);
+    assert.ok(gates.length > 0, `[OPSLAG-DEUR] ${file} must measure the allowance`);
+
+    // EVERY upload, not the first one. /api/intake has two doors into the bucket — the readable
+    // path and the one for a file the reader could not read — and both write a documents row.
+    // Checking only the first would have declared the route gated while the cheapest way to fill
+    // an account (upload things we cannot read) stayed open.
+    for (const at of uploads) {
+      assert.ok(
+        gates.some((g) => g < at),
+        `[OPSLAG-DEUR] ${file} writes bytes at ${at} with no allowance check before it`,
+      );
+    }
+  }
+
+  // The measurement must be the meter's own, not a second opinion. Two ways of counting the same
+  // megabytes is how an owner gets told he has room on one screen and refused on another.
+  const gate = code("src/lib/fair-use-gate.ts");
+  assert.match(
+    gate,
+    /measureUsage\(/,
+    "[OPSLAG-DEUR] gateStorage must measure with measureUsage — the same numbers the owner reads",
+  );
+  // …and both callers must share ONE arithmetic. gateStorage answers a person with a 402 and the
+  // sync answers nobody with a hold, but "is there room" has to be the same question or the screen
+  // and the background job will disagree about the same megabytes.
+  assert.match(gate, /export function storageFits\(/, "[OPSLAG-DEUR] the rule must be shared, not copied");
+  assert.match(
+    gate,
+    /alreadyTakenBytes[\s\S]{0,400}?Math\.ceil\(\(Math\.max\(0, alreadyTakenBytes\) \+ Math\.max\(0, bytes\)\) \/ \(1024 \* 1024\)\)/,
+    "[OPSLAG-DEUR] the run's total is rounded ONCE. Rounding each file up on its own charges a 10 kB " +
+      "receipt a whole megabyte, and a hundred of them would fill a 50 MB plan holding almost nothing.",
+  );
+
+  // ── The e-mail sync: the one door that HOLDS instead of refusing ────────────────────────────
+  //
+  // It was exempt while this gate was first written, because a background job cannot answer with a
+  // 402 and getting the alternative wrong loses an incoming invoice for good. It is not exempt now,
+  // and these are the four things that make the hold real rather than nominal.
+  const sync = code("src/lib/email-integration.ts");
+  assert.match(sync, /storageRoom\(\{/, "[OPSLAG-DEUR] the sync must measure the room it has");
+  assert.match(
+    sync,
+    /const roomFor = \(bytes: number\): boolean => storageFits\(room, bytes, storedBytesThisRun\)/,
+    "[OPSLAG-DEUR] the sync must weigh each file against what this run has ALREADY written, or the " +
+      "second attachment of a batch is measured against room the first one already took",
+  );
+  // Every upload in that file asks first. Three doors: the kept attachment, the invoice itself, and
+  // the PDF embedded in an e-factuur.
+  const syncUploads = [...sync.matchAll(/\.upload\(/g)].map((m) => m.index ?? -1);
+  assert.equal(syncUploads.length, 3, "[OPSLAG-DEUR] the sync's upload count changed — re-point this gate");
+  const roomChecks = [...sync.matchAll(/roomFor\(/g)].map((m) => m.index ?? -1);
+  // ONE check per door, and each one NEAR its own door.
+  //
+  // The first version of this asserted only "some roomFor appears earlier in the file", and a
+  // mutation proved it worthless: the kept-attachment check sits before all three uploads, so
+  // deleting the invoice door's check left the gate green. A door is guarded by the check standing
+  // at it, not by a check standing anywhere above it. The real gaps are 319, 445 and 515
+  // characters, so 1200 leaves room for the comment each one carries without reaching the door
+  // above it — the closest two doors are ~6000 apart.
+  assert.equal(
+    roomChecks.length, 3,
+    "[OPSLAG-DEUR] expected exactly one room check per upload door in the sync",
+  );
+  for (const at of syncUploads) {
+    assert.ok(
+      roomChecks.some((r) => r < at && at - r < 1200),
+      `[OPSLAG-DEUR] the sync writes bytes at ${at} with no allowance check AT that door. A check ` +
+        "further up the file guards the door it belongs to, not this one.",
+    );
+  }
+  // A refusal is a THIRD answer, never `null`. Four of the five callers of saveKeptAttachment answer
+  // null by letting the watermark pass — which is right for a failure and is silent loss for a full
+  // disk, because the mail would be marked done with nothing stored.
+  assert.match(
+    sync,
+    /const STORAGE_FULL = 'storage_full' as const/,
+    "[OPSLAG-DEUR] a full disk must be distinguishable from a failure to keep",
+  );
+  assert.equal(
+    (sync.match(/=== STORAGE_FULL/g) ?? []).length,
+    5,
+    "[OPSLAG-DEUR] all five saveKeptAttachment callers must decide what a full disk means. A caller " +
+      "that ignores it retires the attachment and lets the mark walk past mail we never stored.",
+  );
+  // And the hold has to be visible. A held sync has no errors to show for it and would otherwise
+  // look exactly like a sync that found nothing.
+  assert.match(sync, /storageHeld,/, "[OPSLAG-DEUR] the sync must report what it held");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [PROEF-WERKPLEK] Free lets you try BoekBrug. Plus lets you run your business on BoekBrug.
+//
+// The owner fixed this commercially on 17 September 2026, and it is a change of KIND, not of
+// numbers. Free stopped being a cheap version of the product and became the trial workspace: an
+// explicit contract — 5 invoices, 10 AI-read documents, 50 MB, 1 mailbox — deliberately not enough
+// to run a year on. Plus is commercial usage under Fair Use, with NO published ceiling on the
+// three metrics that used to carry one.
+//
+// WHY A GATE AND NOT JUST CONSTANTS. Four things have to agree or the published contract is a lie,
+// and three of them are in different files:
+//
+//   1. the Free numbers themselves;
+//   2. that 0 means NO CEILING everywhere it is read — evaluateFairUse, limitForPlan, gateStorage,
+//      fair_use_consume. A single reader that treats 0 as a ceiling of zero turns Plus into the
+//      strictest plan in the app;
+//   3. that the published TABLE never prints that 0 as a number;
+//   4. that the welcome grant stopped firing, because Free cannot be the trial while every new
+//      account also gets 90 days of Plus.
+//
+// The measured evidence behind it, kept here so the next reader does not have to take the numbers
+// on faith: the only real administration read 116 documents and stored 282 MB in one month. Real
+// commercial use clears the Free contract easily — that is what makes the upgrade moment, and a
+// free plan nobody outgrows does not have one.
+test("[PROEF-WERKPLEK] Free is the trial workspace, Plus is commercial use under Fair Use", () => {
+  // 1. THE FREE CONTRACT. These four are published in the Terms, on /prijzen and on
+  //    /eerlijk-gebruik, all three rendered from this one table.
+  assert.equal(fairUseLimit("invoicesSent").free, 5);
+  assert.equal(fairUseLimit("aiDocuments").free, 10);
+  assert.equal(fairUseLimit("storageMb").free, 50);
+  assert.equal(fairUseLimit("mailboxes").free, 1);
+
+  // 2. PLUS PUBLISHES NO CEILING on the three that used to carry one. Mailboxes keep a number
+  //    because there is a real technical maximum behind it — see [MAILBOX-WAAR].
+  assert.equal(fairUseLimit("invoicesSent").plus, 0);
+  assert.equal(fairUseLimit("aiDocuments").plus, 0);
+  assert.equal(fairUseLimit("storageMb").plus, 0);
+  assert.equal(fairUseLimit("mailboxes").plus, 2);
+
+  // 3. AND EVERY READER AGREES THAT 0 MEANS NO CEILING. This is the assertion that matters most:
+  //    the constant is harmless, a reader that misunderstands it is not.
+  const fu = code("src/lib/fair-use.ts");
+  assert.match(
+    fu,
+    /if \(ceiling <= 0\) continue;/,
+    "[PROEF-WERKPLEK] evaluateFairUse must treat 0 as no ceiling BEFORE comparing. Without it " +
+      "`used > 0` marks every paying account as exceeded — the screen goes red for exactly the " +
+      "customers who pay.",
+  );
+  assert.match(
+    code("src/lib/fair-use-usage.ts"),
+    /if \(plan !== "free"\) return 0;/,
+    "[PROEF-WERKPLEK] limitForPlan already hands the database 0 for Plus — count, never refuse",
+  );
+  assert.match(
+    code("src/lib/fair-use-gate.ts"),
+    /if \(room\.limitMb <= 0\) return true;/,
+    "[PROEF-WERKPLEK] the storage door must read 0 as no ceiling too",
+  );
+
+  // 4. THE TABLE MUST NOT PRINT THE ZERO. A published "0 MB" is the strictest number imaginable in
+  //    the place the widest promise belongs.
+  assert.match(fu, /if \(value <= 0\) return FAIR_USE_NO_CEILING;/, "[PROEF-WERKPLEK] formatLimit must say the phrase");
+  const table = fairUseTableMarkdown();
+  assert.ok(table.includes(FAIR_USE_NO_CEILING), "[PROEF-WERKPLEK] the table carries the Fair Use phrase");
+  assert.doesNotMatch(table, /\| ?0 /, "[PROEF-WERKPLEK] a bare 0 must never appear as a published limit");
+
+  // 5. THE PRICES. Annual is ONE price, and the discount is a number you can check: 9 × 19,99.
+  assert.equal(PLUS_PRICE_EUR, 19.99);
+  assert.equal(PLUS_ANNUAL_PRICE_EUR, 179.91);
+  assert.equal(
+    Math.round(PLUS_PRICE_EUR * 9 * 100) / 100,
+    PLUS_ANNUAL_PRICE_EUR,
+    "[PROEF-WERKPLEK] twelve months for the price of nine — if the monthly price moves, this " +
+      "catches an annual price that quietly stopped being that promise",
+  );
+
+  // 6. THE WELCOME GRANT IS RETIRED. Free cannot be the trial while every new account also gets 90
+  //    days of Plus on top of it — that does not add a trial, it hides the one we have, for
+  //    exactly as long as it takes a habit to form.
+  const retire = code("supabase/migrations/welcome_grant_retired.sql");
+  assert.match(retire, /DROP TRIGGER IF EXISTS profiles_welcome_plus ON public\.profiles;/,
+    "[PROEF-WERKPLEK] the welcome trigger must be dropped");
+  assert.doesNotMatch(retire, /DROP FUNCTION/,
+    "[PROEF-WERKPLEK] keep grant_welcome_plus(): re-arming a welcome period should be one CREATE " +
+      "TRIGGER, not an archaeology exercise");
+  assert.doesNotMatch(retire, /DELETE FROM public\.plan_grants|UPDATE public\.plan_grants/,
+    "[PROEF-WERKPLEK] NOT ONE existing grant may be cut short or rewritten — they expire on their own");
+
+  // 7. AND THE PERMANENT GRANTS SURVIVE IT. plan_grants holds rows with expires_at IS NULL — the
+  //    owner's own shop carries one, «open toegang, geen einddatum». A pricing change that read a
+  //    NULL expiry as "expired" would take it away silently, and that is the one failure here that
+  //    nobody would notice until the account was already on Free.
+  assert.match(
+    code("src/lib/plan-grants.ts"),
+    /if \(row\.expires_at === null \|\| row\.expires_at === undefined\) \{/,
+    "[PROEF-WERKPLEK] a grant with no end date must read as ACTIVE, never as expired",
+  );
+});
+
+// [JAARPRIJS] Two opaque strings, two prices, and one place where a mix-up becomes a real debit.
+//
+// Plus can now be bought per month or per year, which means STRIPE_PRICE_ID_PLUS and
+// STRIPE_PRICE_ID_PLUS_YEAR: two environment variables holding two `price_1Abc…` strings that are
+// indistinguishable by eye in a dashboard. Nothing in this repo knows which is which — only the
+// price object behind them does, and only if somebody asks it.
+//
+// The two ways that goes wrong are not symmetric in how fast they are noticed:
+//   · the monthly id in the annual slot — somebody picks "per jaar" and is billed €19,99 A YEAR.
+//     No customer ever complains about paying too little, so this runs until the books are read;
+//   · the annual id in the monthly slot — somebody picks "per maand" and €179,91 leaves their
+//     account EVERY MONTH. That one is reported to a bank, not to a helpdesk.
+//
+// An amount-only check catches neither, because each of them IS a published BoekBrug amount — just
+// the other one. So the comparison had to learn the interval, and the rule moved into a pure
+// module (plus-interval.ts) where every branch is testable without a Stripe client.
+//
+// WHAT THIS GATE ADDS ON TOP OF THOSE UNIT TESTS. A perfect rule that the door does not obey, or
+// obeys on the wrong object, is worth nothing. The third assertion below is the one that caught a
+// real hole while this was being written: the check can verify the ANNUAL price object while
+// line_items still charges the MONTHLY id — every test green, the customer billed wrong.
+test("[JAARPRIJS] the annual price is one recurring price, and the door charges what it checked", () => {
+  const billing = code("src/lib/billing.ts");
+
+  // 1. THE PRICE IS CHOSEN BY THE INTERVAL, and there is no third source of a price id.
+  assert.match(
+    billing,
+    /const priceId = params\.interval === "year" \? STRIPE_PRICE_ID_PLUS_YEAR : STRIPE_PRICE_ID_PLUS;/,
+    "[JAARPRIJS] one expression decides which price id is used",
+  );
+
+  // 2. THE RULE IS ASKED, with the interval the customer chose — not with a constant.
+  assert.match(
+    billing,
+    /checkPlusPrice\(params\.interval, \{/,
+    "[JAARPRIJS] billing.ts must hand the CHOSEN interval to the rule; a hard-coded one would " +
+      "verify the wrong half of the swap",
+  );
+  assert.match(billing, /if \(!verdict\.ok\) \{/, "[JAARPRIJS] the verdict must be obeyed, not logged");
+
+  // 3. AND THE SESSION CHARGES THE OBJECT THAT WAS CHECKED. This is the assertion that is not
+  //    implied by any of the others: `line_items: [{ price: STRIPE_PRICE_ID_PLUS }]` left behind
+  //    after the fetch was moved to priceId verifies the annual price and then bills the monthly
+  //    one. Nothing else in this file or in plus-interval.test.ts can see that.
+  assert.match(
+    billing,
+    /line_items: \[\{ price: priceId, quantity: 1 \}\]/,
+    "[JAARPRIJS] the checkout must charge the price id that was verified, by that same name",
+  );
+  const retrievedAt = billing.indexOf("prices.retrieve(priceId)");
+  const verdictAt = billing.indexOf("if (!verdict.ok)");
+  const createdAt = billing.indexOf("checkout.sessions.create");
+  assert.ok(retrievedAt > 0 && verdictAt > 0 && createdAt > 0, "[JAARPRIJS] all three markers found");
+  assert.ok(
+    retrievedAt < verdictAt && verdictAt < createdAt,
+    "[JAARPRIJS] fetch, then refuse, then create — a refusal after the session exists is not a " +
+      "refusal, it is a log line next to a charge",
+  );
+
+  // 4. ONE RECURRING PRICE, NO CONSTRUCTION. The owner's decision is explicit: not three free
+  //    months plus nine paid, no subscription schedule, no zero-price phase. Such a thing changes
+  //    shape halfway through, cancels differently per phase, and needs a btw explanation per
+  //    period — none of which a bookkeeping package should have on its own invoices.
+  assert.doesNotMatch(billing, /subscriptionSchedules/,
+    "[JAARPRIJS] no subscription schedule: the annual plan is ONE recurring price");
+  assert.doesNotMatch(billing, /trial_period_days: [0-9]/,
+    "[JAARPRIJS] the trial length comes from the constant, never typed at the call site");
+
+  // 5. THERE IS NO TRIAL AT ALL ANY MORE — see [EERLIJK-WOORD].
+  //
+  //    This clause was "a trial may only be attached to the monthly price", which was the right
+  //    rule while a 30-day trial still existed: the same 30 days on a year subscription means
+  //    something else and would have made the published sentence untrue for half the buyers.
+  //    The owner then retired the trial entirely, because three trials were stacked on one
+  //    another (free plan, 90-day welcome grant, Stripe trial) and only one survives:
+  //
+  //        Free lets you try BoekBrug. Plus lets you run your business on BoekBrug.
+  //
+  //    So the assertion inverts rather than disappears. An absent thing needs a gate MORE than a
+  //    present one, because re-adding trial_period_days is three characters of config and would
+  //    contradict /prijzen, /eerlijk-gebruik and Terms §5.1.1 all at once, in the direction
+  //    nobody complains about until the invoice does not arrive.
+  assert.doesNotMatch(billing, /trial_period_days/,
+    "[EERLIJK-WOORD] no Stripe trial, on either interval: Free IS the trial");
+  assert.doesNotMatch(billing, /withTrial/,
+    "[EERLIJK-WOORD] and no parameter left over to carry one back in");
+  assert.doesNotMatch(code("src/app/api/billing/checkout/route.ts"), /trialEligible/,
+    "[EERLIJK-WOORD] the route decides nothing about a trial, because there is none");
+
+  // 6. A MISSING ANNUAL PRICE COSTS ONE BUTTON, NEVER THE MONTHLY FLOW. Folding the annual id
+  //    into isBillingConfigured() would turn a half-finished Stripe setup into a checkout that
+  //    503s for everybody — the expensive direction of a cheap mistake.
+  const configuredBody = billing.slice(
+    billing.indexOf("export function isBillingConfigured"),
+    billing.indexOf("export function isAnnualBillingConfigured"),
+  );
+  assert.ok(configuredBody.length > 0, "[JAARPRIJS] both configured-checks must exist, in this order");
+  assert.doesNotMatch(configuredBody, /STRIPE_PRICE_ID_PLUS_YEAR/,
+    "[JAARPRIJS] isBillingConfigured must not require the annual price");
+
+  // 7. THE ROUTE REFUSES AN UNKNOWN PERIOD — it does not pick one.
+  const route = code("src/app/api/billing/checkout/route.ts");
+  assert.match(route, /const parsed = parsePlusInterval\(raw\);/,
+    "[JAARPRIJS] the wire value goes through the parser, never into the door raw");
+  assert.match(
+    route,
+    /if \(!parsed\) \{[\s\S]{0,160}status: 400/,
+    "[JAARPRIJS] an unrecognised betaalperiode is a 400. A silent fallback to month bills a " +
+      "yearly buyer monthly; a fallback to year takes €179,91 from somebody who asked for a month",
+  );
+  assert.match(route, /interval,/, "[JAARPRIJS] and the parsed interval reaches the door");
+});
+
+// [EERLIJK-WOORD] The published contract, and the four surfaces that have to agree on it.
+//
+// Slices 5 and 6 changed what the product IS. This one changes what it SAYS — and a pricing change
+// is only real once the words agree, because the words are what a customer can enforce. Ambiguity
+// in your own general terms is construed against you; two amounts in one purchase is the gap the
+// customer wins in.
+//
+// THE FOUR SURFACES: /prijzen (in four languages), /eerlijk-gebruik, Algemene Voorwaarden §5, and
+// the billing screen. All four render from src/lib/fair-use.ts through src/lib/plan.ts. Nothing
+// below checks prose style; every assertion is a place where prose and code could silently stop
+// agreeing.
+//
+// THREE THINGS THIS GATE WATCHES, AND WHY EACH ONE BROKE OR WOULD HAVE:
+//
+//  1. THE TRIAL IS GONE EVERYWHERE, not just in Stripe. Retiring trial_period_days while
+//     /prijzen still answered "Hoe werkt de gratis proefmaand van Plus?" would leave the sales
+//     page promising a free month the checkout no longer gives. Code and copy had to go in one
+//     commit, so the gate holds both halves together.
+//
+//  2. NO RAW LIMIT VALUE IN A SENTENCE. `Plus verruimt elke grens naar {ai.plus}` was true prose
+//     until Plus published 0 — and then it rendered "raises every limit to 0", the strictest
+//     number imaginable exactly where the widest promise belongs. It was live in three locales
+//     simultaneously and no test saw it, because every test read the TABLE, which routes through
+//     formatLimit and prints the Fair Use sentence. A sentence that interpolates `.plus` directly
+//     bypasses that.
+//
+//  3. THE INVOICE LABEL MATCHES THE COUNTER. "Facturen die je verstuurt of als PDF aanmaakt"
+//     described a counter that does not exist: the meter sits behind `if (!resend)` in
+//     /api/invoice/send and counts a first send only — never a resend, and a PDF download never
+//     at all. The published limit was therefore stricter than the enforced one, which is the
+//     wrong direction to misdescribe your own free plan in.
+test("[EERLIJK-WOORD] the trial is gone from every surface, and no sentence prints a raw limit", () => {
+  // ── 1. THE LABEL FOLLOWS THE COUNTER ────────────────────────────────────────────────────
+  assert.equal(fairUseLimit("invoicesSent").label, "Facturen die je verstuurt");
+  const send = code("src/app/api/invoice/send/route.ts");
+  const gateAt = send.indexOf('metric: "invoicesSent"');
+  assert.ok(gateAt > 0, "[EERLIJK-WOORD] the invoicesSent meter must still be in the send route");
+  const before = send.slice(Math.max(0, gateAt - 700), gateAt);
+  assert.match(
+    before,
+    /if \(!resend\) \{/,
+    "[EERLIJK-WOORD] the meter counts a FIRST send only. If that guard is ever removed the label " +
+      "above becomes the lie it used to be — in the other direction.",
+  );
+
+  // ── 2. NO STRIPE TRIAL ANYWHERE ─────────────────────────────────────────────────────────
+  const plan = code("src/lib/plan.ts");
+  assert.doesNotMatch(plan, /PLUS_TRIAL_DAYS/, "[EERLIJK-WOORD] the trial length constant is gone");
+  assert.doesNotMatch(plan, /trialNote/, "[EERLIJK-WOORD] and the sentence that published it");
+  assert.doesNotMatch(code("src/lib/billing.ts"), /trial_period_days/,
+    "[EERLIJK-WOORD] Stripe is never asked for a trial");
+  assert.doesNotMatch(code("src/lib/subscription.ts"), /export function trialEligible/,
+    "[EERLIJK-WOORD] nothing decides who gets one, because nobody does");
+
+  // …and the copy went with it. This is the half that makes the change honest rather than merely
+  // done: the page must not still answer a question about a thing that no longer exists.
+  for (const page of [
+    "src/app/prijzen/page.tsx",
+    "src/app/en/prijzen/page.tsx",
+    "src/app/ar/prijzen/page.tsx",
+    "src/app/tr/prijzen/page.tsx",
+  ]) {
+    assert.doesNotMatch(code(page), /PLUS\.trialNote/,
+      `[EERLIJK-WOORD] ${page} must not render a trial sentence`);
+  }
+  assert.doesNotMatch(code("src/app/prijzen/page.tsx"), /gratis proefmaand van Plus/,
+    "[EERLIJK-WOORD] the FAQ answer about the free trial month must be gone, not just unlinked");
+
+  // BUT 'trialing' STAYS RECOGNISED. Not a leftover: Stripe may still send it for reasons of its
+  // own, and a status we stop recognising falls through to 'none' — which puts a PAYING customer
+  // on the free plan. Not offering one is a different thing from not understanding one.
+  assert.match(code("src/lib/subscription.ts"), /case "trialing":/,
+    "[EERLIJK-WOORD] normalizeStripeStatus must keep reading 'trialing' as a running subscription");
+
+  // ── 3. NO RAW LIMIT VALUE IN A RENDERED SENTENCE ────────────────────────────────────────
+  // `.free` is allowed in prose — it is a real number a reader can act on. `.plus` is not: it is
+  // 0 for the three metrics that publish no ceiling, and 0 renders as a limit of zero.
+  for (const page of [
+    "src/app/prijzen/page.tsx",
+    "src/app/en/prijzen/page.tsx",
+    "src/app/ar/prijzen/page.tsx",
+    "src/app/tr/prijzen/page.tsx",
+    "src/app/dashboard/settings/facturering/page.tsx",
+  ]) {
+    assert.doesNotMatch(
+      code(page),
+      /\{\s*\w+\.plus\s*\}/,
+      `[EERLIJK-WOORD] ${page} interpolates a raw .plus value into copy. For a metric with no ` +
+        "published ceiling that renders as 0 — use formatLimit, which prints the Fair Use sentence.",
+    );
+  }
+
+  // ── 4. THE PUBLISHED PRICES REACH THE LEGAL TEXT AS TOKENS, NEVER AS TYPED AMOUNTS ──────
+  const av = code("src/content/legal/algemene-voorwaarden.ts");
+  assert.ok(av.includes("[PLUS-PRIJS]"), "[EERLIJK-WOORD] §5.1 carries the monthly price as a token");
+  assert.ok(av.includes("[PLUS-JAARPRIJS]"), "[EERLIJK-WOORD] and the annual one");
+  assert.match(code("src/lib/plus-price.ts"), /replaceAll\("\[PLUS-JAARPRIJS\]", plusAnnualPriceLabel\(\)\)/,
+    "[EERLIJK-WOORD] a token nothing fills is a token a reader sees verbatim in the Terms");
+  // The amounts themselves must not appear typed out in the binding document.
+  assert.doesNotMatch(av, /€\s?19,99/, "[EERLIJK-WOORD] the monthly amount is never typed into the Terms");
+  assert.doesNotMatch(av, /€\s?179,91/, "[EERLIJK-WOORD] nor the annual one");
+
+  // ── 5. AND §5.5.1 STILL PROMISES WHAT IT PROMISED ───────────────────────────────────────
+  // Free limits were LOWERED on 17 September. §5.5.1 says a limit you already have is never taken
+  // away, so the change had to be recorded there rather than published around. Nobody was moved
+  // down — every account on that date was the owner's own — but a clause that quietly stops
+  // matching the numbers beside it is the ambiguity that gets construed against us.
+  assert.ok(av.includes("5.5.1"), "[EERLIJK-WOORD] the grandfather clause must still exist");
+  assert.ok(av.includes("17 september 2026"),
+    "[EERLIJK-WOORD] and the day the limits changed must be named in the binding text");
+});
+
+// [KIES-TERMIJN] The customer chooses the period that is charged, and every published word is
+// true for both of them.
+//
+// Five release mismatches, found by the owner on the finished branch, all of the same family: the
+// backend learned to sell two billing intervals and the surface around it still described one.
+//
+//  1. NOBODY COULD BUY THE ANNUAL PRICE. SubscribeButton posted an empty body, so the route fell
+//     back to "month". /prijzen advertised €179,91 per jaar, billing.ts would have charged it
+//     correctly, and no screen could ask for it. A price published and unsellable is the mirror
+//     of a price charged and unpublished — and it is the one nobody reports, because the customer
+//     simply does not buy.
+//  2. "Maandelijks opzegbaar" / "Facturatie maandelijks vooruit" / "einde van de betaalde maand"
+//     are all FALSE for an annual subscriber, and false in the expensive direction: he reads
+//     "monthly" and believes one month ends his year.
+//  3. The Terms carried TWO clauses numbered 5.5.2 — one of them mine, added the day before.
+//  4. §5.3 promised SEPA-incasso, which billing.ts explicitly defers; checkout offers iDEAL and
+//     card. A published contract naming a payment method the checkout does not offer is a
+//     promise made to someone who then cannot use it.
+//  5. §5.6 still said Plus "is nog niet geactiveerd" and that the start of the paid service would
+//     be announced later — which stops being true the moment this branch deploys.
+//
+// ONE PRODUCT, TWO INTERVALS — never two products. Same limits, same features, same Plus; only
+// the moment of payment differs. Everything below is written to hold that line.
+test("[KIES-TERMIJN] the period is chosen at the button, and no published word contradicts it", () => {
+  // ── 1. THE PURCHASE DOOR NAMES ITS PERIOD ───────────────────────────────────────────────
+  const button = code("src/app/prijzen/SubscribeButton.tsx");
+  assert.match(
+    button,
+    /body: JSON\.stringify\(\{ interval \}\)/,
+    "[KIES-TERMIJN] the button must send the interval it charges; an empty body silently means month",
+  );
+  assert.match(button, /interval: PlusInterval/,
+    "[KIES-TERMIJN] interval is a REQUIRED prop — there must be no SubscribeButton that does not " +
+      "say what it charges");
+  assert.doesNotMatch(button, /STRIPE_PRICE_ID/,
+    "[KIES-TERMIJN] no Stripe price id may reach the browser; the client sends a period, the " +
+      "server maps it to an id");
+
+  // Every pricing page offers BOTH, and the annual one only when it can actually be bought.
+  for (const page of [
+    "src/app/prijzen/page.tsx",
+    "src/app/en/prijzen/page.tsx",
+    "src/app/ar/prijzen/page.tsx",
+    "src/app/tr/prijzen/page.tsx",
+  ]) {
+    const src = code(page);
+    assert.match(src, /<SubscribeButton\s+interval="month"/,
+      `[KIES-TERMIJN] ${page} must offer the monthly purchase explicitly`);
+    assert.match(src, /<SubscribeButton\s+interval="year"/,
+      `[KIES-TERMIJN] ${page} must offer the annual purchase — publishing the amount without a ` +
+        "way to buy it is the defect this gate exists for");
+    assert.match(src, /const annualAvailable = isAnnualBillingConfigured\(\)/,
+      `[KIES-TERMIJN] ${page} must read availability on the SERVER`);
+    // The annual button must sit behind that flag. An annual button with no price configured
+    // opens a checkout that can only throw — the same broken promise, one click later.
+    const yearAt = src.indexOf('interval="year"');
+    const guardBefore = src.lastIndexOf("{annualAvailable && (", yearAt);
+    assert.ok(
+      guardBefore > 0 && yearAt - guardBefore < 400,
+      `[KIES-TERMIJN] ${page} must not offer an annual button when no annual price is configured`,
+    );
+  }
+
+  // ── 2. NO PUBLISHED WORD IS MONTH-ONLY ──────────────────────────────────────────────────
+  assert.equal(PLUS.cancelNote, "altijd opzegbaar");
+  const av = code("src/content/legal/algemene-voorwaarden.ts");
+  for (const [phrase, why] of [
+    ["Facturatie maandelijks vooruit", "billing is monthly OR yearly in advance"],
+    // The BARE phrase, not the long form. The long form only appeared in §5.4; the §5.1 table
+    // row said "Maandelijks opzegbaar" on its own and survived the first version of this gate —
+    // found by rendering the document rather than reading the diff.
+    ["Maandelijks opzegbaar", "cancelling is always possible, not monthly"],
+    ["einde van de betaalde maand", "an annual subscriber keeps Plus to the end of his YEAR"],
+    ["Reeds betaalde maanden worden niet gerestitueerd", "the unit is a paid TERM, not a month"],
+  ] as const) {
+    assert.ok(!av.includes(phrase), `[KIES-TERMIJN] Terms still say "${phrase}" — ${why}`);
+  }
+  assert.ok(av.includes("Altijd opzegbaar"), "[KIES-TERMIJN] §5.4 says cancelling is always possible");
+  assert.ok(
+    av.includes("bij de maandtermijn per maand vooruit, bij de jaartermijn per jaar vooruit"),
+    "[KIES-TERMIJN] §5.3 must name both terms rather than one of them",
+  );
+  for (const page of ["src/app/prijzen/page.tsx", "src/app/en/prijzen/page.tsx"]) {
+    assert.doesNotMatch(code(page), /Faq q="(Kan ik maandelijks opzeggen\?|Can I cancel monthly\?)"/,
+      `[KIES-TERMIJN] ${page} must not ask a month-only cancellation question`);
+  }
+
+  // ── 3. EVERY TERMS CLAUSE NUMBER IS USED ONCE ───────────────────────────────────────────
+  // Two clauses numbered 5.5.2 is not a typo in a contract: a reference to "§5.5.2" then points
+  // at two different promises, and the reader picks.
+  const numbers = [...av.matchAll(/\*\*(\d+\.\d+(?:\.\d+)?) /g)].map((m) => m[1]);
+  const seen = new Set<string>();
+  for (const n of numbers) {
+    assert.ok(!seen.has(n), `[KIES-TERMIJN] clause ${n} is numbered twice in the Terms`);
+    seen.add(n);
+  }
+  assert.ok(seen.has("5.5.1") && seen.has("5.5.2") && seen.has("5.5.3"),
+    "[KIES-TERMIJN] the grandfather clause, what changed on 17 September, and why — three numbers");
+
+  // ── 4. THE CONTRACT NAMES ONLY METHODS THE CHECKOUT OFFERS ──────────────────────────────
+  // billing.ts defers SEPA deliberately ("het needs a mandate flow we deliberately keep out of
+  // v1"), so promising it in §5.3 is a promise to someone who then cannot use it.
+  assert.ok(!av.includes("SEPA-incasso"),
+    "[KIES-TERMIJN] the Terms must not promise a payment method the checkout does not offer");
+  assert.doesNotMatch(code("src/lib/billing.ts"), /payment_method_types: \["ideal", "card", "sepa/,
+    "[KIES-TERMIJN] …and if SEPA is ever added, §5.3 is written to cover it without an edit");
+  assert.ok(av.includes("met de betaalmethoden die op dat moment bij het afrekenen worden aangeboden"),
+    "[KIES-TERMIJN] §5.3 describes the checkout rather than enumerating a list that will drift");
+
+  // ── 5. NO FUTURE-LAUNCH WORDING IN A LIVE CONTRACT ──────────────────────────────────────
+  assert.ok(!av.includes("Zolang Plus nog niet is geactiveerd"),
+    "[KIES-TERMIJN] §5.6 may not say the paid service has not started once it has");
+  assert.ok(!av.includes("kondigen de start van de betaalde dienst"),
+    "[KIES-TERMIJN] nor promise to announce a launch that already happened");
+  assert.ok(av.includes("Een gratis account wordt **nooit** automatisch een betaald account"),
+    "[KIES-TERMIJN] §5.6 keeps the rule that actually matters: Plus starts only when you choose it");
+  assert.ok(av.includes("**Je wordt nooit onaangekondigd gefactureerd.**"),
+    "[KIES-TERMIJN] and the sentence a reader remembers survives the rewrite");
 });

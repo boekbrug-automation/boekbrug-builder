@@ -8,14 +8,15 @@ import Link from 'next/link'
 import PublicHeader from '@/components/public-header'
 import PublicFooter from '@/components/public-footer'
 import { PLUS } from '@/lib/plan'
-import { FAIR_USE_LIMITS, fairUseLimit } from '@/lib/fair-use'
+import { fairUseLimit } from '@/lib/fair-use'
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR } from '@/lib/bewaarkluis'
 import SubscribeButton from '@/app/prijzen/SubscribeButton'
+import { isAnnualBillingConfigured } from '@/lib/billing'
 
 export const metadata: Metadata = {
   title: 'الأسعار — مجاني لك ولمحاسبك | BoekBrug',
   description:
-    `BoekBrug مجاني لصاحب العمل الحر ومجاني لمحاسبه. فوق الاستخدام العادل تكلّف باقة Plus ${PLUS.priceLabel} شهرياً (شامل الضريبة). بلا فترة تجريبية، بلا خصم تلقائي، ولا قفل على إدارتك الخاصة.`,
+    `جرّب BoekBrug مجاناً: ${fairUseLimit('invoicesSent').free} فواتير و${fairUseLimit('aiDocuments').free} مستندات يقرأها الذكاء الاصطناعي شهرياً. باقة Plus تكلّف ${PLUS.priceLabel} شهرياً أو ${PLUS.annualPriceLabel} سنوياً (شامل الضريبة). بلا فترة تجريبية، بلا خصم تلقائي، ولا قفل على إدارتك الخاصة.`,
   keywords: ['أسعار boekbrug', 'برنامج محاسبة مجاني هولندا', 'تكلفة محاسبة zzp', 'واجب الحفظ 7 سنوات'],
   alternates: {
     canonical: '/ar/prijzen',
@@ -23,7 +24,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: 'BoekBrug — مجاني لك ولمحاسبك',
-    description: `باقة Plus تكلّف ${PLUS.priceLabel} شهرياً، ولا تلزم إلا فوق الاستخدام العادل.`,
+    description: `باقة Plus تكلّف ${PLUS.priceLabel} شهرياً أو ${PLUS.annualPriceLabel} سنوياً — اثنا عشر شهراً بسعر تسعة.`,
     type: 'website',
     locale: 'ar_AR',
   },
@@ -46,7 +47,15 @@ const INCLUDED = [
 
 export default function ArPricingPage() {
   const ai = fairUseLimit('aiDocuments')
-  const otherLimits = FAIR_USE_LIMITS.length - 1
+  // [JAARPRIJS] Server-side: a missing annual price costs one button, never the monthly flow,
+  // and the Stripe price id never crosses to the browser — only this boolean does.
+  //
+  // ⚠ THIS PAGE IS STATIC (○ in the build output), so this boolean is baked in AT BUILD TIME.
+  // The Dutch /prijzen is dynamic (ƒ) and re-reads it per request; these three do not. Setting
+  // STRIPE_PRICE_ID_PLUS_YEAR after a deploy therefore lights up the annual button on /prijzen
+  // immediately and on this page only after the next build. Set the variable before deploying,
+  // or redeploy once it is set — see docs/JOUW_LIJST.md.
+  const annualAvailable = isAnnualBillingConfigured()
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: arFont }}>
@@ -73,10 +82,16 @@ export default function ArPricingPage() {
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '10px 0 4px' }}>
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>€ 0</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>كل الميزات، ضمن الاستخدام العادل</div>
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>كل الميزات، للتجربة</div>
             <Link href="/register" style={{ display: 'block', textAlign: 'center', padding: '12px 20px', background: '#137333', color: '#fff', borderRadius: 8, textDecoration: 'none', fontWeight: 600, fontSize: 15 }}>ابدأ مجاناً</Link>
-            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.7 }}>
-              هذه ليست الباقة التمهيدية — بل الباقة التي صُنع لأجلها هذا المنتج، والتي يُفترض أن يبقى عليها معظم المستخدمين دائماً.
+            <ul style={{ fontSize: 13.5, color: '#3c4043', margin: '16px 0 0', paddingInlineStart: 18, lineHeight: 1.8 }}>
+              <li>فواتير مُرسَلة: <strong>{fairUseLimit('invoicesSent').free} شهرياً</strong></li>
+              <li>مستندات يقرأها الذكاء الاصطناعي: <strong>{fairUseLimit('aiDocuments').free} شهرياً</strong></li>
+              <li>مساحة: <strong>{fairUseLimit('storageMb').free} MB</strong></li>
+              <li>صندوق بريد مربوط: <strong>{fairUseLimit('mailboxes').free}</strong></li>
+            </ul>
+            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '12px 0 0', lineHeight: 1.7 }}>
+              يكفي لترى كيف يعمل. إن أدرت عليه عملك فستتجاوزها — وهذا هو المقصود. كل ما تُدخله يبقى لك، بعد ذلك أيضاً.
             </p>
           </section>
 
@@ -86,10 +101,24 @@ export default function ArPricingPage() {
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>{PLUS.priceLabel}</span>
               <span style={{ fontSize: 15, color: '#5f6368' }}>شهرياً</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>شامل الضريبة · يمكن الإلغاء شهرياً</div>
-            <SubscribeButton />
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>شامل الضريبة · يمكن الإلغاء في أي وقت</div>
+            {/* [JAARPRIJS] السعر السنوي: اثنا عشر شهراً بسعر تسعة. الرقم مشتقّ من plan.ts. */}
+            {annualAvailable && (
+              <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+                أو {PLUS.annualPriceLabel} سنوياً — اثنا عشر شهراً بسعر تسعة.
+              </p>
+            )}
+            <div style={{ display: 'grid', gap: 8 }}>
+              <SubscribeButton interval="month" label={`اشترك في Plus — ${PLUS.priceLabel} شهرياً`} />
+              {annualAvailable && (
+                <SubscribeButton interval="year" variant="secondary" label={`Plus سنوياً — ${PLUS.annualPriceLabel}`} />
+              )}
+            </div>
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.7 }}>
-              لا تلزم إلا إذا تجاوزت الاستخدام العادل بشكل مستمر — أكثر من {ai.free} مستند شهرياً يقرأها الذكاء الاصطناعي مثلاً. Plus ترفع كل حدّ إلى {ai.plus}.
+              {/* [EERLIJK-WOORD] كان هنا «ترفع كل حدّ إلى {ai.plus}»، و ai.plus يساوي صفراً لأن
+                  Plus لا تنشر سقفاً — فكانت الجملة تُعرض «ترفع كل حدّ إلى 0»: أضيق رقم ممكن في
+                  الموضع الذي يقصد فيه أوسع وعد. */}
+              هذه هي الباقة التي تدير عليها عملك. لا سقف منشور على الفواتير ولا على المستندات التي يقرأها الذكاء الاصطناعي ولا على المساحة — واسعة، ضمن الاستخدام العادل. صندوقا بريد بدل واحد. فوق {ai.free} مستندات شهرياً تكون Plus هي الجواب.
             </p>
           </section>
 
@@ -142,7 +171,7 @@ export default function ArPricingPage() {
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#202124', margin: '0 0 16px' }}>أسئلة شائعة</h2>
           <div style={{ display: 'grid', gap: 14 }}>
             <Faq q="هل هو مجاني فعلاً أم فترة تجريبية؟">
-              مجاني فعلاً. لا توجد <strong>فترة تجريبية</strong> ولا ساعة تعدّ. لا تترك بيانات دفع، فلا يمكن أن يُخصم منك شيء أبداً. الموجود هو استخدام عادل: {ai.free} مستند شهرياً يقرأها الذكاء الاصطناعي، و{otherLimits} حدود أخرى على <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>صفحة واحدة</Link>.
+              لا تعدّ أي ساعة. الباقة المجانية لا تتوقف من تلقاء نفسها، ولا تترك بيانات دفع، فلا يمكن أن يُخصم منك شيء أبداً. ما تحدّه هو الكمية شهرياً: إرسال {fairUseLimit('invoicesSent').free} فواتير و{ai.free} مستندات يقرأها الذكاء الاصطناعي. يكفي ذلك لترى كيف يعمل BoekBrug ولا يكفي لتدير عليه سنة — وهذا هو التصميم. كل الحدود على <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>صفحة واحدة</Link>.
             </Faq>
             <Faq q="ماذا يحدث إن تجاوزت الاستخدام العادل؟">
               تصلك رسالة عند 80% من أي حدّ، بالرقم الدقيق — أي قبل أن يحدث شيء. إن تجاوزته، يتوقّف <em>فقط</em> الإجراء الذي يكلّفنا مالاً: قراءة مستند جديد تلقائياً، أو إرسال فاتورة جديدة. كل ما هو موجود يبقى مقروءاً وقابلاً للتصدير. ثم تختار: الانتظار للشهر التالي، أو أخذ Plus.
@@ -150,8 +179,8 @@ export default function ArPricingPage() {
             <Faq q="هل يدفع محاسبي أيضاً؟">
               لا، ولن يتغيّر ذلك. بوابة المحاسب مجانية، حتى مع مئة عميل مرتبط. لا توجد باقة محاسب مدفوعة.
             </Faq>
-            <Faq q="هل يمكنني الإلغاء شهرياً؟">
-              نعم. تلغي Plus بنفسك من إعداداتك — بلا بريد ولا مكالمة. تبقى Plus حتى نهاية المدّة التي دفعتها، ثم تعود إلى الباقة المجانية. لا تفقد أي بيانات.
+            <Faq q="هل يمكنني الإلغاء؟">
+              نعم، في أي وقت وفوراً — تلغي Plus بنفسك من إعداداتك، بلا بريد ولا مكالمة. تبقى Plus حتى نهاية المدّة التي دفعتها: حتى نهاية الشهر إن كنت تدفع شهرياً، وحتى نهاية السنة إن كنت تدفع سنوياً. بعدها تعود إلى الباقة المجانية. المدّة المدفوعة لا تُرَدّ تلقائياً، إلا إذا تعذّر استعمال الخدمة مدّة طويلة بسببنا. لا تفقد أي بيانات.
             </Faq>
             <Faq q="هل أحصل على فاتورة بالضريبة؟">
               نعم. كل دفعة تُنتج تلقائياً فاتورة ضريبية باسمك يمكنك تنزيلها بنفسك. إن كان لديك رقم ضريبي، تضيفه عند الدفع.

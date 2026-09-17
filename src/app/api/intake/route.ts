@@ -117,7 +117,7 @@ import { deriveDueDate } from "@/lib/safecore"
 // as email-integration.ts / audit.ts: derive the Json type, cast at write.
 import type { Database } from "@/types/database.types"
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit"
-import { gateFairUse, gateFairUseForRead } from "@/lib/fair-use-gate";
+import { gateFairUse, gateFairUseForRead, gateStorage } from "@/lib/fair-use-gate";
 // [TZ] The owner's day, not the server's — see amsterdamToday().
 import { amsterdamToday } from "@/lib/format-nl";
 import { supplierBtwForInvoice } from "@/lib/vendor-identity"
@@ -342,6 +342,12 @@ async function runIntake(req: NextRequest) {
         },
       }, { status: 409 })
     }
+    // [OPSLAG-DEUR] The unreadable-file branch stores just as many bytes as the readable one, and
+    // writes a documents row for them. A gate on the main path only would have left the cheapest
+    // way to fill an account wide open: upload things the reader cannot read.
+    const space = await gateStorage({ client: supabase, userId: user.id, bytes: buffer.length })
+    if (!space.allowed) return space.response!
+
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_")
     const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`
     const contentType = file.type || "application/octet-stream"
@@ -491,7 +497,7 @@ async function runIntake(req: NextRequest) {
     // extractor drops any vendor_kvk/btw/iban equal to the owner's own — otherwise a camera/file
     // upload could store the OWNER'S OWN IBAN as vendor_iban on a self-referencing document, which
     // later feeds the IBAN+amount bank auto-match tier.
-    v = await verifyInvoiceFromPdf(base64, effectiveType, file.name, receiverName, {
+    v = await verifyInvoiceFromPdf(user.id, base64, effectiveType, file.name, receiverName, {
       throwOnTransient: true,
       // [READING-MEMORY] Which suppliers this owner keeps having to correct, and in which field.
       // Fields only, never amounts. Null when the memory is empty or could not be loaded — the
@@ -969,6 +975,12 @@ async function runIntake(req: NextRequest) {
   const uploadType = upload.fileType || "application/octet-stream"
 
   // ── Store the file in Storage (shared by all destinations) ──────────────────
+  // [OPSLAG-DEUR] Before a byte is written. The allowance is MEASURED from the documents this
+  // account still has, so the refusal and the meter on the owner's own screen quote the same
+  // megabytes. Fails open — see gateStorage.
+  const space = await gateStorage({ client: supabase, userId: user.id, bytes: upload.buffer.length })
+  if (!space.allowed) return space.response!
+
   const safeName = upload.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
   const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`
   const { error: uploadError } = await supabase.storage
@@ -2413,7 +2425,7 @@ async function reconcileSupplierStatement(args: {
 }): Promise<StatementReconcilePayload | null> {
   const { supabase, pipeline, userId, documentId, base64, mimeType, filename, receiverName } = args
 
-  const read = await readSupplierStatement(base64, mimeType, filename, receiverName)
+  const read = await readSupplierStatement(userId, base64, mimeType, filename, receiverName)
   // Geen leesbare regels → geen controle. Nooit "alles compleet" claimen op een leeg resultaat.
   if (!read.ok || read.lines.length === 0) return null
 

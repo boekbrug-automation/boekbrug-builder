@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'sourceLanguage is required' }, { status: 400 });
     }
 
-    const result = await translateToNL(text, sourceLanguage);
+    const result = await translateToNL(user.id, text, sourceLanguage);
     return NextResponse.json(result);
   } catch (error) {
     console.error('[BOEK-018] /api/ai/translate error:', error);

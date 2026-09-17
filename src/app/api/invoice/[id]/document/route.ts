@@ -47,6 +47,7 @@ import { sniffReadableMime } from "@/lib/detect-file";
 // [ACTING-FOR] A sales member does not do the bookkeeping on a booked purchase invoice — the same
 // boundary /api/invoice/[id]/amounts draws for correcting one. See owner-only.ts.
 import { requireOwner } from "@/lib/owner-only";
+import { gateStorage } from "@/lib/fair-use-gate";
 
 export const dynamic = "force-dynamic";
 
@@ -180,6 +181,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     documentId = (existingDoc as { id: string }).id;
     storagePath = (existingDoc as { file_url: string }).file_url;
   } else {
+    // [OPSLAG-DEUR] Only in the branch that actually stores something: re-attaching a file the
+    // account already holds adds no bytes, and refusing it would be charging for storage twice.
+    const space = await gateStorage({ client: supabase, userId: user.id, bytes: buffer.length });
+    if (!space.allowed) return space.response!;
+
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
     storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`;
     const { error: uploadError } = await supabase.storage
