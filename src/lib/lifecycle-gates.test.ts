@@ -36221,3 +36221,78 @@ test("[EB-TESTER] the Sandbox gate is wired into every door that reaches a bank"
   assert.doesNotMatch(configured, /TESTERS|userId/,
     "isEnableBankingConfigured learned about users — the callback has none to give it");
 });
+
+// ── [EB-RACE] One worker at a time per linked account ─────────────────────────────────────────
+//
+// [EB-IDENTITEIT] took entry_reference away as the feed's identity, because that id is the bank's
+// ENTRY id and was deleting real second transactions. It was also, by accident, the thing that made
+// UNIQUE (user_id, source, external_id) catch a racing second insert — and PostgreSQL does not
+// constrain NULLs, so removing it left the feed's read-dedup-insert sequence open at both ends.
+// Fixing silent loss must not create silent multiplication.
+//
+// What the claim DOES is proved behaviourally in enablebanking-claim.test.ts. This gate proves the
+// wiring, which no behavioural test without a database can see: that the claim wraps the critical
+// section, that nothing reaches that section around it, and that an account we stood down on is
+// never counted as an account we read.
+test("[EB-RACE] the account claim wraps the whole read-dedup-insert sequence", () => {
+  const sync = code("src/lib/enablebanking-sync.ts");
+
+  assert.match(sync, /import \{ claimAccountSync \} from "\.\/enablebanking-claim"/,
+    "the sync no longer takes the account claim at all");
+
+  // Cut on real code at both ends — a marker inside a comment is not in what code() returns, and a
+  // window ending at -1 runs to the end of the file and silently measures something else.
+  const from = sync.indexOf("async function syncOneAccount");
+  const to = sync.indexOf("async function readAndStoreAccount");
+  assert.ok(from > -1, "[EB-RACE] syncOneAccount was renamed; this gate no longer knows what it reads");
+  assert.ok(to > from, "[EB-RACE] readAndStoreAccount was renamed or moved above its caller");
+  const guard = sync.slice(from, to);
+
+  assert.match(guard, /claimAccountSync\(connection\.userId, account\.id, now\)/,
+    "the claim is not taken per (owner, account) — a claim on anything else is not this lock");
+  assert.match(guard, /if \(!claim\.claimed\)[\s\S]{0,120}skippedBusy: true/,
+    "a worker that did not get the claim must stand down, and say so as skippedBusy");
+  assert.match(guard, /try \{[\s\S]{0,200}readAndStoreAccount\(args, base\)[\s\S]{0,200}finally \{[\s\S]{0,120}claim\.release\(\)/,
+    "the critical section is not inside a try whose finally releases the claim — one throw and the account is locked out until the TTL");
+
+  // Exactly one caller. A second entry point into the critical section would bypass the claim while
+  // every test above still passed.
+  const calls = sync.match(/readAndStoreAccount\(/g) ?? [];
+  assert.equal(calls.length, 2,
+    "readAndStoreAccount is declared once and called once — a second caller would run unclaimed");
+
+  // Standing down is not reading. Without this, an account another worker was busy with would count
+  // as a clean read and quietly mark a connection with a dead consent as healthy.
+  const verdict = sync.indexOf("const anyRead");
+  assert.ok(verdict > -1, "[EB-RACE] the connection-level verdict was renamed");
+  const tail = sync.slice(to, verdict + 200);
+  assert.match(tail, /!a\.error && !a\.skippedTooSoon && !a\.skippedForeignCurrency && !a\.skippedBusy/,
+    "a stand-down counts as a clean read, so a dead connection can be marked linked by an account nobody looked at");
+  assert.match(tail, /const anyRead = result\.accounts\.some\(\(a\) => !a\.skippedTooSoon && !a\.skippedBusy\)/,
+    "a run that only stood down records a connection sync it never performed");
+});
+
+// ── [EB-TELLING] The numbers that make a silent feed visible ──────────────────────────────────
+//
+// "inserted: 0" reads identically whether the bank sent nothing, sent one page of two, or sent
+// thirty lines we could not read. During the Sandbox proof that difference is the entire exercise,
+// and in production it is the difference between a quarter that is complete and one that is short
+// with nobody looking. Every number is counted where it happens; `unreadable` is the only derived
+// one, and it is derived the same way in both doors.
+test("[EB-TELLING] both sync doors report what the bank sent, not only what we stored", () => {
+  const sync = code("src/lib/enablebanking-sync.ts");
+  for (const field of ["pages", "fetched", "booked", "inserted", "skipped", "pending"]) {
+    assert.ok(sync.includes(`${field}:`), `[EB-TELLING] the account result stopped carrying ${field}`);
+  }
+  assert.match(sync, /onPage: \(n\) => \{/,
+    "the page count is no longer taken from where the pages turn — a one-page import of a two-page window is invisible again");
+
+  const manual = code("src/app/api/bank/enablebanking/sync/route.ts");
+  assert.match(manual, /counters,/, "the owner's sync door stopped returning its counters");
+  assert.match(manual, /unreadable \+= account\.fetched - account\.booked - account\.pending/,
+    "unreadable is no longer derived from the three counted numbers, so the three can drift apart unnoticed");
+
+  const cron = code("src/app/api/cron/bank-sync/route.ts");
+  assert.match(cron, /pages, fetched, booked, pending, skipped, unreadable, busy,/,
+    "the daily run stopped writing the counters into its heartbeat — nobody reads a cron's response body");
+});

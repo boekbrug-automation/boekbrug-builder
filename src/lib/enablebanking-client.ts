@@ -403,8 +403,15 @@ export interface EnableBankingClient {
   createSession(authCode: string): Promise<EnableBankingSession>;
   getSession(sessionId: string): Promise<EnableBankingSession>;
   deleteSession(sessionId: string): Promise<void>;
-  /** Every booked transaction from `dateFrom`, following continuation keys to the end. */
-  getTransactions(accountUid: string, params: { dateFrom: string; dateTo?: string }): Promise<unknown[]>;
+  /** Every booked transaction from `dateFrom`, following continuation keys to the end.
+   *
+   *  `onPage` is called with the page number after each page lands. [EB-TELLING] The caller cannot
+   *  see pagination from the returned array — a truncated import and a complete one both look like
+   *  "some transactions" — so the count is handed out from where the pages actually turn. */
+  getTransactions(
+    accountUid: string,
+    params: { dateFrom: string; dateTo?: string; onPage?: (page: number) => void },
+  ): Promise<unknown[]>;
 }
 
 export function createEnableBankingClient(options: EnableBankingClientOptions = {}): EnableBankingClient {
@@ -511,7 +518,7 @@ export function createEnableBankingClient(options: EnableBankingClientOptions = 
       await request<void>("DELETE", `/sessions/${encodeURIComponent(sessionId)}`);
     },
 
-    async getTransactions(accountUid, { dateFrom, dateTo }) {
+    async getTransactions(accountUid, { dateFrom, dateTo, onPage }) {
       const collected: unknown[] = [];
       let continuationKey: string | null = null;
       let page = 0;
@@ -531,6 +538,7 @@ export function createEnableBankingClient(options: EnableBankingClientOptions = 
         if (Array.isArray(data?.transactions)) collected.push(...data.transactions);
         continuationKey = data?.continuation_key ?? null;
         page += 1;
+        onPage?.(page);
 
         if (continuationKey && page >= MAX_TRANSACTION_PAGES) {
           // Stop, but never silently: a truncated import that reports success is how a quarter ends

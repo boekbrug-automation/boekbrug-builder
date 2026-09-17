@@ -39,6 +39,7 @@ import {
   type EnableBankingClient,
   type EnableBankingErrorCode,
 } from "./enablebanking-client";
+import { claimAccountSync } from "./enablebanking-claim";
 import {
   recordAccountSync,
   recordConnectionSync,
@@ -74,8 +75,12 @@ export const MAX_HISTORICAL_DAYS_CAP = 730;
 export interface AccountSyncResult {
   accountId: string;
   iban: string | null;
-  /** Transactions the feed handed over. */
+  /** [EB-TELLING] Pages the bank served for this window. 1 unless the feed paginated. */
+  pages: number;
+  /** Transactions the feed handed over, every status, before anything was decided. */
   fetched: number;
+  /** [EB-TELLING] Booked entries the mapper accepted. fetched = booked + pending + unreadable. */
+  booked: number;
   /** Rows actually written. */
   inserted: number;
   /** Duplicates the fingerprint recognised — almost always the intentional window overlap. */
@@ -109,6 +114,14 @@ export interface AccountSyncResult {
    * connection with an expired consent as healthy.
    */
   skippedForeignCurrency: boolean;
+  /**
+   * [EB-RACE] True when another worker was already syncing THIS account and we stood down.
+   *
+   * Its own field, for the same reason `skippedForeignCurrency` has one: nothing failed, nothing
+   * was read, and the connection-level verdict below must not count a stand-down as a clean read.
+   * Without it, an account we never looked at would mark an expired connection healthy.
+   */
+  skippedBusy: boolean;
 }
 
 export interface ConnectionSyncResult {
@@ -185,11 +198,16 @@ async function storeTransactions(args: {
   userId: string;
   /** [BANK-TX-SOURCE-ID] The account's STABLE identity (identification_hash), not its uid.
    *
-   *  entry_reference is only promised unique within one account, so the dedup's exact layer is
-   *  scoped by the account — but scoping it by the uid would silently switch the scope every time
-   *  the owner reconnects, because the uid dies with the session. Every already-stored row would
-   *  then sit under the old scope, match nothing, and the layer would be doing nothing at the one
-   *  moment it is needed most: the post-reconnect re-sync, which deliberately re-reads history. */
+   *  It names the row's provenance in `source`, and it is the SCOPE the dedup's exact layer would
+   *  use if this door ever had an id to key on. [EB-IDENTITEIT] it does not: the feed's
+   *  entry_reference turned out to be the bank's non-unique entry id, so every row this door
+   *  writes stores external_id NULL and the exact layer is dark here. What stands instead is the
+   *  content fingerprint, plus [EB-RACE] around the whole read-decide-insert sequence.
+   *
+   *  The uid would still be the wrong scope on the day an id does arrive: it dies with the session,
+   *  so every already-stored row would sit under the old scope, match nothing, and the layer would
+   *  be doing nothing at the one moment it is needed most — the post-reconnect re-sync, which
+   *  deliberately re-reads history. The hash outlives the reconnect. */
   accountKey: string;
   transactions: ReturnType<typeof mapEnableBankingTransactions>["transactions"];
 }): Promise<{ inserted: number; skipped: number }> {
@@ -227,10 +245,15 @@ async function storeTransactions(args: {
   if (dd.toInsert.length === 0) return { inserted: 0, skipped: dd.skipped };
 
   const rows = mapToRows(dd.toInsert, userId, source);
-  // [BANK-TX-SOURCE-ID] upsert-ignore for the same reason as the upload door: this cron and a
-  // manual upload can run at the same moment, and the constraint is the only thing that holds
-  // when both read an empty "existing". 429 of one real quarter's 576 feed rows carry an
-  // entry_reference; the rest store NULL and stay on the fingerprint.
+  // [BANK-TX-SOURCE-ID] upsert-ignore, kept in the shape the upload door uses — but read what it
+  // does NOT do here. Every row this door writes carries external_id NULL ([EB-IDENTITEIT]), and
+  // PostgreSQL does not constrain NULLs, so ON CONFLICT (user_id, source, external_id) can never
+  // fire for a feed row. The unique index is a real backstop for an uploaded MT940 and NOT for
+  // this one. That is why [EB-RACE] exists: for this door the serialization is the account claim
+  // in enablebanking-claim.ts, taken in syncOneAccount and held across this whole function.
+  //
+  // The clause stays because it costs nothing and becomes live the day a bank hands us an id we
+  // can trust — but nothing may be argued from it while external_id is null.
   let { data: insData, error } = await pipeline
     .from("bank_transactions")
     // [DD-SIGNAL] type_code/mandate_id/creditor_id arrive with bank_tx_direct_debit.sql and are not
@@ -256,27 +279,33 @@ async function storeTransactions(args: {
     return { inserted: 0, skipped: dd.skipped };
   }
   // Rows the unique index refused are raced duplicates: written by the other writer, not by us.
-  // Counting them as inserted would report money that this run did not add.
+  // Counting them as inserted would report money that this run did not add. With a NULL
+  // external_id nothing is ever refused, so on the feed door this arithmetic is a no-op that stays
+  // correct for the day it is not.
   const written = insData?.length ?? rows.length;
   const racedAway = rows.length > 1000 ? 0 : rows.length - written;
   return { inserted: rows.length - racedAway, skipped: dd.skipped + racedAway };
 }
 
-/** Sync ONE account. Never throws: the caller is a loop over accounts and one failure must not
- *  take the others down with it. */
-async function syncOneAccount(args: {
+interface SyncOneArgs {
   client: EnableBankingClient;
   pipeline: PipelineClient;
   connection: BankConnection;
   account: BankConnectionAccount;
   now: Date;
   force: boolean;
-}): Promise<AccountSyncResult> {
-  const { client, pipeline, connection, account, now, force } = args;
+}
+
+/** Sync ONE account. Never throws: the caller is a loop over accounts and one failure must not
+ *  take the others down with it. */
+async function syncOneAccount(args: SyncOneArgs): Promise<AccountSyncResult> {
+  const { connection, account, now, force } = args;
   const base: AccountSyncResult = {
     accountId: account.accountId,
     iban: account.iban,
+    pages: 0,
     fetched: 0,
+    booked: 0,
     inserted: 0,
     skipped: 0,
     pending: 0,
@@ -285,6 +314,7 @@ async function syncOneAccount(args: {
     errorCode: null,
     skippedTooSoon: false,
     skippedForeignCurrency: false,
+    skippedBusy: false,
   };
 
   if (!force && !isAccountDue(account.lastSyncedAt, now)) {
@@ -310,12 +340,48 @@ async function syncOneAccount(args: {
     };
   }
 
+  // [EB-RACE] Everything below reads the stored rows, decides in application memory what is new,
+  // and inserts the remainder. That sequence is safe for ONE worker at a time; two of them both
+  // read "not present" and both write. Nothing on the account row says "busy", so the claim is
+  // taken here and given back in the finally — see enablebanking-claim.ts for why not last_synced_at.
+  const claim = await claimAccountSync(connection.userId, account.id, now);
+  if (!claim.claimed) {
+    return { ...base, skippedBusy: true };
+  }
+  try {
+    return await readAndStoreAccount(args, base);
+  } finally {
+    await claim.release();
+  }
+}
+
+/**
+ * The critical section: read the bank, map, dedup against what is stored, insert.
+ *
+ * Its own function so the claim around it cannot be sidestepped by an early return added later —
+ * every exit from here passes through syncOneAccount's finally.
+ */
+async function readAndStoreAccount(
+  args: SyncOneArgs,
+  base: AccountSyncResult,
+): Promise<AccountSyncResult> {
+  const { client, pipeline, connection, account, now } = args;
   const { dateFrom, dateTo } = syncWindow(account, connection, now);
 
+  let pages = 0;
   let raw: EnableBankingRawTransaction[];
   try {
     // The client follows continuation keys to the end, so this is the WHOLE window, not a page.
-    raw = (await client.getTransactions(account.accountId, { dateFrom, dateTo })) as EnableBankingRawTransaction[];
+    raw = (await client.getTransactions(account.accountId, {
+      dateFrom,
+      dateTo,
+      // [EB-TELLING] Counted where the pages actually turn. A one-page import of a two-page window
+      // is the quiet failure this whole door is built to make visible, and "1" next to 611
+      // transactions is what shows it.
+      onPage: (n) => {
+        pages = n;
+      },
+    })) as EnableBankingRawTransaction[];
   } catch (err) {
     const code = err instanceof EnableBankingError ? err.code : null;
     const dutch = code ? dutchEnableBankingError(code) : "Ophalen bij de bank mislukt.";
@@ -332,7 +398,9 @@ async function syncOneAccount(args: {
       // something that fixes itself in minutes.
       backOff: shouldBackOffAfter(code),
     });
-    return { ...base, error: dutch, errorCode: code };
+    // [EB-TELLING] pages rides along: a failure on page 4 of 5 is a different event from a
+    // failure on the first call, and only the counter can tell them apart afterwards.
+    return { ...base, pages, error: dutch, errorCode: code };
   }
 
   const { transactions, warnings, skipped: pending } = mapEnableBankingTransactions(raw);
@@ -345,7 +413,24 @@ async function syncOneAccount(args: {
 
   await recordAccountSync({ accountRowId: account.id, syncedThrough: dateTo, lastError: null });
 
-  return { ...base, fetched: raw.length, inserted, skipped, pending, warnings };
+  // [EB-TELLING] The same numbers the JSON carries, written where the cron door can be read too:
+  // /api/cron/bank-sync answers a scheduler, not a browser, so without this line half the traffic
+  // through this function reports nothing at all. `unreadable` is derived, never counted twice —
+  // if it is not zero, exactly that many lines are missing from the owner's books.
+  console.info("[EB-TELLING] account sync", {
+    accountId: account.accountId,
+    window: `${dateFrom}..${dateTo}`,
+    pages,
+    fetched: raw.length,
+    booked: transactions.length,
+    pending,
+    inserted,
+    skipped,
+    unreadable: raw.length - transactions.length - pending,
+    warnings: warnings.length,
+  });
+
+  return { ...base, pages, fetched: raw.length, booked: transactions.length, inserted, skipped, pending, warnings };
 }
 
 /**
@@ -413,7 +498,11 @@ export async function syncBankConnection(args: {
       status: dead ? "expired" : "error",
       lastError: errored[0].error,
     });
-  } else if (result.accounts.some((a) => !a.error && !a.skippedTooSoon && !a.skippedForeignCurrency)) {
+  } else if (
+    result.accounts.some(
+      (a) => !a.error && !a.skippedTooSoon && !a.skippedForeignCurrency && !a.skippedBusy,
+    )
+  ) {
     // At least one account read cleanly — the connection is alive again whatever it said before.
     if (connection.status !== "linked") {
       await setConnectionStatus({ connectionId: connection.id, status: "linked", lastError: null });
@@ -438,7 +527,7 @@ export async function syncBankConnection(args: {
     }
   }
 
-  const anyRead = result.accounts.some((a) => !a.skippedTooSoon);
+  const anyRead = result.accounts.some((a) => !a.skippedTooSoon && !a.skippedBusy);
   if (anyRead) await recordConnectionSync(connection.id, result.error);
 
   return result;

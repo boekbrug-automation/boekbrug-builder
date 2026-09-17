@@ -80,7 +80,7 @@ question the next one cannot.
 | | Layer | Answers | Where |
 |---|---|---|---|
 | 1 | **The file's bytes** | "Is this the same statement I already imported?" | `bank-ingest.ts`, checked *before* parse and insert |
-| 2 | **The source's own id** | "Has this source already delivered this line?" | `sourceKey` + `UNIQUE (user_id, source, external_id)` |
+| 2 | **The source's own id** | "Has this source already delivered this line?" | `sourceKey` + `UNIQUE (user_id, source, external_id)` — uploads only; see below |
 | 3 | **The content fingerprint** | "Did this payment already arrive through a *different* door?" | `contentKey` |
 
 **Layer 2 is what the bank gave us and we were throwing away.** Measured on one real ING quarter of
@@ -93,6 +93,52 @@ insert **every line again** (measured: 576 of 576); keyed on the bank's own id i
 It is also the only layer Postgres can *enforce*. The other two are read-then-write, and two writers
 in that window — an upload while the daily cron sync runs — both read an empty result and both
 insert. A unique index does not have that window.
+
+**Layer 2 is dark on the feed door, and that is deliberate.** `entry_reference` looked like the
+feed's version of the same id and was used as one until [EB-IDENTITEIT]. The vendor sample proves it
+is the bank's *entry* id, not the transaction's: 611 transactions under 481 distinct values, one
+value covering 44 unrelated lines. Keyed on it, the unique index deleted real second transactions —
+silent loss, which is worse than the duplication it was preventing. So every feed row now stores
+`external_id` NULL, layer 2 is off for that door, and the fingerprint carries it.
+
+That removed the feed's race backstop along with its false identity, so the feed got an explicit
+one: **`[EB-RACE]`, an account-scoped claim** in `enablebanking-claim.ts`, taken in `syncOneAccount`
+and held across read → dedup → insert. It is a claim in the existing `intake_claims` table keyed
+`ebsync:<account row id>`, with a stale-takeover so a crashed worker cannot wedge an account, and it
+fails *open* — a broken claim table must not stop an owner's bank feed. Two sync attempts on the
+same account therefore run one after the other, and the second finds the first one's rows already
+stored. See that file's header for why `last_synced_at`, an advisory lock and an in-memory mutex are
+all wrong for this.
+
+### Still open: the CROSS-door race — `[FINANCIAL-TRUTH-AUDIT]`
+
+`[EB-RACE]` closes one door against itself. It does **not** close an MT940 or CAMT upload running at
+the same moment as a feed sync, and this note exists so nobody reads the paragraph above as if it
+did.
+
+The shape: the upload takes no claim, and the claim's key is one Enable Banking account, so the two
+run together by design. They then both read the same date window of `bank_transactions`, both find
+the other's rows absent, and both insert. Layer 2 cannot catch it — the two doors write **different
+`source` values** (`enablebanking:<hash>` versus the upload's own), so `UNIQUE (user_id, source,
+external_id)` can never collide across doors. That was true before `[EB-IDENTITEIT]` as well: the
+unique index has never protected the cross-door case, and the vendor measurement in §3 is why —
+the same 576 transactions carry **zero** ids in common between the two formats. Only the content
+fingerprint bridges doors, and a fingerprint is read-then-write.
+
+Why it is recorded rather than fixed here:
+
+- **A per-owner claim would be wrong.** Keyed on the owner rather than the account, an upload would
+  queue behind a cron sync that may run for five minutes — the owner presses "upload" and the screen
+  waits on a background job he cannot see. Standing down instead would silently discard his file.
+- **A unique constraint on the fingerprint would be wrong.** Two identical movements on one day are
+  real money: the mock seed carries `BB-2026-1007` and `BB-2026-1008`, both Bakker Bouw, both
+  € 121,00, both the same date. A constraint there deletes the second one — the exact failure
+  `[EB-IDENTITEIT]` was removing.
+- The window is narrow (the cron runs 05:00 UTC; the owner must upload the overlapping date range
+  inside the same run) but it is not zero, and a doubled line is a wrong btw-aangifte.
+
+It belongs with the other financial-truth questions rather than with the Enable Banking work,
+because the answer has to hold for **every** pair of doors, not for this one.
 
 **Layer 3 can never be retired, and layer 2 is why we know that.** The same 576 transactions carry a
 completely different id in each format: overlap between the MT940 ids and the CAMT ids is **zero**.
@@ -312,7 +358,9 @@ money leaves no trace to notice. The client follows the key to the end and refus
    halves matter and they fail differently: without the **columns** the import silently drops to
    the fingerprint alone (layer 2 off, no error); with the columns but without the **unique index**
    an insert would hit `42P10`, so the code falls back to a plain insert — money still lands, but
-   the race backstop is not there. The CONTROLE block checks for both.
+   the race backstop is not there for the UPLOAD doors. The CONTROLE block checks for both. The
+   feed door does not depend on either half: it writes `external_id` NULL by design and is
+   serialized by `[EB-RACE]`, which needs `supabase/migrations/intake_claims.sql` instead.
 6. Confirm `CRON_SECRET` is set — without it the daily feed refuses to run (fail-closed) and says so
    loudly in the log.
 7. `vercel.json` already schedules `/api/cron/bank-sync` at 05:00 UTC daily.

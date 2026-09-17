@@ -18,6 +18,15 @@
 -- bookkeeping: a claim older than two minutes is stale (the request that made it is long dead)
 -- and is taken over rather than honoured.
 --
+-- [EB-RACE] A SECOND user of this table, added later: the Enable Banking sync claims one linked
+-- account for the length of one run, under the key 'ebsync:<bank_connection_accounts.id>'. Same
+-- shape, same UNIQUE index, same deploy-safe degrade — but its own staleness rule (about seven
+-- minutes, derived from the sync routes' maxDuration), because "the request that made it is long
+-- dead" means something different for a two-minute upload and a five-minute bank read. The keys
+-- are namespaced so the two never meet. What they DO share is the hourly hygiene sweep in
+-- /api/intake, which deletes by age without reading the key: every TTL in this table must stay
+-- well under that hour, and enablebanking-claim.test.ts asserts it rather than trusting this note.
+--
 -- [DEPLOY-SAFE] Code ships before this is applied by hand. The route treats a missing table
 -- (42P01) as "no backstop yet" and proceeds exactly as today — the feature switches on when this
 -- runs, with no second deploy.
