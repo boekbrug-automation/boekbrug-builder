@@ -56,6 +56,29 @@ export const ACCOUNTANT_FREE_CLIENTS = 10;
 /** De prijs van het betaalde klantplan, in euro per maand, inclusief btw. */
 export const PLUS_PRICE_EUR = 19.99;
 
+/**
+ * [PROEF-WERKPLEK] Hetzelfde plan, per jaar vooruit: twaalf maanden dienst voor de prijs van negen.
+ *
+ * 179,91 = 9 × 19,99, en dat is met opzet exact zo uitgerekend in plaats van afgerond naar 179,00:
+ * de korting is het GETAL drie maanden, niet een marketingprijs die er toevallig bij in de buurt
+ * ligt. Zo blijft de belofte narekenbaar voor wie hem natelt.
+ *
+ * ÉÉN prijs, geen constructie. Niet drie gratis maanden plus negen betaalde, geen
+ * subscription schedule, geen fase van nul euro. Dat scheelt een renewal die halverwege van vorm
+ * verandert, een opzegging die per fase anders uitpakt, en een btw-behandeling die per periode
+ * moet worden uitgelegd — alledrie dingen die een boekhoudpakket niet aan zijn eigen facturen
+ * hoort te hebben.
+ */
+export const PLUS_ANNUAL_PRICE_EUR = 179.91;
+
+/**
+ * [PROEF-WERKPLEK] Wat er in de tabel staat waar Plus geen getal heeft.
+ *
+ * Eén constante, omdat deze zin op /prijzen, op /eerlijk-gebruik én in de Algemene Voorwaarden
+ * terechtkomt via dezelfde tabel. Drie plekken die hetzelfde moeten beloven, uit één bron.
+ */
+export const FAIR_USE_NO_CEILING = "Ruim — eerlijk gebruik";
+
 /** Hoeveel procent van een grens telt als "bijna vol" — bij deze stand waarschuwen we. */
 export const NEAR_LIMIT_RATIO = 0.8;
 
@@ -96,8 +119,15 @@ export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
   {
     key: "aiDocuments",
     label: "Documenten die de AI voor je leest (bonnen, inkoopfacturen, bankafschriften)",
-    free: 50,
-    plus: 500,
+    // [PROEF-WERKPLEK] Free = 10 gelezen documenten per maand. Gratis is de proefwerkplek waarin
+    // je BoekBrug leert kennen, niet een goedkope versie waarop je een onderneming draait.
+    free: 10,
+    // 0 = GEEN gepubliceerd plafond. Plus is zakelijk gebruik onder eerlijk gebruik, met een
+    // operationele bescherming per account ([EIGEN-AANDEEL]) die iets anders is dan een quotum:
+    // die beschermt de dagzekering van het hele huis, en is geen getal dat wij verkopen.
+    // Het stond hier op 500 terwijl limitForPlan() voor Plus al 0 teruggaf — het gepubliceerde
+    // getal handhaafde dus niets. Nu zegt de tabel wat de app doet.
+    plus: 0,
     unit: "per maand",
     perMonth: true,
     onExceed:
@@ -106,8 +136,10 @@ export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
   {
     key: "invoicesSent",
     label: "Facturen die je verstuurt of als PDF aanmaakt",
-    free: 100,
-    plus: 1000,
+    // [PROEF-WERKPLEK] Free = 5 verstuurde facturen per maand. Genoeg om te zien hoe het werkt,
+    // te weinig om een jaar op te draaien — precies het punt waarop Plus het antwoord is.
+    free: 5,
+    plus: 0,
     unit: "per maand",
     perMonth: true,
     onExceed:
@@ -116,8 +148,11 @@ export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
   {
     key: "storageMb",
     label: "Opslag voor je documenten",
-    free: 2048,
-    plus: 20480,
+    // [PROEF-WERKPLEK] Free = 50 MB. Opslag is een systeemmiddel, geen product waarvan wij
+    // gigabytes verkopen, dus voor Plus staat er geen getal: niet 20 GB, niet 25 GB, niet 2 GB.
+    // De 20 GB die hier stond was een restant van een ouder model en nooit een eis.
+    free: 50,
+    plus: 0,
     unit: "MB",
     perMonth: false,
     onExceed:
@@ -200,6 +235,12 @@ export function evaluateFairUse(usage: UsageCounts, plan: "free" | "plus" = "fre
     const used = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
     const ceiling = plan === "plus" ? limit.plus : limit.free;
 
+    // [PROEF-WERKPLEK] 0 = geen plafond, dezelfde afspraak als in fair_use_consume(),
+    // limitForPlan() en gateStorage(). Zonder deze regel zou `used > 0` elke Plus-gebruiker met
+    // één gelezen document als OVERSCHREDEN aanmerken — het scherm zou rood staan voor precies de
+    // klanten die betalen. Bewust vóór de vergelijking, niet erin verstopt.
+    if (ceiling <= 0) continue;
+
     if (used > ceiling) {
       exceeded.push(limit.key);
       continue;
@@ -218,9 +259,13 @@ export function evaluateFairUse(usage: UsageCounts, plan: "free" | "plus" = "fre
   return { withinLimits: exceeded.length === 0, exceeded, nearLimit };
 }
 
-/** Leesbare weergave van een grens: "50 per maand", "2 GB". */
+/** Leesbare weergave van een grens: "5 per maand", "50 MB", of de zin voor "geen plafond". */
 export function formatLimit(limit: FairUseLimit, plan: "free" | "plus"): string {
   const value = plan === "plus" ? limit.plus : limit.free;
+  // [PROEF-WERKPLEK] 0 betekent overal in dit bestand "geen plafond", en een tabel die daar "0"
+  // van maakt publiceert het strengste denkbare getal op de plek waar het ruimste bedoeld is.
+  // Deze zin is dus geen opmaak maar de gepubliceerde grens zelf — zie de rij hierboven.
+  if (value <= 0) return FAIR_USE_NO_CEILING;
   if (limit.unit === "MB") {
     return value >= 1024 ? `${Math.round(value / 1024)} GB` : `${value} MB`;
   }

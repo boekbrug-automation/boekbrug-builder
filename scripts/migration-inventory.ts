@@ -410,6 +410,25 @@ const STAND_CONTROLE: Record<string, Stand> = {
               and has_function_privilege('authenticated', p.oid, 'EXECUTE')
               and not has_function_privilege('anon', p.oid, 'EXECUTE'))`,
   },
+  "welcome_grant_retired.sql": {
+    soort: "controle",
+    vraag:
+      "de welkomsttrigger staat niet meer op profiles, terwijl de functie die hij aanriep er nog " +
+      "wél is",
+    // Twee helften, want elke helft afzonderlijk is een andere toestand dan wat dit bestand maakt.
+    // De trigger terug betekent dat nieuwe accounts weer 90 dagen Plus krijgen — precies wat de
+    // commerciële beslissing van 17 september intrekt, en zichtbaar pas 90 dagen later. De functie
+    // WEG betekent dat iemand verder ging dan deze migratie: de toekenningen die zij schreef staan
+    // nog in plan_grants en blijven leesbaar, en het terugzetten van de trigger is één CREATE
+    // TRIGGER — dat is alleen waar zolang de body bestaat.
+    sql: `not exists (
+           select 1 from pg_trigger
+            where tgrelid = 'public.profiles'::regclass
+              and tgname = 'profiles_welcome_plus' and not tgisinternal)
+          and exists (
+           select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public' and p.proname = 'grant_welcome_plus')`,
+  },
   "storage_bucket_hardening.sql": {
     soort: "controle",
     vraag: "de documentenbucket staat privé, met een limiet van 25 MB en RLS aan",

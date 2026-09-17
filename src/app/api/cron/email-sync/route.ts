@@ -120,8 +120,8 @@ export async function GET(req: NextRequest) {
   // staat op de plek waar de beslissing valt, niet hier.
   //
   // Wat dat verandert voor deze lus: een gratis mailbox die niemand meer leest
-  // kost hooguit zijn 50 documenten van die maand, en daarna alleen nog het
-  // ophalen. De begrenzing rust dus nu op drie dingen in plaats van twee:
+  // kost hooguit zijn tien gelezen documenten van die maand ([PROEF-WERKPLEK]
+  // aiDocuments.free), en daarna alleen nog het ophalen. De begrenzing rust dus nu op drie dingen in plaats van twee:
   //   1. de globale dagzekering in src/lib/ai-budget.ts, die ELKE weg naar
   //      Anthropic afdekt en dus ook deze — en die sinds ai_budget_settle.sql
   //      afrekent op het werkelijke verbruik in plaats van op max_tokens;

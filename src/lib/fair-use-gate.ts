@@ -230,9 +230,17 @@ export async function gateFairUse(params: {
  *
  * ── THE FAIL DIRECTION, AND IT IS THE SAME ONE AS EVERYWHERE ──
  * Fails OPEN. A storage figure we could not read is not evidence that someone is over; refusing on
- * our own outage would stop an owner filing a bill he is legally required to keep. The limits are
- * generous (2 GB free, 20 GB Plus) against a highest-ever observed 285 MB, so this gate exists to
- * bound the pathological case, not to shape ordinary use.
+ * our own outage would stop an owner filing a bill he is legally required to keep.
+ *
+ * ── AND SINCE [PROEF-WERKPLEK], THIS DOOR SHAPES ORDINARY USE ──
+ * It used to say the opposite, and the sentence is worth replacing rather than deleting, because
+ * the old reading is the one a hurried reader will reach for again. The limits WERE generous — 2 GB
+ * free, 20 GB Plus — against a highest-ever observed 285 MB, so the gate only bounded the
+ * pathological case and could be treated as a formality. Free is now 50 MB: the same real
+ * administration clears it in its first week. That is the design, not an oversight — Free is the
+ * trial workspace — but it means this refusal is on the ordinary path, and it has to read like a
+ * limit an owner can act on rather than like an outage. Plus publishes no ceiling at all
+ * (limitMb <= 0), so nothing here narrows for the accounts that pay.
  *
  * ── WHAT IT DOES NOT GUARD ──
  * Only writes that create a `documents` row, because only those are what the meter measures — and

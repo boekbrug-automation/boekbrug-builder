@@ -65,7 +65,13 @@ import {
 } from "./dutch-address";
 import { decidePlan as decidePlanFor } from "./subscription";
 import { PUBLIC_PATHS as PUBLIC_PATHS_FOR } from "./public-paths";
-import { PLUS_PRICE_EUR, fairUseLimit } from "./fair-use";
+import {
+  FAIR_USE_NO_CEILING,
+  PLUS_ANNUAL_PRICE_EUR,
+  PLUS_PRICE_EUR,
+  fairUseLimit,
+  fairUseTableMarkdown,
+} from "./fair-use";
 import { round2 } from "./invoice-totals";
 // [SEGMENT-VOORDEUR] De drie deuren, en alles wat ze beloven.
 import { SEGMENT_PAGES, claimedRoutes } from "./segment-pages";
@@ -35724,4 +35730,104 @@ test("[OPSLAG-DEUR] every documents write measures the allowance, or says why no
   // And the hold has to be visible. A held sync has no errors to show for it and would otherwise
   // look exactly like a sync that found nothing.
   assert.match(sync, /storageHeld,/, "[OPSLAG-DEUR] the sync must report what it held");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// [PROEF-WERKPLEK] Free lets you try BoekBrug. Plus lets you run your business on BoekBrug.
+//
+// The owner fixed this commercially on 17 September 2026, and it is a change of KIND, not of
+// numbers. Free stopped being a cheap version of the product and became the trial workspace: an
+// explicit contract — 5 invoices, 10 AI-read documents, 50 MB, 1 mailbox — deliberately not enough
+// to run a year on. Plus is commercial usage under Fair Use, with NO published ceiling on the
+// three metrics that used to carry one.
+//
+// WHY A GATE AND NOT JUST CONSTANTS. Four things have to agree or the published contract is a lie,
+// and three of them are in different files:
+//
+//   1. the Free numbers themselves;
+//   2. that 0 means NO CEILING everywhere it is read — evaluateFairUse, limitForPlan, gateStorage,
+//      fair_use_consume. A single reader that treats 0 as a ceiling of zero turns Plus into the
+//      strictest plan in the app;
+//   3. that the published TABLE never prints that 0 as a number;
+//   4. that the welcome grant stopped firing, because Free cannot be the trial while every new
+//      account also gets 90 days of Plus.
+//
+// The measured evidence behind it, kept here so the next reader does not have to take the numbers
+// on faith: the only real administration read 116 documents and stored 282 MB in one month. Real
+// commercial use clears the Free contract easily — that is what makes the upgrade moment, and a
+// free plan nobody outgrows does not have one.
+test("[PROEF-WERKPLEK] Free is the trial workspace, Plus is commercial use under Fair Use", () => {
+  // 1. THE FREE CONTRACT. These four are published in the Terms, on /prijzen and on
+  //    /eerlijk-gebruik, all three rendered from this one table.
+  assert.equal(fairUseLimit("invoicesSent").free, 5);
+  assert.equal(fairUseLimit("aiDocuments").free, 10);
+  assert.equal(fairUseLimit("storageMb").free, 50);
+  assert.equal(fairUseLimit("mailboxes").free, 1);
+
+  // 2. PLUS PUBLISHES NO CEILING on the three that used to carry one. Mailboxes keep a number
+  //    because there is a real technical maximum behind it — see [MAILBOX-WAAR].
+  assert.equal(fairUseLimit("invoicesSent").plus, 0);
+  assert.equal(fairUseLimit("aiDocuments").plus, 0);
+  assert.equal(fairUseLimit("storageMb").plus, 0);
+  assert.equal(fairUseLimit("mailboxes").plus, 2);
+
+  // 3. AND EVERY READER AGREES THAT 0 MEANS NO CEILING. This is the assertion that matters most:
+  //    the constant is harmless, a reader that misunderstands it is not.
+  const fu = code("src/lib/fair-use.ts");
+  assert.match(
+    fu,
+    /if \(ceiling <= 0\) continue;/,
+    "[PROEF-WERKPLEK] evaluateFairUse must treat 0 as no ceiling BEFORE comparing. Without it " +
+      "`used > 0` marks every paying account as exceeded — the screen goes red for exactly the " +
+      "customers who pay.",
+  );
+  assert.match(
+    code("src/lib/fair-use-usage.ts"),
+    /if \(plan !== "free"\) return 0;/,
+    "[PROEF-WERKPLEK] limitForPlan already hands the database 0 for Plus — count, never refuse",
+  );
+  assert.match(
+    code("src/lib/fair-use-gate.ts"),
+    /if \(room\.limitMb <= 0\) return true;/,
+    "[PROEF-WERKPLEK] the storage door must read 0 as no ceiling too",
+  );
+
+  // 4. THE TABLE MUST NOT PRINT THE ZERO. A published "0 MB" is the strictest number imaginable in
+  //    the place the widest promise belongs.
+  assert.match(fu, /if \(value <= 0\) return FAIR_USE_NO_CEILING;/, "[PROEF-WERKPLEK] formatLimit must say the phrase");
+  const table = fairUseTableMarkdown();
+  assert.ok(table.includes(FAIR_USE_NO_CEILING), "[PROEF-WERKPLEK] the table carries the Fair Use phrase");
+  assert.doesNotMatch(table, /\| ?0 /, "[PROEF-WERKPLEK] a bare 0 must never appear as a published limit");
+
+  // 5. THE PRICES. Annual is ONE price, and the discount is a number you can check: 9 × 19,99.
+  assert.equal(PLUS_PRICE_EUR, 19.99);
+  assert.equal(PLUS_ANNUAL_PRICE_EUR, 179.91);
+  assert.equal(
+    Math.round(PLUS_PRICE_EUR * 9 * 100) / 100,
+    PLUS_ANNUAL_PRICE_EUR,
+    "[PROEF-WERKPLEK] twelve months for the price of nine — if the monthly price moves, this " +
+      "catches an annual price that quietly stopped being that promise",
+  );
+
+  // 6. THE WELCOME GRANT IS RETIRED. Free cannot be the trial while every new account also gets 90
+  //    days of Plus on top of it — that does not add a trial, it hides the one we have, for
+  //    exactly as long as it takes a habit to form.
+  const retire = code("supabase/migrations/welcome_grant_retired.sql");
+  assert.match(retire, /DROP TRIGGER IF EXISTS profiles_welcome_plus ON public\.profiles;/,
+    "[PROEF-WERKPLEK] the welcome trigger must be dropped");
+  assert.doesNotMatch(retire, /DROP FUNCTION/,
+    "[PROEF-WERKPLEK] keep grant_welcome_plus(): re-arming a welcome period should be one CREATE " +
+      "TRIGGER, not an archaeology exercise");
+  assert.doesNotMatch(retire, /DELETE FROM public\.plan_grants|UPDATE public\.plan_grants/,
+    "[PROEF-WERKPLEK] NOT ONE existing grant may be cut short or rewritten — they expire on their own");
+
+  // 7. AND THE PERMANENT GRANTS SURVIVE IT. plan_grants holds rows with expires_at IS NULL — the
+  //    owner's own shop carries one, «open toegang, geen einddatum». A pricing change that read a
+  //    NULL expiry as "expired" would take it away silently, and that is the one failure here that
+  //    nobody would notice until the account was already on Free.
+  assert.match(
+    code("src/lib/plan-grants.ts"),
+    /if \(row\.expires_at === null \|\| row\.expires_at === undefined\) \{/,
+    "[PROEF-WERKPLEK] a grant with no end date must read as ACTIVE, never as expired",
+  );
 });
