@@ -20,7 +20,7 @@ test("een complete omgeving is gezond", () => {
 });
 
 test("een ontbrekende STILLE variabele is 'let-op', niet 'gezond'", () => {
-  // DIT IS DE HELE REDEN VOOR DIT BESTAND. Zonder CRON_SECRET antwoorden alle zes crons 401 en
+  // DIT IS DE HELE REDEN VOOR DIT BESTAND. Zonder CRON_SECRET antwoorden alle crons 401 en
   // doen niets — geen scherm verandert, geen mail blijft uit die iemand mist. Een installatie in
   // die toestand ziet er volkomen gezond uit, en dat mag dit rapport niet bevestigen.
   const r = checkEnv(zonder("CRON_SECRET"));
@@ -103,4 +103,64 @@ test("het webhook-geheim alarmeert alleen als afrekenen AAN staat", () => {
   assert.equal(wh2.severity, "stil");
   assert.equal(envVerdict(aan), "let-op");
   assert.ok(/Het geld is binnen/.test(wh2.gevolg));
+});
+
+// ── [DEPLOY-HEALTH] De twee prijs-id's ────────────────────────────────────────────────────────
+//
+// Waarom ze hier horen en niet bij "optioneel, Stripe doet het niet": een ontbrekende prijs-id
+// gooit niets. isBillingConfigured() eist STRIPE_SECRET_KEY én STRIPE_PRICE_ID_PLUS, en de
+// jaarvariant eist de sleutel én STRIPE_PRICE_ID_PLUS_YEAR — ontbreekt er een, dan verdwijnt de
+// knop en rendert de pagina verder normaal. Gemeten geval: het jaarbedrag stond in de FAQ en in
+// de meta-omschrijving van alle vier de prijspagina's terwijl de jaar-id nog niet bestond, en dit
+// rapport meldde een complete omgeving. Precies de stille categorie waarvoor dit bestand bestaat.
+//
+// Dit bestand blijft over AANWEZIGHEID gaan. Of een id ook het JUISTE bedrag en de juiste termijn
+// int, weet alleen Stripe; dat wordt per checkout gecontroleerd (checkPlusPrice) en is daar de
+// enige autoriteit. Een tweede plek die dat oordeel nabootst, is een tweede plek die fout kan zijn.
+test("de prijs-id's zwijgen zolang afrekenen UIT staat", () => {
+  const uit = checkEnv(zonder("STRIPE_SECRET_KEY", "STRIPE_PRICE_ID_PLUS", "STRIPE_PRICE_ID_PLUS_YEAR"));
+  for (const sleutel of ["STRIPE_PRICE_ID_PLUS", "STRIPE_PRICE_ID_PLUS_YEAR"]) {
+    const r = uit.find((x) => x.key === sleutel)!;
+    assert.equal(r.severity, "optioneel", `${sleutel} slaat alarm terwijl er niemand kan afrekenen`);
+    assert.ok(/nog in te stellen/.test(r.gevolg), `${sleutel} zegt niet wat het wél is`);
+  }
+  assert.equal(envVerdict(uit), "gezond", "een installatie zonder Stripe is niet ziek");
+});
+
+test("afrekenen AAN en de maandprijs ontbreekt → bij naam genoemd", () => {
+  const r = checkEnv(zonder("STRIPE_PRICE_ID_PLUS"));
+  const maand = r.find((x) => x.key === "STRIPE_PRICE_ID_PLUS")!;
+  assert.equal(maand.severity, "stil");
+  assert.equal(maand.aanwezig, false);
+  assert.equal(envVerdict(r), "let-op");
+  assert.ok(missingEnv(r).some((x) => x.key === "STRIPE_PRICE_ID_PLUS"),
+    "het rapport noemt de ontbrekende maandprijs niet bij naam");
+  assert.ok(/maandknop/.test(maand.gevolg), "…en zegt niet wat er stukgaat");
+});
+
+test("afrekenen AAN en de jaarprijs ontbreekt → bij naam genoemd", () => {
+  const r = checkEnv(zonder("STRIPE_PRICE_ID_PLUS_YEAR"));
+  const jaar = r.find((x) => x.key === "STRIPE_PRICE_ID_PLUS_YEAR")!;
+  assert.equal(jaar.severity, "stil");
+  assert.equal(envVerdict(r), "let-op");
+  assert.ok(missingEnv(r).some((x) => x.key === "STRIPE_PRICE_ID_PLUS_YEAR"),
+    "het rapport noemt de ontbrekende jaarprijs niet bij naam");
+  // De maandflow staat los: een ontbrekende jaarprijs mag hem niet meesleuren.
+  assert.equal(r.find((x) => x.key === "STRIPE_PRICE_ID_PLUS")!.aanwezig, true);
+});
+
+test("afrekenen AAN en alles ingevuld → geen ontbrekende Stripe-bedrading", () => {
+  const r = checkEnv(VOL);
+  assert.equal(envVerdict(r), "gezond");
+  assert.deepEqual(missingEnv(r).filter((x) => x.key.startsWith("STRIPE_")), []);
+});
+
+test("het rapport telt geen crons die het niet kent", () => {
+  // De diagnose zei "alle zes crons" toen er zes waren. Er staan er nu twaalf in vercel.json en
+  // CRON_JOBS volgt die lijst — een tweede, met de hand bijgehouden getal is er alleen om fout te
+  // gaan, en een fout getal in een storingsmelding laat de lezer naar het verkeerde zoeken.
+  for (const check of ENV_CHECKS) {
+    assert.doesNotMatch(check.gevolg, /\b(zes|six|twaalf|twelve|\d+)\s+crons?\b/i,
+      `${check.key} draagt een hard getal crons in zijn diagnose`);
+  }
 });

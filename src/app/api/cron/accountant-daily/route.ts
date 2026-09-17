@@ -16,7 +16,7 @@
 // which is also why there is no migration here.
 //
 // SECURITY: iterates every accountant, so it must never be publicly callable. Bearer CRON_SECRET,
-// constant-time compare, fail-closed — the identical guard the other six crons use.
+// constant-time compare, fail-closed — the identical guard every other cron uses.
 //
 // It writes NOTHING except notifications. No status, no amount, no match, no filing.
 

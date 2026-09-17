@@ -7,7 +7,7 @@
 // Een rookproef voor de BEHEERDER. Na een deploy weet je dat de code er staat; je weet niet of de
 // omgeving compleet is, of de database bereikbaar is, of de crons daadwerkelijk draaien. De
 // duurste variabelen zijn juist die waarvan het ontbreken NIETS zichtbaars doet — zonder
-// CRON_SECRET antwoorden alle zes crons 401 en doet de app verder alsof er niets aan de hand is.
+// CRON_SECRET antwoorden alle crons 401 en doet de app verder alsof er niets aan de hand is.
 //
 // WAT DIT NADRUKKELIJK NIET IS
 // Geen beheerdersdashboard. Er is geen admin-rol in dit product en er komt er geen: het hele
@@ -30,14 +30,14 @@ export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     // Dit is geen weigering maar HET antwoord: staat CRON_SECRET er niet, dan is dat precies wat
-    // je zocht. Alle zes crons antwoorden dan 401 en doen niets, en niets op enig scherm verraadt
+    // je zocht. Alle crons antwoorden dan 401 en doen niets, en niets op enig scherm verraadt
     // dat. Daarom zeggen we het hier hardop in plaats van een kale 401 terug te geven.
     return NextResponse.json(
       {
         ok: false,
         verdict: "kapot",
         diagnose:
-          "CRON_SECRET staat niet in de omgeving. Dat betekent óók dat alle zes crons 401 antwoorden en niets doen: geen mailimport, geen herinneringen, geen kwartaalafsluiting. Zet hem, deploy opnieuw, en vraag deze pagina daarna nog eens op.",
+          "CRON_SECRET staat niet in de omgeving. Dat betekent óók dat alle crons 401 antwoorden en niets doen: geen mailimport, geen herinneringen, geen kwartaalafsluiting. Zet hem, deploy opnieuw, en vraag deze pagina daarna nog eens op.",
       },
       { status: 503 },
     );
