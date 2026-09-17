@@ -340,16 +340,36 @@ stelt de AVG bij de eerste gebruiker. Zolang je nog niets int, is "(volgt)" verd
 mits het loket hierboven wél openstaat — een bereikbaar adres is waar een betrokkene je
 daadwerkelijk mee vindt.
 
-**☐ Stripe: twee prijzen, niet één**
+**☐ Stripe: drie prijzen, niet één**
 
 | | Bedrag | Vorm |
 |---|---|---|
-| `STRIPE_PRICE_ID_PLUS` | **€ 12,99 per maand**, incl. btw | terugkerend |
+| `STRIPE_PRICE_ID_PLUS` | **€ 19,99 per maand**, incl. btw | terugkerend, interval `month`, elke 1 maand |
+| `STRIPE_PRICE_ID_PLUS_YEAR` | **€ 179,91 per jaar**, incl. btw | terugkerend, interval `year`, elke 1 jaar |
 | `STRIPE_PRICE_ID_KLUIS_YEAR` | **€ 19 per bewaarjaar**, incl. btw | eenmalig |
 
 Het bedrag in Stripe moet **exact** gelijk zijn aan wat de voorwaarden publiceren. De
 checkout dwingt acceptatie van die voorwaarden af, dus een verschil is precies het gat waar
 de klant gelijk in krijgt.
+
+[JAARPRIJS] De jaarprijs is **één doorlopende prijs** van € 179,91 — twaalf maanden voor de
+prijs van negen (9 × 19,99). Maak er géén constructie van: geen subscription schedule, geen
+fase van nul euro, geen drie gratis maanden plus negen betaalde. Zo'n opzet verandert
+halverwege van vorm, pakt per fase anders uit bij opzeggen, en moet per periode fiscaal
+worden uitgelegd.
+
+> **De duurste verwisseling op deze hele lijst.** Die twee prijs-id's zien er identiek uit
+> (`price_1Abc…`). Zet je de maandprijs in `STRIPE_PRICE_ID_PLUS_YEAR`, dan betaalt een
+> jaarklant € 19,99 **per jaar** — daar klaagt niemand over, dus dat loopt door tot je de
+> boeken leest. Andersom gaat er € 179,91 **per maand** af bij iemand die om een maand vroeg,
+> en dat meldt een klant bij zijn bank. Beide bedragen zijn echte BoekBrug-bedragen, dus een
+> controle op het bedrag alleen ziet het verschil niet. De app vergelijkt daarom ook het
+> interval en weigert de checkout vóórdat er een kaart wordt belast — maar een geweigerde
+> checkout is nog steeds een verkoop die niet doorgaat, dus controleer het één keer goed.
+
+Laat je `STRIPE_PRICE_ID_PLUS_YEAR` leeg, dan is er simpelweg geen jaarknop en werkt de
+maandprijs gewoon door. Dat is met opzet: een halve inrichting mag de maandflow nooit
+meenemen.
 
 **☐ Stripe: iDEAL aan, Invoicing aan, Billing Portal met zelf-opzeggen aan**
 Kaart-alleen verliest echte Nederlandse klanten bij de laatste klik. Zelf kunnen opzeggen is

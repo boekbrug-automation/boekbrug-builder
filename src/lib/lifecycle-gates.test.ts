@@ -35831,3 +35831,104 @@ test("[PROEF-WERKPLEK] Free is the trial workspace, Plus is commercial use under
     "[PROEF-WERKPLEK] a grant with no end date must read as ACTIVE, never as expired",
   );
 });
+
+// [JAARPRIJS] Two opaque strings, two prices, and one place where a mix-up becomes a real debit.
+//
+// Plus can now be bought per month or per year, which means STRIPE_PRICE_ID_PLUS and
+// STRIPE_PRICE_ID_PLUS_YEAR: two environment variables holding two `price_1Abc…` strings that are
+// indistinguishable by eye in a dashboard. Nothing in this repo knows which is which — only the
+// price object behind them does, and only if somebody asks it.
+//
+// The two ways that goes wrong are not symmetric in how fast they are noticed:
+//   · the monthly id in the annual slot — somebody picks "per jaar" and is billed €19,99 A YEAR.
+//     No customer ever complains about paying too little, so this runs until the books are read;
+//   · the annual id in the monthly slot — somebody picks "per maand" and €179,91 leaves their
+//     account EVERY MONTH. That one is reported to a bank, not to a helpdesk.
+//
+// An amount-only check catches neither, because each of them IS a published BoekBrug amount — just
+// the other one. So the comparison had to learn the interval, and the rule moved into a pure
+// module (plus-interval.ts) where every branch is testable without a Stripe client.
+//
+// WHAT THIS GATE ADDS ON TOP OF THOSE UNIT TESTS. A perfect rule that the door does not obey, or
+// obeys on the wrong object, is worth nothing. The third assertion below is the one that caught a
+// real hole while this was being written: the check can verify the ANNUAL price object while
+// line_items still charges the MONTHLY id — every test green, the customer billed wrong.
+test("[JAARPRIJS] the annual price is one recurring price, and the door charges what it checked", () => {
+  const billing = code("src/lib/billing.ts");
+
+  // 1. THE PRICE IS CHOSEN BY THE INTERVAL, and there is no third source of a price id.
+  assert.match(
+    billing,
+    /const priceId = params\.interval === "year" \? STRIPE_PRICE_ID_PLUS_YEAR : STRIPE_PRICE_ID_PLUS;/,
+    "[JAARPRIJS] one expression decides which price id is used",
+  );
+
+  // 2. THE RULE IS ASKED, with the interval the customer chose — not with a constant.
+  assert.match(
+    billing,
+    /checkPlusPrice\(params\.interval, \{/,
+    "[JAARPRIJS] billing.ts must hand the CHOSEN interval to the rule; a hard-coded one would " +
+      "verify the wrong half of the swap",
+  );
+  assert.match(billing, /if \(!verdict\.ok\) \{/, "[JAARPRIJS] the verdict must be obeyed, not logged");
+
+  // 3. AND THE SESSION CHARGES THE OBJECT THAT WAS CHECKED. This is the assertion that is not
+  //    implied by any of the others: `line_items: [{ price: STRIPE_PRICE_ID_PLUS }]` left behind
+  //    after the fetch was moved to priceId verifies the annual price and then bills the monthly
+  //    one. Nothing else in this file or in plus-interval.test.ts can see that.
+  assert.match(
+    billing,
+    /line_items: \[\{ price: priceId, quantity: 1 \}\]/,
+    "[JAARPRIJS] the checkout must charge the price id that was verified, by that same name",
+  );
+  const retrievedAt = billing.indexOf("prices.retrieve(priceId)");
+  const verdictAt = billing.indexOf("if (!verdict.ok)");
+  const createdAt = billing.indexOf("checkout.sessions.create");
+  assert.ok(retrievedAt > 0 && verdictAt > 0 && createdAt > 0, "[JAARPRIJS] all three markers found");
+  assert.ok(
+    retrievedAt < verdictAt && verdictAt < createdAt,
+    "[JAARPRIJS] fetch, then refuse, then create — a refusal after the session exists is not a " +
+      "refusal, it is a log line next to a charge",
+  );
+
+  // 4. ONE RECURRING PRICE, NO CONSTRUCTION. The owner's decision is explicit: not three free
+  //    months plus nine paid, no subscription schedule, no zero-price phase. Such a thing changes
+  //    shape halfway through, cancels differently per phase, and needs a btw explanation per
+  //    period — none of which a bookkeeping package should have on its own invoices.
+  assert.doesNotMatch(billing, /subscriptionSchedules/,
+    "[JAARPRIJS] no subscription schedule: the annual plan is ONE recurring price");
+  assert.doesNotMatch(billing, /trial_period_days: [0-9]/,
+    "[JAARPRIJS] the trial length comes from the constant, never typed at the call site");
+
+  // 5. THE TRIAL IS MONTHLY-ONLY. /prijzen describes it as "de eerste maand gratis, daarna
+  //    €19,99 per maand". The same 30 days on a year subscription means something else, and
+  //    would make that published sentence untrue for half the buyers.
+  assert.match(
+    billing,
+    /params\.withTrial && params\.interval === "month"/,
+    "[JAARPRIJS] a trial may only be attached to the monthly price",
+  );
+
+  // 6. A MISSING ANNUAL PRICE COSTS ONE BUTTON, NEVER THE MONTHLY FLOW. Folding the annual id
+  //    into isBillingConfigured() would turn a half-finished Stripe setup into a checkout that
+  //    503s for everybody — the expensive direction of a cheap mistake.
+  const configuredBody = billing.slice(
+    billing.indexOf("export function isBillingConfigured"),
+    billing.indexOf("export function isAnnualBillingConfigured"),
+  );
+  assert.ok(configuredBody.length > 0, "[JAARPRIJS] both configured-checks must exist, in this order");
+  assert.doesNotMatch(configuredBody, /STRIPE_PRICE_ID_PLUS_YEAR/,
+    "[JAARPRIJS] isBillingConfigured must not require the annual price");
+
+  // 7. THE ROUTE REFUSES AN UNKNOWN PERIOD — it does not pick one.
+  const route = code("src/app/api/billing/checkout/route.ts");
+  assert.match(route, /const parsed = parsePlusInterval\(raw\);/,
+    "[JAARPRIJS] the wire value goes through the parser, never into the door raw");
+  assert.match(
+    route,
+    /if \(!parsed\) \{[\s\S]{0,160}status: 400/,
+    "[JAARPRIJS] an unrecognised betaalperiode is a 400. A silent fallback to month bills a " +
+      "yearly buyer monthly; a fallback to year takes €179,91 from somebody who asked for a month",
+  );
+  assert.match(route, /interval,/, "[JAARPRIJS] and the parsed interval reaches the door");
+});
