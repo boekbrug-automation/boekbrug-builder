@@ -27162,11 +27162,33 @@ test("[ARCHIEF-OPEN] opening an archive does not break the three invariants arou
   // the zip is never fetched again. Keeping the bytes on the spot is the only honest answer.
   assert.match(
     src,
-    /if \(attachment\.fromArchive\) \{\s*await saveKeptAttachment\(attachment, 'could_not_read'\)/,
+    // [OPSLAG-DEUR] widened: the call may now sit behind the storage check, which is a STRONGER
+    // form of this very invariant — bytes that cannot be kept because the disk is full make the
+    // branch HOLD instead of complete, so the zip is fetched again rather than lost. The thing that
+    // must never return is completing the message without keeping the bytes, asserted just below.
+    /if \(attachment\.fromArchive\) \{[\s\S]{0,200}?saveKeptAttachment\(attachment, 'could_not_read'\)/,
     "a file unpacked from an archive whose read failed is left to a retry that cannot happen — " +
       "the watermark has already passed its message, so the document is gone with no row " +
       "anywhere saying so",
   );
+
+  // …and the other half of the same promise: the mark may only pass once the bytes are SOMEWHERE.
+  // This branch completes its message unconditionally, so a keep that silently did nothing would
+  // retire the file with no row anywhere — the exact loss this gate is named for.
+  {
+    const at = src.indexOf("if (attachment.fromArchive) {");
+    assert.ok(at > -1, "[ARCHIEF-OPEN] the archive branch moved — re-point this gate");
+    const branch = src.slice(at, at + 700);
+    const fullAt = branch.indexOf("=== STORAGE_FULL");
+    const doneAt = branch.indexOf("completedKeys.add(wmKey)");
+    assert.ok(fullAt > -1, "[ARCHIEF-OPEN] an archive member that could not be STORED must hold");
+    assert.ok(doneAt > -1, "[ARCHIEF-OPEN] the branch's completion marker moved — re-point this gate");
+    assert.ok(
+      fullAt < doneAt,
+      "[ARCHIEF-OPEN] the full-disk hold must come BEFORE the message is marked complete, or the " +
+        "mark walks past a zip whose contents were never stored",
+    );
+  }
   assert.match(code("src/lib/archive-expand.ts"), /fromArchive: true,/,
     "the unpacked files no longer carry fromArchive, so the branch above can never run");
 
@@ -29537,7 +29559,14 @@ test("[HERINNERING-NOOIT] a payment reminder is never an invoice, on any door", 
   const email = code("src/lib/email-integration.ts");
   const branch = email.indexOf("if (classification.isReminder === true) {");
   assert.ok(branch > 0, "the sync has a reminder branch");
-  const branchEnd = email.indexOf("continue", branch);
+  // [LIFECYCLE-VENSTER] This window used to end at the FIRST `continue` after the branch opened.
+  // [OPSLAG-DEUR] then added an earlier one inside it — the full-disk hold — and the window shrank
+  // to a few lines, turning this gate red while the invariant it guards was untouched. It failed in
+  // the safe direction, but the lesson is the one AGENTS.md states: cut on a marker that belongs to
+  // the END of the thing being measured, and assert it was found. `completedKeys.add(wmKey)` is the
+  // reminder branch's last act before it leaves, and it is real code rather than a comment.
+  const branchEnd = email.indexOf("completedKeys.add(wmKey)", branch);
+  assert.ok(branchEnd > branch, "[HERINNERING-NOOIT] the reminder branch's end marker moved — re-point this gate");
   const branchBody = email.slice(branch, branchEnd);
   assert.match(branchBody, /saveKeptAttachment\(attachment, 'reminder', DOC_TYPE_REMINDER, \{ aiProcessed: true \}\)/,
     "the file is kept as a READ reminder document");
