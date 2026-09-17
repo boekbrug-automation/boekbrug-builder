@@ -29,6 +29,7 @@ import {
   dutchEnableBankingError,
   EnableBankingError,
   isEnableBankingConfigured,
+  canUseEnableBanking,
 } from "@/lib/enablebanking-client";
 import {
   attachSession,
@@ -63,6 +64,25 @@ export async function GET(req: NextRequest) {
     return back(origin, {
       bank: "fout",
       reden: "Deze koppellink is verlopen. Probeer opnieuw te koppelen.",
+    });
+  }
+
+  // [EB-TESTER] The gate, placed exactly here and nowhere else.
+  //
+  // The owner of this flow is the `user_id` on the row we stored when the consent was STARTED —
+  // found above by the high-entropy `state`, which is this endpoint's whole security boundary.
+  // That is deliberate and stays: the callback must keep working when the bank sends the owner
+  // back in another browser, on a phone, or after the session cookie has expired, and it must
+  // never take ownership from a query parameter.
+  //
+  // So the question asked here is not "who is browsing" but "is the account this connection
+  // already belongs to allowed to use the bank link". A list that shrinks between starting and
+  // finishing a consent stops the finish — which is the correct direction: an authorization that
+  // was withdrawn mid-flow must not complete.
+  if (!canUseEnableBanking(connection.userId)) {
+    return back(origin, {
+      bank: "fout",
+      reden: "De bankkoppeling is voor dit account niet beschikbaar.",
     });
   }
 

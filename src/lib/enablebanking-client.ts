@@ -194,6 +194,48 @@ export function isEnableBankingConfigured(env: NodeJS.ProcessEnv = process.env):
   return readCredentials(env) !== null;
 }
 
+/**
+ * [EB-TESTER] May THIS account use the bank link at all?
+ *
+ * A separate question from isEnableBankingConfigured(), and they must stay separate. That one
+ * answers "are the credentials technically present"; this one answers "is this person allowed to
+ * reach the bank with them". Folding the second into the first would mean every caller that asks
+ * whether the integration exists also silently asks who is asking — and the two answers drift the
+ * moment one caller has no user to hand over (the callback is exactly that caller).
+ *
+ * WHY IT EXISTS. The panel's only gate was `configured`, so the moment the two credentials land
+ * in the environment every logged-in owner sees "Koppel je bank" and can start a consent against
+ * whatever application those credentials name. During a Sandbox proof that application is a
+ * Sandbox application: the wrong people, pointed at a mock bank, with a real consent screen.
+ *
+ * FAIL CLOSED. An unset or empty list allows NOBODY. The other direction — empty means everyone —
+ * is one forgotten variable away from being the public feature this exists to prevent. When the
+ * integration is ready for real users the list is removed deliberately, in a commit, with that
+ * decision written down; it must not happen by omission.
+ *
+ * IDENTITY. Supabase user UUIDs, never e-mail: an address can be changed by its owner and is
+ * re-assignable, and this is an authorization list. Comma, whitespace or newline separated, so a
+ * value pasted from a dashboard works without reformatting.
+ */
+export function enableBankingTesters(env: NodeJS.ProcessEnv = process.env): ReadonlySet<string> {
+  const raw = env.ENABLEBANKING_TESTERS ?? "";
+  return new Set(
+    raw
+      .split(/[\s,;]+/)
+      .map((v) => v.trim().toLowerCase())
+      .filter((v) => v.length > 0),
+  );
+}
+
+export function canUseEnableBanking(
+  userId: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const id = typeof userId === "string" ? userId.trim().toLowerCase() : "";
+  if (!id) return false;
+  return enableBankingTesters(env).has(id);
+}
+
 // ─── the JWT ──────────────────────────────────────────────────────────────────────────────────
 
 function base64url(input: Buffer | string): string {

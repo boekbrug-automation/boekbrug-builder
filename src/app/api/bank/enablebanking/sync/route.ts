@@ -17,7 +17,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
-import { isEnableBankingConfigured, dutchEnableBankingError } from "@/lib/enablebanking-client";
+import {
+  isEnableBankingConfigured,
+  canUseEnableBanking,
+  dutchEnableBankingError,
+} from "@/lib/enablebanking-client";
 import { getBankConnection, listBankConnections } from "@/lib/enablebanking-connection";
 import { syncBankConnection } from "@/lib/enablebanking-sync";
 
@@ -33,7 +37,8 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Niet ingelogd" }, { status: 401 });
 
-  if (!isEnableBankingConfigured()) {
+  // [EB-TESTER] No bank traffic on behalf of an account outside the list.
+  if (!isEnableBankingConfigured() || !canUseEnableBanking(user.id)) {
     return NextResponse.json({ error: dutchEnableBankingError("NOT_CONFIGURED") }, { status: 503 });
   }
 

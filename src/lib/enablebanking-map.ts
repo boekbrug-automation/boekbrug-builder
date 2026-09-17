@@ -431,12 +431,35 @@ export function mapEnableBankingTransaction(
     counterpartName,
     counterpartIban,
     reference,
-    // The bank's own entry id. Kept for debugging only, and it is NOT an identity: the vendor
-    // sample holds 611 transactions under 481 distinct entry_reference values — one of them
-    // ("3845245274") is shared by 44 unrelated MobilePay lines, and "0000000000" by 21. Treating
-    // it as a key would collapse real transactions into one another. Dedup keys on content
-    // (see the contentKey header in bank-import.ts), which is why this is safe to store as-is.
-    transactionId: cleanString(tx.entry_reference),
+    // [EB-IDENTITEIT] No source identity from this door. Deliberately null, and the reason is the
+    // most expensive kind there is.
+    //
+    // entry_reference is the bank's own entry id and it does NOT identify one transaction: the
+    // vendor sample holds 611 transactions under 481 distinct values — "3845245274" is shared by
+    // 44 unrelated MobilePay lines and "0000000000" by 21. That was already written here, with
+    // the conclusion "dedup keys on content".
+    //
+    // What the line underneath it did was hand that value to `transactionId` anyway — and
+    // transactionId is not a debugging field. bank-import.ts copies it into external_id, and
+    // bank_transactions carries UNIQUE (user_id, source, external_id) which the Enable Banking
+    // sync upserts with ignoreDuplicates: true. So two genuinely different transactions sharing
+    // an entry_reference both passed dedupTransactions (which compares incoming against EXISTING,
+    // never incoming against incoming), collided at the index, and the SECOND ONE WAS SILENTLY
+    // DROPPED. No error, no warning, no row — and every later sync dropped it again, so the money
+    // never arrived. src/lib/enablebanking-identity.test.ts fails on exactly that if this line
+    // returns.
+    //
+    // Current Enable Banking prose calls entryReference unique. A sample export from the same
+    // vendor proves it is not, on real data. Between a promise and a measurement the measurement
+    // decides, because the failure direction of believing the promise is permanent, invisible
+    // loss — and the cost of not believing it is at worst a visible duplicate the owner can see
+    // and unlink.
+    //
+    // Nothing else is weakened: the content fingerprint still recognises a re-read of the same
+    // history (that is what the 7-day SYNC_OVERLAP_DAYS window relies on), it still catches the
+    // same money arriving through an uploaded MT940/CAMT file, and a file door whose ids ARE
+    // proven unique per statement keeps its own identity dedup untouched.
+    transactionId: null,
     // [DD-SIGNAL] The feed's own ISO bank transaction code — the same family/sub-family a CAMT
     // file carries in <BkTxCd> (RDDT / ESDD for a direct debit). Sub-code first: it is the more
     // specific of the two, exactly as the file parser prefers <SubFmlyCd> over <Fmly><Cd>.

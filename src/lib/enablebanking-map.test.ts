@@ -298,9 +298,16 @@ test("a SEPA incasso yields only the invoice number, not the batch and order ids
   assert.equal(tx?.reference, "1260405");
 });
 
-test("entry_reference is stored for debugging but is not an identity", () => {
+test("[EB-IDENTITEIT] entry_reference never becomes a source identity", () => {
   // Vendor sample: 611 transactions under 481 distinct entry_reference values. "3845245274" alone
   // covers 44 unrelated MobilePay lines — keying on it would collapse real transactions together.
+  //
+  // This test used to be called "stored for debugging but is not an identity", and it asserted the
+  // two values were EQUAL to demonstrate the collision. That was true and harmless right up until
+  // you followed the field: transactionId is copied into external_id, which is half of
+  // UNIQUE (user_id, source, external_id), which the sync upserts with ignoreDuplicates — so the
+  // "debugging" value silently deleted the second of two real transactions. The field is null now,
+  // and the assertion below is what keeps it that way.
   const a = mapEnableBankingTransaction({
     entry_reference: "3845245274",
     value_date: "2020-09-24",
@@ -315,7 +322,8 @@ test("entry_reference is stored for debugging but is not an identity", () => {
     credit_debit_indicator: "CRDT",
     remittance_information: ["MobilePay: Christina Nielsen"],
   });
-  assert.equal(a?.transactionId, b?.transactionId);
+  assert.equal(a?.transactionId, null, "the Enable Banking door handed out a source identity again");
+  assert.equal(b?.transactionId, null);
   assert.notEqual(keyOf(a!), keyOf(b!), "two different transactions must keep two fingerprints");
 });
 

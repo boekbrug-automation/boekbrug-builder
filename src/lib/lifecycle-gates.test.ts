@@ -36178,3 +36178,46 @@ test("[KIES-TERMIJN] the period is chosen at the button, and no published word c
   assert.ok(av.includes("**Je wordt nooit onaangekondigd gefactureerd.**"),
     "[KIES-TERMIJN] and the sentence a reader remembers survives the rewrite");
 });
+
+// ── [EB-TESTER] Every owner-facing Enable Banking door asks the authorization question ────────
+//
+// The helper existing is not the same as the helper being called. Before this gate the panel's
+// only condition was `configured`, so the moment two credentials landed in the environment every
+// logged-in owner saw "Koppel je bank" and could start a real consent against whatever
+// application those credentials named — during a Sandbox proof, a Sandbox application.
+//
+// The callback is listed here too, and it is the one that must NOT grow a session check: its
+// boundary is the high-entropy `state` → our stored row → the owner ON that row. What it asks is
+// whether THAT account is allowed, never who is browsing, so the flow still completes when the
+// bank returns the owner in a different browser or on a phone.
+//
+// Disconnect is deliberately absent. Unlinking is the safety valve: a list that shrinks must
+// never trap an owner with a live bank connection he can no longer revoke.
+test("[EB-TESTER] the Sandbox gate is wired into every door that reaches a bank", () => {
+  for (const route of ["banks", "connect", "status", "sync", "callback"]) {
+    const bron = code(`src/app/api/bank/enablebanking/${route}/route.ts`);
+    assert.match(bron, /canUseEnableBanking\(/,
+      `/${route} does not ask whether this account may use the bank link`);
+  }
+
+  // The callback asks about the connection it found, not about a request parameter or a session.
+  const callback = code("src/app/api/bank/enablebanking/callback/route.ts");
+  assert.match(callback, /canUseEnableBanking\(connection\.userId\)/,
+    "the callback derives its owner from something other than the stored connection");
+  assert.doesNotMatch(callback, /auth\.getUser\(\)/,
+    "the callback grew a browser-session requirement — the bank may return the owner anywhere");
+
+  // Unlinking stays reachable.
+  assert.doesNotMatch(code("src/app/api/bank/enablebanking/disconnect/route.ts"), /canUseEnableBanking\(/,
+    "disconnect is gated — an owner outside the list can no longer revoke a live bank connection");
+
+  // And the two questions stay two functions.
+  const client = code("src/lib/enablebanking-client.ts");
+  const configured = client.slice(
+    client.indexOf("export function isEnableBankingConfigured"),
+    client.indexOf("export function enableBankingTesters"),
+  );
+  assert.ok(configured.length > 40, "[EB-TESTER] the window over isEnableBankingConfigured found nothing");
+  assert.doesNotMatch(configured, /TESTERS|userId/,
+    "isEnableBankingConfigured learned about users — the callback has none to give it");
+});
