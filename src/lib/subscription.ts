@@ -198,26 +198,19 @@ export function isKnownStatus(status: string): status is SubscriptionStatus {
  * 'active', gewoon een lopend abonnement.
  */
 /**
- * [PROEFMAAND] Mag deze gebruiker de gratis proefmaand van Plus krijgen?
+ * [EERLIJK-WOORD] HIER STOND trialEligible(), en die is met de proefmaand meegegaan.
  *
- * Eén regel, en de regel is "nooit twee keer": de proefmaand is er voor wie Plus nog nooit had.
- * De toets is `subscription_status` in profiles — die kolom wordt UITSLUITEND door de webhook
- * geschreven, dus:
+ * Hij beantwoordde één vraag — "heeft dit account al eens een abonnement gehad?" — om te
+ * beslissen of de checkout 30 gratis dagen meegaf. Er is nu niets meer te beslissen: gratis IS
+ * de proef, dus iedereen die afrekent rekent af vanaf dag één. Een functie die nog bestaat maar
+ * niemand meer aanroept is de volgende die per ongeluk weer wordt aangeroepen.
  *
- *   · null/afwezig  → er is nooit een abonnement geweest (een AFGEBROKEN checkout laat geen
- *     status achter: Stripe stuurt dan geen webhook) → proefmaand;
- *   · elke waarde   → er is ooit een abonnement geweest — actief, opgezegd ('canceled' blijft
- *     bewust staan), haperend — en een tweede gratis maand is dan een korting die niemand is
- *     beloofd → geen proefmaand. Gewoon Plus vanaf dag één, zoals voorheen.
- *
- * Faalveilig in de goedkope richting: kan de status niet worden gelezen, dan geeft de caller
- * hier een niet-null placeholder door en start het abonnement ZONDER proefmaand. Een klant die
- * er recht op had mist dan een gratis maand (vervelend, herstelbaar via Stripe); de omgekeerde
- * fout deelt gratis maanden uit aan wie al klant was.
+ * WAT WEL BLIJFT, en dat is geen restant: normalizeStripeStatus hieronder blijft 'trialing'
+ * lezen als een lopend abonnement. Wij vragen er niet meer om, maar Stripe kan die status om
+ * eigen redenen sturen — een handmatige proef in het dashboard, een coupon, een migratie — en
+ * een status die wij niet herkennen valt hier door naar 'none'. Dat zou een BETALENDE klant op
+ * het gratis plan zetten. De veilige kant is dus: niet meer aanbieden, wel blijven herkennen.
  */
-export function trialEligible(subscriptionStatus: string | null | undefined): boolean {
-  return subscriptionStatus === null || subscriptionStatus === undefined || subscriptionStatus === "";
-}
 
 export function normalizeStripeStatus(raw: string | null | undefined): SubscriptionStatus {
   switch (raw) {

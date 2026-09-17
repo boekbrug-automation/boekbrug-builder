@@ -13,16 +13,20 @@
 //   • de bedragen van de Bewaarkluis uit src/lib/bewaarkluis.ts.
 //
 // Dat is geen netheid maar een reparatie. Op de billing-tak stond hier een eigen
-// `priceLabel: "€ 12,00"` — terwijl de bindende voorwaarden op DEZE tak € 12,99 publiceren
-// en de checkout de klant dwingt die voorwaarden te accepteren. Twee bedragen in één
-// koopproces is precies het gat waar de klant gelijk in krijgt, want onduidelijkheid in je
-// eigen algemene voorwaarden wordt tegen jou uitgelegd. Eén bron, dus: als de grens of de
-// prijs verandert, verandert hij overal mee.
+// `priceLabel` met een ander bedrag dan de bindende voorwaarden publiceerden, terwijl de
+// checkout de klant dwingt die voorwaarden te accepteren. Twee bedragen in één koopproces is
+// precies het gat waar de klant gelijk in krijgt, want onduidelijkheid in je eigen algemene
+// voorwaarden wordt tegen jou uitgelegd. Eén bron, dus: als de grens of de prijs verandert,
+// verandert hij overal mee. Welke bedragen dat vandaag zijn staat daarom hier niet — het
+// overtypen ervan in een comment is dezelfde fout, alleen trager zichtbaar.
 //
 // WAT WIJ NIET VERKOPEN, en waarom dat hier staat:
-//   • Geen proefperiode. Er is niets om te proberen — de app is gratis en blijft gratis
-//     binnen het eerlijk gebruik. Een proefklok die stil begint te lopen bij registratie is
-//     precies het gedrag waar dit product zich van wil onderscheiden.
+//   • Geen proefperiode, en sinds [EERLIJK-WOORD] klopt die zin weer. Er heeft een tijd een
+//     proefmaand op Plus gestaan (30 dagen, via trial_period_days) TERWIJL deze regel hier
+//     bleef staan — twee beschrijvingen van hetzelfde aanbod, waarvan er één op de
+//     verkooppagina stond en één in de voorwaarden. Nu is er weer precies één ding om te
+//     proberen: het gratis plan zelf, de proefwerkplek. Een proefklok die stil begint te lopen
+//     bij registratie is nog steeds het gedrag waar dit product zich van wil onderscheiden.
 //   • Geen betaalmuur. Overschrijding pauzeert alleen de handeling die geld kost.
 //   • Het boekhoudersportaal is gratis tot en met ACCOUNTANT_FREE_CLIENTS gekoppelde klanten
 //     (fair-use.ts). Daarboven geldt een STAFFEL per kantoor (accountant-pricing.ts), die is
@@ -31,7 +35,7 @@
 //     de grens loopt over KLANTEN, niet over tijd. Er is bewust geen bedrag van die staffel in
 //     dit bestand overgetypt — wie het nodig heeft, leest accountant-pricing.ts.
 
-import { PLUS_PRICE_EUR, fairUseLimit, formatLimit } from "@/lib/fair-use";
+import { PLUS_ANNUAL_PRICE_EUR, PLUS_PRICE_EUR, fairUseLimit } from "@/lib/fair-use";
 import {
   BEWAARPLICHT_YEARS,
   KLUIS_PREPAY_YEAR_PRICE_EUR,
@@ -39,7 +43,7 @@ import {
   eur,
 } from "@/lib/bewaarkluis";
 
-/** Nederlandse notatie van een maandbedrag: "€ 12,99". */
+/** Nederlandse notatie van een bedrag, twee decimalen: "€ 19,99", "€ 179,91". */
 function euroLabel(amount: number): string {
   return `€ ${amount.toFixed(2).replace(".", ",")}`;
 }
@@ -48,33 +52,19 @@ function euroLabel(amount: number): string {
  * Het enige betaalde maandplan voor de ondernemer. Nodig zodra iemand structureel boven het
  * eerlijk gebruik uitkomt — nooit eerder, en nooit automatisch.
  */
-/**
- * [PROEFMAAND] De eerste maand Plus is gratis — één keer, voor wie nog nooit een abonnement had.
- *
- * Waarom een proefmaand op PLUS en geen tijdslot op het product zelf: het gratis plan IS het
- * product (zie decidePlan stap 5), dus "probeer de app een maand gratis" is hier al waar zonder
- * enige wijziging. Wat een advertentie nodig heeft is de sterkere belofte — een maand de RUIME
- * grenzen proberen — en die kan veilig, omdat aflopen hier terugvalt naar gratis en nooit naar
- * een slot. Een boekhoudapp die na dag 30 de administratie gijzelt is precies wat wij niet zijn.
- *
- * Ná de proefmaand int Stripe het gewone maandbedrag; opzeggen binnen de maand kost niets.
- * De toestand die Stripe daarbij stuurt ('trialing') wordt al jaren als lopend abonnement
- * genormaliseerd (normalizeStripeStatus) — deze feature zet dus alleen de kraan open die er al was.
- */
-export const PLUS_TRIAL_DAYS = 30;
-
 export const PLUS = {
   id: "plus",
   name: "BoekBrug Plus",
   /** Weergavestring, Nederlandse notatie. Afgeleid — nooit hier ingetypt. */
   priceLabel: euroLabel(PLUS_PRICE_EUR),
   period: "per maand",
+  /** [JAARPRIJS] Hetzelfde plan, per jaar vooruit: twaalf maanden voor de prijs van negen. */
+  annualPriceLabel: euroLabel(PLUS_ANNUAL_PRICE_EUR),
+  annualPeriod: "per jaar",
   /** Nederlandse consumentenprijzen zijn inclusief btw; de Stripe-prijs moet dat ook zijn. */
   btwNote: "incl. btw",
   /** Maandelijks opzegbaar, per direct. Geen opzegtermijn. */
   cancelNote: "maandelijks opzegbaar",
-  /** [PROEFMAAND] Eén zin, overal dezelfde: wie hem leest weet wat hij kost en wanneer. */
-  trialNote: "de eerste maand gratis — opzeggen binnen die maand kost niets",
 } as const;
 
 /** Het archiefproduct. Loopt door nadat de klant is vertrokken — zie bewaarkluis.ts. */
@@ -89,16 +79,26 @@ export const KLUIS = {
 } as const;
 
 /**
- * Het aanbod in één zin, klaar om te plakken op elke plek waar iemand wordt gevraagd zich
- * te binden. Bevat alles wat een koper moet weten vóór hij klikt: dat het gratis is, waar de
- * grens ligt, wat het daarboven kost, en dat er nooit ongevraagd wordt afgeschreven.
+ * [EERLIJK-WOORD] Het aanbod in één zin, klaar om te plakken op elke plek waar iemand wordt
+ * gevraagd zich te binden.
+ *
+ * DE VORIGE ZIN BESCHREEF EEN ANDER PRODUCT. Hij begon met "Gratis voor de ondernemer" en
+ * noemde Plus iets voor wie "boven het eerlijk gebruik" uitkomt — de vorm waarin gratis het
+ * hoofdplan was en Plus de uitzondering. Sinds de beslissing van 17 september is het andersom:
+ * gratis is de proefwerkplek en Plus is waarop je je onderneming draait. Een verkoopzin die de
+ * oude vorm blijft zeggen belooft iets wat de app niet meer doet, en dat is precies het soort
+ * verschil waarin een klant gelijk krijgt.
+ *
+ * Alle getallen zijn afgeleid. Er staat er niet één overgetypt in deze zin.
  */
 export const OFFER_NL =
-  `Gratis voor de ondernemer én voor zijn boekhouder. ` +
-  `Boven het eerlijk gebruik (${formatLimit(fairUseLimit("aiDocuments"), "free")} documenten ` +
-  `door de AI gelezen) kost Plus ${PLUS.priceLabel} ${PLUS.period} ${PLUS.btwNote}. ` +
+  `Gratis uitproberen: ${fairUseLimit("invoicesSent").free} facturen en ` +
+  `${fairUseLimit("aiDocuments").free} door de AI gelezen documenten per maand. ` +
+  `Draai je er je onderneming op, dan is dat Plus: ${PLUS.priceLabel} ${PLUS.period} of ` +
+  `${PLUS.annualPriceLabel} ${PLUS.annualPeriod} ${PLUS.btwNote}, ruim onder eerlijk gebruik. ` +
   `Geen proefperiode, geen automatische afschrijving, geen betaalmuur voor je eigen gegevens.`;
 
 /** Korte vorm voor een ondertitel of een knop. */
 export const OFFER_SHORT_NL =
-  `Gratis · Plus ${PLUS.priceLabel} p/m alleen boven het eerlijk gebruik · nooit automatisch afgeschreven`;
+  `Gratis uitproberen · Plus ${PLUS.priceLabel} p/m of ${PLUS.annualPriceLabel} p/j · ` +
+  `nooit automatisch afgeschreven`;

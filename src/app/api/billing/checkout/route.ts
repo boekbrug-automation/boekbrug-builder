@@ -18,7 +18,6 @@ import {
   resolveCustomerId,
   createCheckoutSession,
 } from "@/lib/billing";
-import { trialEligible } from "@/lib/subscription";
 import { parsePlusInterval, type PlusInterval } from "@/lib/plus-interval";
 import { appOrigin } from "@/lib/app-origin";
 
@@ -73,15 +72,11 @@ export async function POST(req: NextRequest) {
   let existingCustomerId: string | null = null;
   let email: string | null = user.email ?? null;
   let name: string | null = null;
-  // [PROEFMAAND] Faalveilig richting GEEN proefmaand: kan de status niet worden gelezen, dan
-  // start het abonnement gewoon betaald vanaf dag één — zie trialEligible voor waarom die kant.
-  let subscriptionStatus: string | null = "onbekend";
-
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data } = await (supabase as any)
       .from("profiles")
-      .select("email, full_name, company_name, stripe_customer_id, subscription_status")
+      .select("email, full_name, company_name, stripe_customer_id")
       .eq("id", user.id)
       .single();
 
@@ -89,7 +84,6 @@ export async function POST(req: NextRequest) {
       existingCustomerId = data.stripe_customer_id ?? null;
       email = data.email ?? email;
       name = data.company_name || data.full_name || null;
-      subscriptionStatus = data.subscription_status ?? null;
     }
   } catch (err) {
     console.error("[BILLING] profile read failed (continuing without it):", err);
@@ -132,7 +126,6 @@ export async function POST(req: NextRequest) {
       successUrl: `${origin}/dashboard/settings/facturering?betaald=1`,
       cancelUrl: `${origin}/prijzen?geannuleerd=1`,
       interval,
-      withTrial: trialEligible(subscriptionStatus),
     });
 
     if (!session.url) {

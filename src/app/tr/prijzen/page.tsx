@@ -8,14 +8,14 @@ import Link from 'next/link'
 import PublicHeader from '@/components/public-header'
 import PublicFooter from '@/components/public-footer'
 import { PLUS } from '@/lib/plan'
-import { FAIR_USE_LIMITS, fairUseLimit } from '@/lib/fair-use'
+import { fairUseLimit } from '@/lib/fair-use'
 import { BEWAARPLICHT_YEARS, KLUIS_GRACE_MONTHS, eur, KLUIS_PREPAY_YEAR_PRICE_EUR } from '@/lib/bewaarkluis'
 import SubscribeButton from '@/app/prijzen/SubscribeButton'
 
 export const metadata: Metadata = {
   title: 'Fiyatlar — sizin ve muhasebeciniz için ücretsiz | BoekBrug',
   description:
-    `BoekBrug serbest çalışan için ücretsiz ve muhasebecisi için ücretsizdir. Adil kullanımın üzerinde Plus ayda ${PLUS.priceLabel} tutar (KDV dahil). Deneme süresi yok, otomatik tahsilat yok ve kendi idarenizde asla kilit yok.`,
+    `BoekBrug'u ücretsiz deneyin: ayda ${fairUseLimit('invoicesSent').free} fatura ve yapay zekânın okuduğu ${fairUseLimit('aiDocuments').free} belge. Plus ayda ${PLUS.priceLabel} veya yılda ${PLUS.annualPriceLabel} tutar (KDV dahil). Deneme süresi yok, otomatik tahsilat yok ve kendi idarenizde asla kilit yok.`,
   keywords: ['boekbrug fiyatları', 'ücretsiz muhasebe programı hollanda', 'zzp muhasebe maliyeti', 'saklama yükümlülüğü 7 yıl'],
   alternates: {
     canonical: '/tr/prijzen',
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: 'BoekBrug — sizin ve muhasebeciniz için ücretsiz',
-    description: `Plus ayda ${PLUS.priceLabel} tutar ve yalnızca adil kullanımın üzerinde gerekir.`,
+    description: `Plus ayda ${PLUS.priceLabel} veya yılda ${PLUS.annualPriceLabel} tutar — dokuz ayın fiyatına on iki ay.`,
     type: 'website',
     locale: 'tr_TR',
   },
@@ -45,7 +45,6 @@ const INCLUDED = [
 
 export default function TrPricingPage() {
   const ai = fairUseLimit('aiDocuments')
-  const otherLimits = FAIR_USE_LIMITS.length - 1
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa', fontFamily: 'var(--font-sans), system-ui, sans-serif' }}>
@@ -72,10 +71,16 @@ export default function TrPricingPage() {
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '10px 0 4px' }}>
               <span style={{ fontSize: 40, fontWeight: 700, color: '#202124' }}>€ 0</span>
             </div>
-            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>tüm özellikler, adil kullanım içinde</div>
+            <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>tüm özellikler, denemek için</div>
             <Link href="/register" style={{ display: 'block', textAlign: 'center', padding: '12px 20px', background: '#137333', color: '#fff', borderRadius: 8, textDecoration: 'none', fontWeight: 600, fontSize: 15 }}>Ücretsiz başla</Link>
-            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-              Bu giriş paketi değil — bu, ürünün kendisi için yapıldığı ve çoğu kullanıcının kalıcı olarak kalması gereken plandır.
+            <ul style={{ fontSize: 13.5, color: '#3c4043', margin: '16px 0 0', paddingInlineStart: 18, lineHeight: 1.7 }}>
+              <li>Gönderilen fatura: <strong>ayda {fairUseLimit('invoicesSent').free}</strong></li>
+              <li>Yapay zekânın okuduğu belge: <strong>ayda {fairUseLimit('aiDocuments').free}</strong></li>
+              <li>Depolama: <strong>{fairUseLimit('storageMb').free} MB</strong></li>
+              <li>Bağlı posta kutusu: <strong>{fairUseLimit('mailboxes').free}</strong></li>
+            </ul>
+            <p style={{ fontSize: 13.5, color: '#5f6368', margin: '12px 0 0', lineHeight: 1.6 }}>
+              Nasıl çalıştığını görmeye yeter. İşinizi üzerinde yürütürseniz bunları aşarsınız — tasarım böyle. Girdiğiniz her şey sizin kalır, sonrasında da.
             </p>
           </section>
 
@@ -86,9 +91,15 @@ export default function TrPricingPage() {
               <span style={{ fontSize: 15, color: '#5f6368' }}>ayda</span>
             </div>
             <div style={{ fontSize: 14, color: '#5f6368', marginBottom: 16 }}>KDV dahil · aylık iptal edilebilir</div>
+            <p style={{ fontSize: 14.5, fontWeight: 600, color: '#188038', margin: '0 0 12px' }}>
+              Veya yılda {PLUS.annualPriceLabel} — dokuz ayın fiyatına on iki ay.
+            </p>
             <SubscribeButton />
             <p style={{ fontSize: 13.5, color: '#5f6368', margin: '16px 0 0', lineHeight: 1.6 }}>
-              Yalnızca adil kullanımı sürekli aşarsanız gereklidir — örneğin yapay zekânın okuduğu ayda {ai.free} belgeden fazlası. Plus her sınırı {ai.plus}&apos;e yükseltir.
+              {/* [EERLIJK-WOORD] Burada "Plus her sınırı {ai.plus}'e yükseltir" yazıyordu; Plus
+                  bir tavan yayımlamadığı için ai.plus sıfırdır ve cümle "her sınırı 0'a yükseltir"
+                  olarak görünüyordu. */}
+              İşinizi üzerinde yürüteceğiniz plan budur. Faturada, yapay zekânın okuduğu belgede ve depolamada yayımlanmış bir tavan yok — adil kullanım içinde, geniş. Bir yerine iki posta kutusu. Ayda {ai.free} belgeden fazlası için Plus yanıttır.
             </p>
           </section>
 
@@ -141,7 +152,7 @@ export default function TrPricingPage() {
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#202124', margin: '0 0 16px' }}>Sık sorulan sorular</h2>
           <div style={{ display: 'grid', gap: 14 }}>
             <Faq q="Gerçekten ücretsiz mi, yoksa bu bir deneme mi?">
-              Gerçekten ücretsiz. <strong>Deneme süresi yok</strong> ve işleyen bir saat yok. Ödeme bilgisi bırakmazsınız, dolayısıyla asla bir tahsilat olamaz. Olan şey adil bir kullanımdır: yapay zekânın okuduğu ayda {ai.free} belge ve <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>tek bir sayfada</Link> görünen {otherLimits} sınır daha.
+              İşleyen bir saat yok. Ücretsiz plan kendiliğinden durmaz ve ödeme bilgisi bırakmazsınız, dolayısıyla asla bir tahsilat olamaz. Sınırladığı şey aylık miktardır: {fairUseLimit('invoicesSent').free} fatura göndermek ve yapay zekânın okuduğu {ai.free} belge. Bu, BoekBrug&apos;un nasıl çalıştığını görmeye yeter, bir yıl yürütmeye yetmez — tasarım böyle. Tüm sınırlar <Link href="/eerlijk-gebruik" style={{ color: '#1A73E8' }}>tek bir sayfada</Link>.
             </Faq>
             <Faq q="Adil kullanımı aşarsam ne olur?">
               Bir sınırın %80&apos;inde, tam sayıyla bir bildirim alırsınız — yani bir şey olmadan önce. Aşarsanız <em>yalnızca</em> bize maliyeti olan işlem duraklar: yeni bir belgeyi otomatik okutma, yeni bir fatura gönderme. Zaten var olan her şey okunabilir ve dışa aktarılabilir kalır. Sonra siz seçersiniz: gelecek ayı beklemek ya da Plus almak.

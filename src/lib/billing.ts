@@ -21,7 +21,6 @@
 
 import Stripe from "stripe";
 
-import { PLUS_TRIAL_DAYS } from "@/lib/plan";
 import { checkPlusPrice, type PlusInterval } from "@/lib/plus-interval";
 
 // ── Configuration ────────────────────────────────────────────────────
@@ -173,10 +172,6 @@ export async function createCheckoutSession(params: {
   /** [JAARPRIJS] Per maand of per jaar. De route leest dit van de wire en weigert al wat geen
    *  van beide is — parsePlusInterval valt nooit stil terug op een van de twee. */
   interval: PlusInterval;
-  /** [PROEFMAAND] Eerste maand gratis — alleen voor wie nog nooit een abonnement had.
-   *  De BESLISSING valt in trialEligible (subscription.ts, puur en getest); dit bestand
-   *  vertaalt haar alleen naar Stripe, zoals het hele bestand alleen Stripe spreekt. */
-  withTrial: boolean;
 }): Promise<Stripe.Checkout.Session> {
   const priceId = params.interval === "year" ? STRIPE_PRICE_ID_PLUS_YEAR : STRIPE_PRICE_ID_PLUS;
   if (!priceId) {
@@ -239,22 +234,22 @@ export async function createCheckoutSession(params: {
     tax_id_collection: { enabled: true },
     customer_update: { address: "auto", name: "auto" },
     // The webhook reads this to find the profile without trusting any URL.
-    // [PROEFMAAND] trial_period_days: Stripe int niets tot de proefmaand om is; de mandaat
-    // (iDEAL→SEPA of kaart) wordt wél meteen vastgelegd, dus na de maand loopt de incasso
-    // vanzelf en wie binnen de maand opzegt betaalt niets. 'trialing' komt bij de webhook
-    // binnen en wordt door normalizeStripeStatus al als lopend abonnement gelezen.
+    // [EERLIJK-WOORD] GEEN PROEFPERIODE MEER, op geen van beide intervallen.
     //
-    // [JAARPRIJS] ALLEEN op de maandprijs. De jaarprijs start betaald, en dat is geen zuinigheid
-    // maar het vermijden van een zin die niemand kan uitleggen: de proefmaand staat op /prijzen
-    // beschreven als "de eerste maand gratis, daarna €19,99 per maand". Diezelfde 30 dagen op een
-    // jaarabonnement betekent iets anders (dertig dagen, dán €179,91 ineens) en zou die zin voor
-    // de helft van de kopers onwaar maken. De korting ÍS het jaaraanbod: twaalf maanden voor de
-    // prijs van negen. Twee aanbiedingen op één knop stapelen is hoe een prijs onuitlegbaar wordt.
+    // Er stond hier trial_period_days: 30 op de maandprijs. Drie proeven lagen toen over
+    // elkaar heen — het gratis plan, een welkomsttoekenning van 90 dagen Plus, en deze — en
+    // alledrie probeerden hetzelfde te doen. De beslissing van 17 september houdt er één over:
+    //
+    //     Gratis laat je BoekBrug proberen. Plus laat je je onderneming erop draaien.
+    //
+    // Wat dat hier concreet betekent: wie afrekent, rekent af. De kraan gaat open op dag één,
+    // er is geen 'trialing'-venster meer waarin een abonnement bestaat zonder betaling, en de
+    // zin op /prijzen die anders beloofde is mee verdwenen — die twee horen bij elkaar en zijn
+    // daarom in dezelfde wijziging weggegaan. normalizeStripeStatus blijft 'trialing' wél
+    // lezen: Stripe mag die status om andere redenen sturen, en een status die wij niet
+    // herkennen zou een betalende klant op gratis zetten.
     subscription_data: {
       metadata: { profile_id: params.profileId },
-      ...(params.withTrial && params.interval === "month"
-        ? { trial_period_days: PLUS_TRIAL_DAYS }
-        : {}),
     },
     metadata: { profile_id: params.profileId },
     success_url: params.successUrl,

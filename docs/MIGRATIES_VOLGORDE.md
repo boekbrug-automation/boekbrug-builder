@@ -668,7 +668,8 @@ Onderaan een migratiebestand hoort een **CONTROLE**-blok: één query, en het ve
 - **De bedrijfsidentiteit in Vercel**: `NEXT_PUBLIC_COMPANY_KVK`, `_LEGAL_NAME`, `_BTW`,
   `_ADDRESS`. Nu tonen de voorwaarden "(volgt)" — bewust, zodat een leeg veld nooit als een
   echt-maar-onjuist KVK-nummer kan lezen. `/steun` blijft 404 tot er een echt KVK staat.
-- **Twee Stripe-prijzen**: `STRIPE_PRICE_ID_PLUS` (€ 12,99/maand, terugkerend, incl. btw) en
+- **Drie Stripe-prijzen**: `STRIPE_PRICE_ID_PLUS` (€ 19,99/maand, terugkerend, incl. btw),
+  `STRIPE_PRICE_ID_PLUS_YEAR` (€ 179,91/jaar, terugkerend, incl. btw) en
   `STRIPE_PRICE_ID_KLUIS_YEAR` (€ 19 per bewaarjaar, eenmalig, incl. btw). Plus
   `STRIPE_WEBHOOK_SECRET`.
 - **`AI_DAILY_BUDGET_EUR=0`** voor de eerste dagen: dat telt wél maar begrenst niet, zodat je

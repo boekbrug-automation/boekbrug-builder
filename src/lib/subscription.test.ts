@@ -13,7 +13,6 @@ import {
   limitsPlanFor,
   normalizeStripeStatus,
   parseTimestamp,
-  trialEligible,
   type PlanInput,
 } from "./subscription";
 import * as subscription from "./subscription";
@@ -98,10 +97,16 @@ test("een onbekende Stripe-status kan hooguit gratis opleveren", () => {
   assert.equal(normalizeStripeStatus("trialing"), "active");
   assert.equal(decidePlan({ ...base, subscriptionStatus: normalizeStripeStatus("wat?") }).plan, "free");
   assert.equal(isKnownStatus("active"), true);
-  // [PROEFMAAND] 'trialing' is nog steeds geen OPGESLAGEN toestand: Stripe stuurt hem tijdens
-  // de gratis proefmaand, normalizeStripeStatus leest hem als lopend abonnement ('active') en
-  // DAT wordt bewaard. De proefmaand bestaat dus in Stripe en in de checkout, nooit als extra
-  // toestand in onze database — één toestandsruimte minder om fout te kunnen zijn.
+  // [EERLIJK-WOORD] 'trialing' blijft herkend, ook nu WIJ er nooit meer om vragen.
+  //
+  // De proefmaand is weg uit de checkout (geen trial_period_days meer), maar Stripe mag die
+  // status om eigen redenen sturen: een handmatige proef in het dashboard, een coupon, een
+  // migratie. Zou normalizeStripeStatus hem niet meer kennen, dan valt hij door naar 'none' en
+  // staat een BETALENDE klant op het gratis plan. Niet meer aanbieden is iets anders dan niet
+  // meer herkennen, en alleen het eerste is hier gebeurd.
+  //
+  // Het blijft geen OPGESLAGEN toestand: hij wordt genormaliseerd naar 'active' en DAT wordt
+  // bewaard — één toestandsruimte minder om fout te kunnen zijn.
   assert.equal(isKnownStatus("trialing"), false, "trialing wordt genormaliseerd, nooit opgeslagen");
 });
 
@@ -123,6 +128,13 @@ test("er bestaat in deze module niets dat iemand kan buitensluiten", () => {
     "isArchivePath",
     "ARCHIVE_PATHS",
     "isBillingEnforced",
+    // [EERLIJK-WOORD] trialEligible hoort sinds 17 september 2026 in dezelfde lijst. Hij
+    // beantwoordde één vraag — "heeft dit account al eens een abonnement gehad?" — om te
+    // beslissen of de checkout 30 gratis dagen meegaf. Er valt niets meer te beslissen: gratis
+    // IS de proef en wie afrekent betaalt vanaf dag één. Een functie die nog bestaat maar
+    // niemand aanroept is de volgende die per ongeluk weer wordt aangeroepen, en een tweede
+    // proef bovenop de gratis werkplek verbergt precies de proef die wij wél hebben.
+    "trialEligible",
   ];
   for (const naam of verboden) {
     assert.equal(
@@ -140,26 +152,6 @@ test("er bestaat in deze module niets dat iemand kan buitensluiten", () => {
   for (const d of alleUitkomsten) {
     assert.ok(["free", "plus", "boekhouder"].includes(d.plan));
   }
-});
-
-test("[PROEFMAAND] de gratis proefmaand is er precies één keer", () => {
-  // Nooit geabonneerd — de kolom is leeg. Ook een AFGEBROKEN checkout laat hem leeg
-  // (Stripe stuurt dan geen webhook), dus wie op de betaalpagina twijfelde en terugkwam
-  // heeft zijn proefmaand niet verspeeld.
-  assert.equal(trialEligible(null), true);
-  assert.equal(trialEligible(undefined), true);
-  assert.equal(trialEligible(""), true);
-
-  // Elke ooit-geschreven toestand betekent: er is al een abonnement geweest. Een tweede
-  // gratis maand is dan een korting die niemand is beloofd.
-  for (const ooit of ["active", "canceled", "past_due", "unpaid", "paused", "none"]) {
-    assert.equal(trialEligible(ooit), false, `${ooit} → geen tweede proefmaand`);
-  }
-
-  // Faalveilig de goedkope kant op: kan de status niet worden gelezen, dan geeft de route
-  // een placeholder door en start het abonnement betaald. De gemiste gratis maand is
-  // herstelbaar in Stripe; uitgedeelde gratis maanden zijn dat niet.
-  assert.equal(trialEligible("onbekend"), false);
 });
 
 // ─── [TOEKENNING] A running grant gives Plus — but never louder than a paid subscription ───────

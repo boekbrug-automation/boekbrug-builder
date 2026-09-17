@@ -109,11 +109,20 @@ export interface FairUseLimit {
 /**
  * De grenzen zelf.
  *
- * Gekozen op wat een échte kleine ondernemer per maand doet, niet op wat technisch kan:
- * een winkel verwerkt tientallen inkoopbonnen, een ZZP'er stuurt er een handvol uit. De
- * grens ligt daar ruim boven, zodat "gratis" ook echt gratis blijft en niet een fuik is.
- * Wat de grens overschrijdt is bijna altijd een zaak die van BoekBrug zijn dagelijkse
- * gereedschap heeft gemaakt — en dan is €12,99 een eerlijke prijs.
+ * [PROEF-WERKPLEK] DEZE TEKST STOND OMGEKEERD, EN DAT WAS HET VORIGE PRODUCT. Er stond dat de
+ * grenzen zijn gekozen op wat een échte kleine ondernemer per maand doet, met de grens "daar
+ * ruim boven", zodat gratis geen fuik zou zijn. Dat beschreef een gratis plan waarop je een
+ * onderneming kon draaien — precies wat gratis niet meer is.
+ *
+ * Gratis is nu de PROEFWERKPLEK: genoeg om te zien hoe BoekBrug werkt, te weinig om een jaar op
+ * te draaien. Gemeten op de enige echte administratie die er is: 116 gelezen documenten en
+ * 282 MB in één maand. Werkelijk zakelijk gebruik gaat er met gemak overheen, en dat is het
+ * ontwerp — een gratis plan dat niemand ontgroeit heeft geen upgrade-moment.
+ *
+ * Plus is zakelijk gebruik onder eerlijk gebruik: 0 = geen gepubliceerd plafond. Wat een prijs
+ * kost staat NIET in dit blok; hij staat één keer in PLUS_PRICE_EUR en wordt overal afgeleid.
+ * Hier stond ooit "€12,99 is een eerlijke prijs" overgetypt, en dat was al onwaar voordat
+ * iemand het merkte.
  */
 export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
   {
@@ -135,7 +144,13 @@ export const FAIR_USE_LIMITS: readonly FairUseLimit[] = [
   },
   {
     key: "invoicesSent",
-    label: "Facturen die je verstuurt of als PDF aanmaakt",
+    // [EERLIJK-WOORD] "of als PDF aanmaakt" stond hier en was onwaar. De teller staat achter
+    // `if (!resend)` in /api/invoice/send: hij telt de EERSTE verzending en verder niets — geen
+    // hernieuwde verzending, en een PDF downloaden telt helemaal nooit mee. Het label beloofde
+    // dus een strengere grens dan de app hanteert, en dat is de verkeerde richting om je eigen
+    // gratis plan verkeerd voor te stellen. De tekst volgt de teller; de teller is niet
+    // aangepast om de tekst te redden.
+    label: "Facturen die je verstuurt",
     // [PROEF-WERKPLEK] Free = 5 verstuurde facturen per maand. Genoeg om te zien hoe het werkt,
     // te weinig om een jaar op te draaien — precies het punt waarop Plus het antwoord is.
     free: 5,

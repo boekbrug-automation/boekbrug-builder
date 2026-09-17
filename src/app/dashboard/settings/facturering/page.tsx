@@ -177,7 +177,7 @@ export default async function FactureringPage({
         )}
 
         {decision.plan !== 'boekhouder' && (
-          <Row label={t('plan.prijsPlus')} value={`${PLUS.priceLabel} ${PLUS.period} (${PLUS.btwNote}, ${PLUS.cancelNote})`} />
+          <Row label={t('plan.prijsPlus')} value={`${PLUS.priceLabel} ${PLUS.period} · ${PLUS.annualPriceLabel} ${PLUS.annualPeriod} (${PLUS.btwNote}, ${PLUS.cancelNote})`} />
         )}
 
         {decision.plan !== 'boekhouder' && (

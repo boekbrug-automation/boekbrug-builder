@@ -35900,14 +35900,26 @@ test("[JAARPRIJS] the annual price is one recurring price, and the door charges 
   assert.doesNotMatch(billing, /trial_period_days: [0-9]/,
     "[JAARPRIJS] the trial length comes from the constant, never typed at the call site");
 
-  // 5. THE TRIAL IS MONTHLY-ONLY. /prijzen describes it as "de eerste maand gratis, daarna
-  //    €19,99 per maand". The same 30 days on a year subscription means something else, and
-  //    would make that published sentence untrue for half the buyers.
-  assert.match(
-    billing,
-    /params\.withTrial && params\.interval === "month"/,
-    "[JAARPRIJS] a trial may only be attached to the monthly price",
-  );
+  // 5. THERE IS NO TRIAL AT ALL ANY MORE — see [EERLIJK-WOORD].
+  //
+  //    This clause was "a trial may only be attached to the monthly price", which was the right
+  //    rule while a 30-day trial still existed: the same 30 days on a year subscription means
+  //    something else and would have made the published sentence untrue for half the buyers.
+  //    The owner then retired the trial entirely, because three trials were stacked on one
+  //    another (free plan, 90-day welcome grant, Stripe trial) and only one survives:
+  //
+  //        Free lets you try BoekBrug. Plus lets you run your business on BoekBrug.
+  //
+  //    So the assertion inverts rather than disappears. An absent thing needs a gate MORE than a
+  //    present one, because re-adding trial_period_days is three characters of config and would
+  //    contradict /prijzen, /eerlijk-gebruik and Terms §5.1.1 all at once, in the direction
+  //    nobody complains about until the invoice does not arrive.
+  assert.doesNotMatch(billing, /trial_period_days/,
+    "[EERLIJK-WOORD] no Stripe trial, on either interval: Free IS the trial");
+  assert.doesNotMatch(billing, /withTrial/,
+    "[EERLIJK-WOORD] and no parameter left over to carry one back in");
+  assert.doesNotMatch(code("src/app/api/billing/checkout/route.ts"), /trialEligible/,
+    "[EERLIJK-WOORD] the route decides nothing about a trial, because there is none");
 
   // 6. A MISSING ANNUAL PRICE COSTS ONE BUTTON, NEVER THE MONTHLY FLOW. Folding the annual id
   //    into isBillingConfigured() would turn a half-finished Stripe setup into a checkout that
@@ -35931,4 +35943,116 @@ test("[JAARPRIJS] the annual price is one recurring price, and the door charges 
       "yearly buyer monthly; a fallback to year takes €179,91 from somebody who asked for a month",
   );
   assert.match(route, /interval,/, "[JAARPRIJS] and the parsed interval reaches the door");
+});
+
+// [EERLIJK-WOORD] The published contract, and the four surfaces that have to agree on it.
+//
+// Slices 5 and 6 changed what the product IS. This one changes what it SAYS — and a pricing change
+// is only real once the words agree, because the words are what a customer can enforce. Ambiguity
+// in your own general terms is construed against you; two amounts in one purchase is the gap the
+// customer wins in.
+//
+// THE FOUR SURFACES: /prijzen (in four languages), /eerlijk-gebruik, Algemene Voorwaarden §5, and
+// the billing screen. All four render from src/lib/fair-use.ts through src/lib/plan.ts. Nothing
+// below checks prose style; every assertion is a place where prose and code could silently stop
+// agreeing.
+//
+// THREE THINGS THIS GATE WATCHES, AND WHY EACH ONE BROKE OR WOULD HAVE:
+//
+//  1. THE TRIAL IS GONE EVERYWHERE, not just in Stripe. Retiring trial_period_days while
+//     /prijzen still answered "Hoe werkt de gratis proefmaand van Plus?" would leave the sales
+//     page promising a free month the checkout no longer gives. Code and copy had to go in one
+//     commit, so the gate holds both halves together.
+//
+//  2. NO RAW LIMIT VALUE IN A SENTENCE. `Plus verruimt elke grens naar {ai.plus}` was true prose
+//     until Plus published 0 — and then it rendered "raises every limit to 0", the strictest
+//     number imaginable exactly where the widest promise belongs. It was live in three locales
+//     simultaneously and no test saw it, because every test read the TABLE, which routes through
+//     formatLimit and prints the Fair Use sentence. A sentence that interpolates `.plus` directly
+//     bypasses that.
+//
+//  3. THE INVOICE LABEL MATCHES THE COUNTER. "Facturen die je verstuurt of als PDF aanmaakt"
+//     described a counter that does not exist: the meter sits behind `if (!resend)` in
+//     /api/invoice/send and counts a first send only — never a resend, and a PDF download never
+//     at all. The published limit was therefore stricter than the enforced one, which is the
+//     wrong direction to misdescribe your own free plan in.
+test("[EERLIJK-WOORD] the trial is gone from every surface, and no sentence prints a raw limit", () => {
+  // ── 1. THE LABEL FOLLOWS THE COUNTER ────────────────────────────────────────────────────
+  assert.equal(fairUseLimit("invoicesSent").label, "Facturen die je verstuurt");
+  const send = code("src/app/api/invoice/send/route.ts");
+  const gateAt = send.indexOf('metric: "invoicesSent"');
+  assert.ok(gateAt > 0, "[EERLIJK-WOORD] the invoicesSent meter must still be in the send route");
+  const before = send.slice(Math.max(0, gateAt - 700), gateAt);
+  assert.match(
+    before,
+    /if \(!resend\) \{/,
+    "[EERLIJK-WOORD] the meter counts a FIRST send only. If that guard is ever removed the label " +
+      "above becomes the lie it used to be — in the other direction.",
+  );
+
+  // ── 2. NO STRIPE TRIAL ANYWHERE ─────────────────────────────────────────────────────────
+  const plan = code("src/lib/plan.ts");
+  assert.doesNotMatch(plan, /PLUS_TRIAL_DAYS/, "[EERLIJK-WOORD] the trial length constant is gone");
+  assert.doesNotMatch(plan, /trialNote/, "[EERLIJK-WOORD] and the sentence that published it");
+  assert.doesNotMatch(code("src/lib/billing.ts"), /trial_period_days/,
+    "[EERLIJK-WOORD] Stripe is never asked for a trial");
+  assert.doesNotMatch(code("src/lib/subscription.ts"), /export function trialEligible/,
+    "[EERLIJK-WOORD] nothing decides who gets one, because nobody does");
+
+  // …and the copy went with it. This is the half that makes the change honest rather than merely
+  // done: the page must not still answer a question about a thing that no longer exists.
+  for (const page of [
+    "src/app/prijzen/page.tsx",
+    "src/app/en/prijzen/page.tsx",
+    "src/app/ar/prijzen/page.tsx",
+    "src/app/tr/prijzen/page.tsx",
+  ]) {
+    assert.doesNotMatch(code(page), /PLUS\.trialNote/,
+      `[EERLIJK-WOORD] ${page} must not render a trial sentence`);
+  }
+  assert.doesNotMatch(code("src/app/prijzen/page.tsx"), /gratis proefmaand van Plus/,
+    "[EERLIJK-WOORD] the FAQ answer about the free trial month must be gone, not just unlinked");
+
+  // BUT 'trialing' STAYS RECOGNISED. Not a leftover: Stripe may still send it for reasons of its
+  // own, and a status we stop recognising falls through to 'none' — which puts a PAYING customer
+  // on the free plan. Not offering one is a different thing from not understanding one.
+  assert.match(code("src/lib/subscription.ts"), /case "trialing":/,
+    "[EERLIJK-WOORD] normalizeStripeStatus must keep reading 'trialing' as a running subscription");
+
+  // ── 3. NO RAW LIMIT VALUE IN A RENDERED SENTENCE ────────────────────────────────────────
+  // `.free` is allowed in prose — it is a real number a reader can act on. `.plus` is not: it is
+  // 0 for the three metrics that publish no ceiling, and 0 renders as a limit of zero.
+  for (const page of [
+    "src/app/prijzen/page.tsx",
+    "src/app/en/prijzen/page.tsx",
+    "src/app/ar/prijzen/page.tsx",
+    "src/app/tr/prijzen/page.tsx",
+    "src/app/dashboard/settings/facturering/page.tsx",
+  ]) {
+    assert.doesNotMatch(
+      code(page),
+      /\{\s*\w+\.plus\s*\}/,
+      `[EERLIJK-WOORD] ${page} interpolates a raw .plus value into copy. For a metric with no ` +
+        "published ceiling that renders as 0 — use formatLimit, which prints the Fair Use sentence.",
+    );
+  }
+
+  // ── 4. THE PUBLISHED PRICES REACH THE LEGAL TEXT AS TOKENS, NEVER AS TYPED AMOUNTS ──────
+  const av = code("src/content/legal/algemene-voorwaarden.ts");
+  assert.ok(av.includes("[PLUS-PRIJS]"), "[EERLIJK-WOORD] §5.1 carries the monthly price as a token");
+  assert.ok(av.includes("[PLUS-JAARPRIJS]"), "[EERLIJK-WOORD] and the annual one");
+  assert.match(code("src/lib/plus-price.ts"), /replaceAll\("\[PLUS-JAARPRIJS\]", plusAnnualPriceLabel\(\)\)/,
+    "[EERLIJK-WOORD] a token nothing fills is a token a reader sees verbatim in the Terms");
+  // The amounts themselves must not appear typed out in the binding document.
+  assert.doesNotMatch(av, /€\s?19,99/, "[EERLIJK-WOORD] the monthly amount is never typed into the Terms");
+  assert.doesNotMatch(av, /€\s?179,91/, "[EERLIJK-WOORD] nor the annual one");
+
+  // ── 5. AND §5.5.1 STILL PROMISES WHAT IT PROMISED ───────────────────────────────────────
+  // Free limits were LOWERED on 17 September. §5.5.1 says a limit you already have is never taken
+  // away, so the change had to be recorded there rather than published around. Nobody was moved
+  // down — every account on that date was the owner's own — but a clause that quietly stops
+  // matching the numbers beside it is the ambiguity that gets construed against us.
+  assert.ok(av.includes("5.5.1"), "[EERLIJK-WOORD] the grandfather clause must still exist");
+  assert.ok(av.includes("17 september 2026"),
+    "[EERLIJK-WOORD] and the day the limits changed must be named in the binding text");
 });
