@@ -5,6 +5,7 @@
 // primary button — so every public/tool page shares one consistent top bar.
 
 import Link from 'next/link'
+import { BetaBadge } from '@/components/beta'
 
 const wrap: React.CSSProperties = { maxWidth: 980, margin: '0 auto', padding: '0 20px' }
 const btnPrimary: React.CSSProperties = { backgroundColor: '#1a73e8', color: '#fff', fontWeight: 600, borderRadius: 9999, textDecoration: 'none', display: 'inline-block', padding: '9px 18px', fontSize: 14 }
@@ -13,7 +14,13 @@ export default function PublicHeader() {
   return (
     <header style={{ background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(20px)', borderBottom: '1px solid #e0e0e0', position: 'sticky', top: 0, zIndex: 10 }}>
       <div className="public-header-wrap" style={{ ...wrap, display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 60 }}>
-        <Link href="/" className="public-nav-brand" style={{ fontSize: 20, fontWeight: 800, color: '#202124', textDecoration: 'none', letterSpacing: -0.5, whiteSpace: 'nowrap' }}>BoekBrug</Link>
+        {/* [BETA] The name, and beside it the one word that says the product is still moving.
+            Dutch here because the public pages are Dutch; inside the app the badge follows the
+            owner's language setting (kop.beta). */}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+          <Link href="/" className="public-nav-brand" style={{ fontSize: 20, fontWeight: 800, color: '#202124', textDecoration: 'none', letterSpacing: -0.5, whiteSpace: 'nowrap' }}>BoekBrug</Link>
+          <BetaBadge label="Bèta" />
+        </span>
         {/* [PUBLIC-NAV] Five links in one non-wrapping row overflowed every
             public page on a phone: at 390px the nav measured 385px starting at
             x=104, so it ran 99px past the right edge and "Gratis account maken"

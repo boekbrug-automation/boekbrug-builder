@@ -38,6 +38,7 @@ import { createClient } from '@/lib/supabase'
 import { M3, FONT, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
+import { BetaBadge } from '@/components/beta'
 import type { NotificationRow } from '@/types/rows'
 import { NotificationsBell, ProfileMenu, type HeaderProfile } from '@/app/dashboard/_shared'
 
@@ -112,6 +113,8 @@ export function MedewerkerHeader({ profile }: { profile: HeaderProfile }) {
       >
         BoekBrug
       </Link>
+      {/* [BETA] Same one word, same place, in the owner's own language. */}
+      <BetaBadge label={t('kop.beta')} />
 
       <div style={{ flex: 1, minWidth: 0 }} />
 

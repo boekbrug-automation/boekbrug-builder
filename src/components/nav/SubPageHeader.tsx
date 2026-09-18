@@ -25,6 +25,7 @@ import type { ReactNode } from "react";
 // [TAAL] A component holds no language of its own.
 import { useLocale } from "@/lib/i18n/use-locale";
 import { translator } from "@/lib/i18n/t";
+import { BetaBadge } from "@/components/beta";
 
 export default function SubPageHeader({
   title,
@@ -122,6 +123,9 @@ export default function SubPageHeader({
       >
         BoekBrug
       </Link>
+      {/* [BETA] Inside the app the fact is a label, never a paragraph: one word beside the name,
+          in the owner's own language. The sentence stands once, on the public homepage. */}
+      <BetaBadge label={t("kop.beta")} />
 
       {/* Separator + page title */}
       <span style={{ color: "#DADCE0", flexShrink: 0, fontSize: 15 }}>/</span>

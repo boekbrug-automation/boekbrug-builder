@@ -24,6 +24,7 @@ import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { TOOLS } from '@/lib/tools'
 import PublicFooter from '@/components/public-footer'
 import PublicHeader from '@/components/public-header'
+import { BetaNotice } from '@/components/beta'
 import { SITE_URL, absoluteUrl } from '@/lib/site'
 
 export const metadata: Metadata = {
@@ -125,6 +126,11 @@ export default async function Home() {
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#f8f9fa', fontFamily: 'var(--font-sans), system-ui, sans-serif' }}>
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
       <PublicHeader />
+
+      {/* [BETA] Said once, here, where someone decides whether to trust us — and nowhere else in
+          the product. Inside the app the badge beside the name carries the same fact without
+          repeating the paragraph on every screen. */}
+      <BetaNotice />
 
       {/* Hero */}
       <section style={{ ...wrap, textAlign: 'center', paddingTop: 72, paddingBottom: 48 }}>

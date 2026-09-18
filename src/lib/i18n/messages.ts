@@ -1988,6 +1988,13 @@ export const MESSAGES = {
   'kop.allesGelezen': { nl: 'Alles gelezen', ar: 'تمت قراءة الكل', en: 'All read' },
   'kop.berichten': { nl: 'Berichten', ar: 'الرسائل', en: 'Messages' },
   'kop.profielmenu': { nl: 'Profielmenu', ar: 'قائمة الحساب', en: 'Profile menu' },
+  // [BETA] The label beside the BoekBrug name. A fact about the product, not a warning about the
+  // administration — see src/components/beta.tsx for why it may never look like one.
+  //
+  // [AR-TERMEN] «بيتا», the transliteration, and deliberately NOT «تجريبي»: that word is already
+  // this product's "example/trial" (chrome.voorbeeld — Voorbeeldklant), and one Arabic word doing
+  // both jobs would make a real administration read as a demo. The split stays split.
+  'kop.beta': { nl: 'Bèta', ar: 'بيتا', en: 'Beta' },
   'kop.instellingen': { nl: 'Instellingen', ar: 'الإعدادات', en: 'Settings' },
   'kop.uitloggen': { nl: 'Uitloggen', ar: 'تسجيل الخروج', en: 'Log out' },
 
