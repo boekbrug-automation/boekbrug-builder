@@ -80,7 +80,10 @@ test('[PRINTED-TOTAL] every door that reads an invoice carries the evidence to t
   // though the check exists. The UBL door has no reader at all: it builds the same block from the
   // XML's typed elements, which is why it is on this list under a different phrase.
   const doors: Array<[string, string, string]> = [
-    ['src/app/api/intake/route.ts', '...(v.field_confidence ?? {})', 'the camera / file upload'],
+// [ONTVANGEN] The intake DOOR is two files since #129: the route keeps the guards and the
+// deterministic branches, intake-processor.ts holds everything that needs the reader. Reading
+// both is reading the door — which is what this test was always asking about.
+    ['src/lib/intake-processor.ts', '...(v.field_confidence ?? {})', 'the camera / file upload'],
     ['src/app/api/intake/route.ts', 'fieldConfidence._btw_rows = v.btwRows', 'the UBL e-invoice'],
     ['src/app/api/email/upload/route.ts', 'verification.field_confidence', 'the manual re-read'],
     ['src/app/api/bank/attach-invoice/route.ts', 'verification.field_confidence', 'attaching to a bank line'],

@@ -32,7 +32,10 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join as joinPath } from "node:path";
 
 const ROUTER = readFileSync("src/lib/intake-router.ts", "utf8");
-const ROUTE = readFileSync("src/app/api/intake/route.ts", "utf8");
+// [ONTVANGEN] The intake DOOR is two files since #129: the route keeps the guards and the
+// deterministic branches, intake-processor.ts holds everything that needs the reader. Reading
+// both is reading the door — which is what this test was always asking about.
+const ROUTE = readFileSync("src/app/api/intake/route.ts", "utf8") + "\n" + readFileSync("src/lib/intake-processor.ts", "utf8");
 
 /** The fields declared on IntakeClassification — the router's whole input surface. */
 function declaredFields(): string[] {

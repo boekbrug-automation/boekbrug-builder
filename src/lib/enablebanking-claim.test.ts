@@ -427,7 +427,10 @@ test("[EB-RACE] the claim expires long before the intake door sweeps the table i
   // does NOT look at the key, so an owner photographing a receipt would clear a running sync's
   // claim if this TTL ever grew past it. Read the horizon rather than repeat it.
   const { readFileSync } = await import("node:fs");
-  const intake = readFileSync("src/app/api/intake/route.ts", "utf8");
+// [ONTVANGEN] The intake DOOR is two files since #129: the route keeps the guards and the
+// deterministic branches, intake-processor.ts holds everything that needs the reader. Reading
+// both is reading the door — which is what this test was always asking about.
+  const intake = readFileSync("src/app/api/intake/route.ts", "utf8") + "\n" + readFileSync("src/lib/intake-processor.ts", "utf8");
   const sweep = intake.match(/Date\.now\(\) - ([\d_]+)\)\.toISOString\(\)/);
   assert.ok(sweep, "the intake claim sweep was rewritten — this relationship can no longer be read");
   const horizonMs = Number(sweep![1].replace(/_/g, ""));
