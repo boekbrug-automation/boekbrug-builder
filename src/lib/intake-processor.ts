@@ -132,7 +132,7 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit
 import { gateFairUseForRead, gateStorage, planForUser } from "@/lib/fair-use-gate";
 import { gateAiDocumentForRead } from "@/lib/fair-use-document";
 import {
-  updateClassification, findInvoiceForDocument, linkDocumentToInvoice,
+  updateClassification, findInvoiceForDocument, linkDocumentToInvoice, placementYear,
   type DocumentIdentity, type DocumentClassification,
 } from "@/lib/document-placement";
 import { autoSettlementKey } from "@/lib/settlement-key";
@@ -1124,7 +1124,7 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
     classification: {
       doc_type: "factuur",
       folder_id: folderId,
-      year: invoiceDate ? new Date(invoiceDate).getFullYear() : null,
+      year: placementYear(invoiceDate),
       ai_processed: true,
       ai_doc_type: decision.destination === "receipt" ? "receipt" : "invoice",
     },
@@ -1534,6 +1534,12 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
   // [AUTO-ADVANCE] Side-effects of a clean auto-verify — mirror the confirm route, best-effort:
   // audit the automatic booking (legal trail), settle any cash link + book a bank line that
   // already paid it, and tell the owner what the app did (so the double-check stays available).
+  // [ONTVANGEN-MELDING] Whether the owner has actually been TOLD. It gates the final state below,
+  // so a bell that did not get written leaves the document waiting instead of finishing silently.
+  // True by default because the bell is only rung on the auto-advance road: a document that lands
+  // in the verify queue owes no notification, and must not be held back for one.
+  let ownerWasTold = true
+
   if (autoAdv.advance && booked?.id) {
     await logAuditAction({
       userId: user.id,
@@ -1603,7 +1609,7 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
     // never moved. reconcileCashWithRetry never throws, so the try//catch around it is gone with it.
     await reconcileCashWithRetry(pipeline, user.id)
     try { await runBankAutoConfirm({ payClient: pipeline, pipeline, userId: user.id }) } catch { /* non-fatal */ }
-    await createNotification({
+    const bel = await createNotification({
       userId: user.id,
       // [BON-AUTO] A settled bon may NOT borrow the invoice sentence. "(nog niet betaald)" on a
       // receipt the app has just marked paid is the app contradicting itself in the one message
@@ -1634,6 +1640,21 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
       // even exist yet on a database where receive-first is not enabled.
       eventKey: stored ? autoFinishedEventKey(stored.documentId) : undefined,
     })
+    // [ONTVANGEN-MELDING] The result is READ, and only on the stored path does it change anything.
+    //
+    // The bell sits before the final state on purpose: the document stays waiting until the owner
+    // has been told, so a transient failure is retried by the next pass. Writing the final state
+    // anyway would end that — the document would leave the queue with no bell, nothing would ever
+    // look at it again, and the owner would simply never learn that their invoice was booked.
+    //
+    // The interactive door is unaffected: it is answering a request the owner is watching, and its
+    // own answer is the notification.
+    if (!bel.ok) {
+      ownerWasTold = false
+      console.error("[ONTVANGEN-MELDING] the owner was not told — the document stays waiting", {
+        documentId: stored?.documentId ?? null, invoiceId: booked.id, error: bel.error,
+      })
+    }
   }
 
   // [ONTVANGEN] The LAST write of a stored run: say what the document turned out to be, as a
@@ -1644,13 +1665,20 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
   // WAITING, and the next pass walks the same road and finds every step already done. Writing the
   // final state earlier would end that: the retry would stop at "completed elsewhere" while the
   // steps after the crash had never run.
+  if (stored && !ownerWasTold) {
+    // Everything financial is done and idempotent; only the bell is missing. Leaving the document
+    // WAITING is what makes the next pass ring it — and that pass replays a road on which nothing
+    // can happen twice, so the cost of coming back is one more read of durable state.
+    return json({ error: "De melding kon niet worden opgeslagen — we proberen het zo opnieuw." }, { status: 503 })
+  }
+
   if (stored) {
     const finished = await updateClassification(
       stored.documentId, user.id, stored.expectedAiDocType,
       {
         doc_type: "factuur",
         folder_id: folderId,
-        year: invoiceDate ? new Date(invoiceDate).getFullYear() : null,
+        year: placementYear(invoiceDate),
         ai_processed: true,
         ai_doc_type: decision.destination === "receipt" ? "receipt" : "invoice",
       },

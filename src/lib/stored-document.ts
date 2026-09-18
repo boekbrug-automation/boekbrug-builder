@@ -55,6 +55,15 @@ export interface StoredDocument {
    * to invent a folder would move a file the owner may already have found in Bestanden.
    */
   folderId: string | null
+  /**
+   * Which door this document came in through, as the handoff recorded it.
+   *
+   * Read from the row and never taken from the caller: `source` describes the RECEIVED document —
+   * it is identity, the same as the file name and the hash — and a background pass that accepted
+   * it as an argument could label a camera photo an upload months later, in the audit trail and in
+   * the row, with nothing to contradict it.
+   */
+  source: string
   /** What the owner chose at upload time — see intake-intent.ts. */
   intent: IntakeIntent
   contentHash: string | null
@@ -78,7 +87,7 @@ export type StoredDocumentLoad =
 
 /** The columns the processor actually reads. Named once so the query and the type cannot drift. */
 const COLUMNS =
-  "id, user_id, file_url, file_name, file_type, folder_id, ai_doc_type, content_hash, " +
+  "id, user_id, file_url, file_name, file_type, folder_id, source, ai_doc_type, content_hash, " +
   "intake_paid_method, intake_paid_date, duplicate_decision, duplicate_candidate_invoice_id, " +
   "intake_retry_after"
 
@@ -89,6 +98,7 @@ type Row = {
   file_name: string | null
   file_type: string | null
   folder_id?: string | null
+  source?: string | null
   ai_doc_type: string | null
   content_hash: string | null
   intake_paid_method?: string | null
@@ -226,6 +236,7 @@ export async function loadStoredDocument(
       fileName: row.file_name ?? "document",
       fileType: row.file_type ?? "application/octet-stream",
       folderId: row.folder_id ?? null,
+      source: (row.source ?? "").trim(),
       intent: intentFromStoredDocument(row),
       contentHash: row.content_hash ?? null,
       waitingState: row.ai_doc_type ?? "",

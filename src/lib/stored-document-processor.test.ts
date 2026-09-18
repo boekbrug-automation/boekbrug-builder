@@ -35,6 +35,12 @@ import { STORED_DOCUMENT_CLAIM_TTL_MS } from "./stored-document-claim"
 const OWNER = "11111111-1111-1111-1111-111111111111"
 const DOCUMENT = "33333333-3333-3333-3333-333333333333"
 const PATH = `${OWNER}/incoming/1758000000000-bon.pdf`
+/** The invoice date the reader finds on the paper. The folder and the year both hang off it. */
+const INVOICE_DATE = "2026-03-15"
+/** Where RECEIVE filed it: "Geïmporteerde bestanden", which is NOT where a booked invoice lives. */
+const RECEIVE_FOLDER = "folder-geimporteerd"
+/** What resolveImportTarget answers for that date — facturen/2026/Q1. */
+const FINAL_FOLDER = "folder-facturen-2026-Q1"
 /** Older than STORED_DOCUMENT_CLAIM_TTL_MS: the age at which a dead worker's claim may be taken. */
 const STALE_MS = STORED_DOCUMENT_CLAIM_TTL_MS + 60_000
 
@@ -58,6 +64,12 @@ class World {
   cashReconciles = 0
   bankConfirms = 0
   nextId = 1
+  /** Set to make the notifications INSERT fail the way a transient database problem does. */
+  notifyFails = false
+  /** Every (date) the final placement was resolved for — proof both roads ask the same question. */
+  folderLookups: Array<string | null> = []
+  /** The `source` the door was handed — read from the row, never from the caller. */
+  doorSawSource: string | null = null
 
   table(name: string): Row[] {
     switch (name) {
@@ -119,6 +131,9 @@ class World {
                 return { data: [], error: { code: "23505", message: "uq_invoices_document_id" } }
               }
               // The bell boundary: one event, at most one row.
+              if (name === "notifications" && world.notifyFails) {
+                return { data: [], error: { code: "08006", message: "connection failure" } }
+              }
               if (name === "notifications" && row.event_key != null &&
                   rows.some((r) => r.user_id === row.user_id && r.event_key === row.event_key)) {
                 return { data: [], error: { code: "23505", message: "uq_notifications_event_key" } }
@@ -188,7 +203,10 @@ type Step = (typeof STEPS)[number]
 
 function scriptedDoor(world: World, crashAfter: Step | null) {
   const stop = (done: Step) => { if (crashAfter === done) throw new Crash(`crashed after ${done}`) }
-  return async (ctx: { stored?: { documentId: string; expectedAiDocType: string; folderId: string | null } }) => {
+  return async (ctx: { stored?: { documentId: string; expectedAiDocType: string; folderId: string | null }; source?: string }) => {
+    // [ONTVANGEN] What the door was told this document IS. Recorded so a test can prove it came
+    // from the row and not from whoever started the run.
+    if (ctx.source) world.doorSawSource = ctx.source
     const stored = ctx.stored!
     const doc = world.documents.find((d) => d.id === stored.documentId)!
 
@@ -207,7 +225,14 @@ function scriptedDoor(world: World, crashAfter: Step | null) {
     const { data: made, error } = await world.from("invoices").insert({
       receiver_id: OWNER, direction: "incoming", status: "received",
       document_id: stored.documentId, client_name: "Leverancier", invoice_number: "F-1",
-      field_confidence: { _auto_paid: { method: "kas", date: "2026-09-18" }, _intake_kind: "receipt" },
+      invoice_date: INVOICE_DATE,
+      field_confidence: {
+        // The auto road was taken: this is what tells a resume that a bell, a reconcile and a
+        // settlement were part of the original run rather than things it is inventing.
+        _auto_verified: { at: "2026-09-18T10:00:00.000Z", reason: "clean" },
+        _auto_paid: { method: "kas", date: "2026-09-18" },
+        _intake_kind: "receipt",
+      },
     }).select().run()
     let invoiceId: string
     if (error?.code === "23505") {
@@ -242,8 +267,12 @@ function scriptedDoor(world: World, crashAfter: Step | null) {
     }).run()
     stop("notification")
 
-    // 9. And only now the final state, as a compare-and-set on what this run loaded.
-    await world.from("documents").update({ ai_doc_type: "receipt", ai_processed: true })
+    // 9. And only now the final state, as a compare-and-set on what this run loaded. The fresh
+    // road files a booked invoice under facturen/<year>, resolved from the invoice date — NOT
+    // where receive put the file.
+    world.folderLookups.push(INVOICE_DATE)
+    await world.from("documents")
+      .update({ ai_doc_type: "receipt", ai_processed: true, folder_id: FINAL_FOLDER, year: 2026 })
       .eq("id", stored.documentId).eq("user_id", OWNER)
       .eq("ai_doc_type", stored.expectedAiDocType).run()
     stop("final_state")
@@ -256,8 +285,9 @@ function freshWorld(): World {
   const w = new World()
   w.documents.push({
     id: DOCUMENT, user_id: OWNER, file_url: PATH, file_name: "bon.pdf", file_type: "application/pdf",
-    folder_id: "folder-maart", ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN, ai_processed: false,
-    content_hash: "abc123", invoice_id: null, intake_ai_counted_period: null,
+    folder_id: RECEIVE_FOLDER, source: "camera",
+    ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN, ai_processed: false,
+    content_hash: "abc123", invoice_id: null, intake_ai_counted_period: null, year: null,
   })
   w.blobs.set(PATH, "%PDF-1.4 de bon")
   return w
@@ -266,7 +296,7 @@ function freshWorld(): World {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function runOnce(world: World, crashAfter: Step | null): Promise<any> {
   return processStoredDocument({
-    documentId: DOCUMENT, ownerId: OWNER, mode: "fresh_intake", trigger: "drain", source: "upload",
+    documentId: DOCUMENT, ownerId: OWNER, mode: "fresh_intake", trigger: "drain",
     deps: {
       pipeline: world,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -276,7 +306,15 @@ function runOnce(world: World, crashAfter: Step | null): Promise<any> {
           user_id: args.userId, title: args.title, type: args.type, event_key: args.eventKey ?? null,
         }).run()
         if (error?.code === "23505") return { ok: true, error: null, duplicate: true }
+        if (error) return { ok: false, error: error.message ?? null }
         return { ok: true, error: null }
+      },
+      // The same call the fresh road makes, seamed only so this test can run without a database.
+      // That both roads really make THAT call, with the invoice's own date, is [ONTVANGEN-PLAATS]
+      // in lifecycle-gates.test.ts.
+      resolveFolder: async (_userId: string, invoiceDate: string | null) => {
+        world.folderLookups.push(invoiceDate)
+        return invoiceDate === INVOICE_DATE ? FINAL_FOLDER : RECEIVE_FOLDER
       },
       reconcileCash: async () => { world.cashReconciles += 1 },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -298,13 +336,23 @@ function tally(world: World) {
     documents: world.documents.filter((d) => d.id === DOCUMENT).length,
     blob: world.blobs.has(PATH),
     finalState: world.documents.find((d) => d.id === DOCUMENT)?.ai_doc_type,
+    folder: world.documents.find((d) => d.id === DOCUMENT)?.folder_id,
+    year: world.documents.find((d) => d.id === DOCUMENT)?.year,
   }
 }
 
 // ── The matrix ────────────────────────────────────────────────────────────────────────────────
 
+/** What an uninterrupted run leaves behind. Everything below must converge to exactly this. */
+async function cleanRun() {
+  const world = freshWorld()
+  await runOnce(world, null)
+  return tally(world)
+}
+
 for (const checkpoint of STEPS) {
   test(`[ONTVANGEN-CRASH] killed after ${checkpoint}, then run again: one of everything`, async () => {
+    const clean = await cleanRun()
     const world = freshWorld()
 
     // The run that dies.
@@ -342,6 +390,17 @@ for (const checkpoint of STEPS) {
     assert.ok(t.blob, "the bytes survive")
     assert.equal(t.finalState, "receipt", "the final state converges")
 
+    // [ONTVANGEN-PLAATS] …and so does WHERE it ends up. A crash that leaves the same money in a
+    // different folder or a different year is a document the accountant cannot find, with no cent
+    // wrong and nothing failing. `doc.folderId` is where RECEIVE put the file; the booked invoice
+    // belongs under facturen/<year>, resolved from the invoice's own date on both roads.
+    assert.equal(t.folder, clean.folder,
+      `folder after crash/retry (${t.folder}) differs from an uninterrupted run (${clean.folder})`)
+    assert.equal(t.year, clean.year,
+      `year after crash/retry (${t.year}) differs from an uninterrupted run (${clean.year})`)
+    assert.notEqual(t.folder, RECEIVE_FOLDER,
+      "the booked invoice was left in the receive folder — the resume used doc.folderId")
+
     // [ONTVANGEN-CRASH] And the assertion that is about COST rather than correctness: once the
     // invoice exists, the retry must not pay for a read whose answer is already on the row.
     if (STEPS.indexOf(checkpoint) >= STEPS.indexOf("invoice")) {
@@ -377,6 +436,81 @@ test("[ONTVANGEN-CRASH] two workers that both reach the insert still produce one
   assert.equal(t.bells, 1, "…and one bell")
   assert.equal(t.charged, 1, "…and one document off the month's allowance")
   assert.equal(world.readerCalls, 2, "both really did read — this is a race, not a queue")
+})
+
+test("[ONTVANGEN-MELDING] a bell that could not be written leaves the document waiting", async () => {
+  // The order exists for this case. Everything financial is done and idempotent; only the bell is
+  // missing. Writing the final state anyway would take the document out of the queue with no
+  // notification — and nothing would ever look at it again, so the owner would simply never learn
+  // that their invoice was booked.
+  const clean = await cleanRun()
+  const world = freshWorld()
+
+  // A crashed run that got as far as the invoice, so the retry takes the resume road.
+  world.claims.push({
+    id: "claim-dood", user_id: OWNER, claim_key: `doc:${DOCUMENT}`,
+    created_at: new Date(Date.now() - STALE_MS).toISOString(),
+  })
+  await assert.rejects(
+    () => scriptedDoor(world, "invoice")({
+      stored: { documentId: DOCUMENT, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN, folderId: RECEIVE_FOLDER },
+    }),
+    Crash,
+  )
+
+  // First retry: the notifications table refuses the write.
+  world.notifyFails = true
+  await runOnce(world, null)
+
+  const halverwege = tally(world)
+  assert.equal(halverwege.bells, 0, "nothing was written")
+  assert.equal(
+    world.documents.find((d) => d.id === DOCUMENT)?.ai_doc_type, DOC_TYPE_WACHT_OP_LEZEN,
+    "the document must still be WAITING — a final state here is a document nobody comes back to",
+  )
+  assert.ok(halverwege.invoices <= 1 && halverwege.payments <= 1,
+    "…and the money that was already done stays done exactly once")
+
+  // Second retry: the table answers.
+  world.notifyFails = false
+  const readerBefore = world.readerCalls
+  const again = await runOnce(world, null)
+  const t = tally(world)
+
+  assert.equal(again.kind, "resumed")
+  assert.equal(t.bells, 1, "exactly one notification")
+  assert.equal(t.finalState, "receipt", "the final state converges")
+  assert.equal(t.folder, clean.folder, "…in the same folder as an uninterrupted run")
+  assert.equal(t.year, clean.year, "…and the same year")
+  assert.equal(world.readerCalls - readerBefore, 0, "and it never paid for the read again")
+  assert.ok(t.invoices <= 1 && t.payments <= 1 && t.charged <= 1, "money still ≤ 1 of everything")
+})
+
+test("[ONTVANGEN] the source the processor is handed comes from the row, not from the caller", async () => {
+  // `source` describes the RECEIVED document — it is identity, like the file name and the hash.
+  // There is no source argument on the orchestrator at all; a camera photo stays a camera photo
+  // however the run that reads it was started.
+  const world = freshWorld()
+  await runOnce(world, null)
+  assert.equal(world.doorSawSource, "camera")
+
+  const other = freshWorld()
+  other.documents[0].source = "upload"
+  await runOnce(other, null)
+  assert.equal(other.doorSawSource, "upload")
+})
+
+test("[ONTVANGEN] a document from another door is refused, never processed", async () => {
+  // An e-mail attachment has its own pipeline, its own dedup and its own supplier resolution.
+  // Running it through this one would book it a second time under a second set of rules.
+  const world = freshWorld()
+  world.documents[0].source = "email"
+  const r = await runOnce(world, null)
+  assert.equal(r.kind, "wrong_door")
+  assert.equal(r.kind === "wrong_door" ? r.source : "", "email")
+  assert.equal(world.readerCalls, 0, "nothing was read")
+  assert.equal(world.invoices.length, 0, "and nothing was booked")
+  assert.equal(world.claims.length, 0, "…and the claim it took was given back")
 })
 
 // ── The two refusals that must not start any work ─────────────────────────────────────────────

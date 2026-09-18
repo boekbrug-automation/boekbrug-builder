@@ -124,6 +124,21 @@ export async function insertClassifiedDocument(
  *                           "our own write landed and then we crashed" and "somebody else
  *                           concluded something else". Neither is a retry, and neither is an error.
  */
+/**
+ * [ONTVANGEN] The year a classified invoice document is filed under.
+ *
+ * One expression, two callers: the run that reads the document and the run that RESUMES after it
+ * crashed. Both must produce the same number, or a crash changes where an owner finds their bill
+ * without changing a cent — the kind of difference nobody notices until an accountant asks for the
+ * year and half of it is in the wrong folder.
+ *
+ * Derived from the invoice date and nothing else. A document whose date could not be read has no
+ * year, and null is the honest answer: the folder it lands in says the same thing.
+ */
+export function placementYear(invoiceDate: string | null): number | null {
+  return invoiceDate ? new Date(invoiceDate).getFullYear() : null
+}
+
 export type ClassifyOutcome =
   | { kind: "placed"; documentId: string }
   | { kind: "gone" }

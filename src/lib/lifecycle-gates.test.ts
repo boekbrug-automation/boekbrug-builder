@@ -36872,3 +36872,115 @@ test("[ONTVANGEN-VOLGORDE] nothing on the stored path removes the owner's file",
     )
   }
 })
+
+// ── [ONTVANGEN-MELDING] The bell stands BEFORE the final state, and holds it ──────────────────
+//
+// The order is not decoration. Everything financial on the stored road is idempotent, so a crash
+// anywhere in it leaves the document WAITING and the next pass finishes what is missing. The
+// notification is the last thing that is not money — and if it fails while the final state lands
+// anyway, the document leaves the queue with no bell, nothing looks at it again, and the owner
+// simply never learns that their invoice was booked.
+//
+// The crash matrix drives a script for the fresh road (it needs a reader, a model and a database
+// to reach any of it), so this half is asserted on the source.
+
+test("[ONTVANGEN-MELDING] a bell that did not get written holds back the final state", () => {
+  const door = codeFile("src/lib/intake-processor.ts")
+
+  // The result is read at all…
+  assert.match(door, /const bel = await createNotification\(/,
+    "[ONTVANGEN-MELDING] the notification result is discarded again — a failed bell is invisible")
+  assert.match(door, /if \(!bel\.ok\) \{[\s\S]{0,400}ownerWasTold = false/,
+    "[ONTVANGEN-MELDING] a failed notification must be recorded, not logged and forgotten")
+
+  // …and it stands before the final classification, with a RETURN between them.
+  const guard = door.indexOf("if (stored && !ownerWasTold)")
+  const finalCas = door.indexOf("const finished = await updateClassification(")
+  assert.ok(guard > -1, "[ONTVANGEN-MELDING] the guard that holds back the final state is gone")
+  assert.ok(finalCas > guard,
+    "[ONTVANGEN-MELDING] the final state is written before the bell is checked — a document can " +
+      "now leave the queue with no notification and nothing to bring it back")
+  assert.match(door.slice(guard, finalCas), /return json\(/,
+    "[ONTVANGEN-MELDING] the guard must END the run; falling through writes the state anyway")
+
+  // And the same rule on the resume road, where the crash matrix CAN see it — asserted here too
+  // so the two halves cannot drift apart silently.
+  const resume = codeFile("src/lib/stored-document-processor.ts")
+  const bell = resume.indexOf("if (!bel.ok)")
+  const resumeCas = resume.indexOf("const finished = await updateClassification(")
+  assert.ok(bell > -1 && resumeCas > bell,
+    "[ONTVANGEN-MELDING] the resume writes its final state before checking the bell")
+  assert.match(resume.slice(bell, resumeCas), /\n      return\n/,
+    "[ONTVANGEN-MELDING] the resume's guard must end the pass")
+})
+
+// ── [ONTVANGEN-PLAATS] A crash may not move the document ──────────────────────────────────────
+//
+// A booked invoice document lives under facturen/<year>, derived from the invoice date. Where
+// RECEIVE put the file — "Geïmporteerde bestanden" — is a different folder, and a resume that
+// wrote THAT would leave the same money in two different places depending on whether a process
+// happened to die. No cent wrong, and the document nowhere the accountant looks.
+//
+// The unit test proves convergence given a seam; this proves the seam is wired to the same real
+// call, with the same argument, on both roads.
+
+test("[ONTVANGEN-PLAATS] both roads resolve the placement from the invoice's own date", () => {
+  const fresh = code("src/app/api/intake/route.ts")     // DOOR_HALVES: route + intake-processor
+  const resume = codeFile("src/lib/stored-document-processor.ts")
+
+  assert.match(fresh, /resolveImportTarget\(user\.id, invoiceDate, "facturen", "pipeline"\)/,
+    "[ONTVANGEN-PLAATS] the fresh road no longer resolves the placement the way this gate reads it")
+  assert.match(resume, /resolveFolder\(ownerId, invoiceDate, "facturen", "pipeline"\)/,
+    "[ONTVANGEN-PLAATS] the resume must ask the SAME question, with the invoice's own date")
+  assert.match(resume, /const resolveFolder = args\.deps\?\.resolveFolder \?\? resolveImportTarget/,
+    "[ONTVANGEN-PLAATS] the seam must default to the real call — a test-only folder is no folder")
+  assert.match(resume, /invoice_date/,
+    "[ONTVANGEN-PLAATS] the resume must read the date off the invoice it found")
+  assert.doesNotMatch(resume, /folder_id: doc\.folderId/,
+    "[ONTVANGEN-PLAATS] the resume is filing a booked invoice where RECEIVE put the raw file")
+
+  // The year is one expression with one owner, so the two roads cannot answer differently.
+  assert.match(fresh, /year: placementYear\(invoiceDate\)/)
+  assert.match(resume, /year: placementYear\(invoiceDate\)/)
+  assert.equal(
+    (codeFile("src/lib/document-placement.ts").match(/export function placementYear\(/g) ?? []).length, 1,
+    "[ONTVANGEN-PLAATS] the year derivation has two owners again",
+  )
+
+  // And a placement that could not be resolved does not become an invented one.
+  const fallback = resume.indexOf("} catch (e) {", resume.indexOf("resolveFolder(ownerId"))
+  assert.ok(fallback > -1, "[ONTVANGEN-PLAATS] the failed-placement arm is gone")
+  assert.match(resume.slice(fallback, fallback + 500), /return/,
+    "[ONTVANGEN-PLAATS] a placement we could not resolve must leave the document waiting")
+})
+
+// ── [ONTVANGEN-GRENS] The structured doors stay where they are ────────────────────────────────
+//
+// Receive-first is for the human PDF/photo road. Bank files, spreadsheets, daily-sales PDFs and
+// UBL e-invoices each have a specialised synchronous path with their own parsing, their own guards
+// and their own verify-queue behaviour. Moving them onto the generic stored processor for symmetry
+// would mean reimplementing all of that, and reimplementing it is how the two copies disagree
+// about the same file.
+
+test("[ONTVANGEN-GRENS] a UBL e-invoice still goes to its own handler, and never to the stored road", () => {
+  const route = codeFile("src/app/api/intake/route.ts")
+
+  // The XML branch is still there, still asks the CONTENT, and still returns before anything else.
+  const branch = route.indexOf("looksLikeUblInvoice(xmlText)")
+  const ubl = route.indexOf("handleUblInvoice(xmlText,")
+  const generic = route.indexOf("processIntakeDocument(")
+  assert.ok(branch > -1, "[ONTVANGEN-GRENS] the UBL content check is gone")
+  assert.ok(ubl > branch, "[ONTVANGEN-GRENS] the UBL branch no longer calls its own handler")
+  assert.ok(generic > ubl,
+    "[ONTVANGEN-GRENS] the UBL branch must be decided BEFORE the generic reader road")
+  assert.match(route.slice(ubl, generic), /if \(ublResp\) return ublResp/,
+    "[ONTVANGEN-GRENS] the UBL answer must END the request, or the file falls through to the " +
+      "generic road and is booked a second time under a second set of rules")
+
+  // And the stored road holds no copy of any of it.
+  for (const path of ["src/lib/intake-processor.ts", "src/lib/stored-document-processor.ts"]) {
+    const src = codeFile(path)
+    assert.doesNotMatch(src, /looksLikeUblInvoice|handleUblInvoice|ubl-invoice/,
+      `${path} has grown UBL logic of its own — two parsers for one file is how they disagree`)
+  }
+})

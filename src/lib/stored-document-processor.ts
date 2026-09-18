@@ -42,11 +42,16 @@ import {
   loadStoredDocument, autoFinishedEventKey,
   type ProcessMode, type StoredDocument,
 } from "@/lib/stored-document"
-import { findInvoiceForDocument, linkDocumentToInvoice, updateClassification } from "@/lib/document-placement"
+import {
+  findInvoiceForDocument, linkDocumentToInvoice, updateClassification, placementYear,
+} from "@/lib/document-placement"
 import { autoSettlementKey } from "@/lib/settlement-key"
 import { deriveFileFacts } from "@/lib/intake-derived"
+import { resolveImportTarget } from "@/lib/bestanden"
 import { planForUser } from "@/lib/fair-use-gate"
-import { processIntakeDocument, type IntakeOutcome, type IntakeSource } from "@/lib/intake-processor"
+import {
+  processIntakeDocument, INTAKE_SOURCES, type IntakeOutcome, type IntakeSource,
+} from "@/lib/intake-processor"
 import type { BackgroundTrigger } from "@/lib/intake-provenance"
 import { createNotification } from "@/lib/notifications"
 import { reconcileCashWithRetry } from "@/lib/cash-settle"
@@ -73,6 +78,15 @@ export type StoredRunResult =
   | { kind: "paused"; until: string | null }
   /** The row says a file is stored and storage disagrees. Retrying cannot fix that. */
   | { kind: "bytes_missing"; storagePath: string }
+  /**
+   * The document came in through a door this processor does not serve.
+   *
+   * `documents.source` is production data with three values — camera, upload and email — and only
+   * the first two are the intake door. An e-mail attachment has its own pipeline, its own dedup and
+   * its own supplier resolution; running it through this one would book it a second time under a
+   * second set of rules. Never a retry: the value is durable and will say the same thing tomorrow.
+   */
+  | { kind: "wrong_door"; source: string }
 
 /**
  * The seams a crash test needs, and nothing more.
@@ -88,6 +102,7 @@ export interface StoredRunDeps {
   notify?: typeof createNotification
   reconcileCash?: typeof reconcileCashWithRetry
   bankConfirm?: typeof runBankAutoConfirm
+  resolveFolder?: typeof resolveImportTarget
   now?: Date
 }
 
@@ -104,11 +119,14 @@ export async function processStoredDocument(args: {
   documentId: string
   ownerId: string
   mode: ProcessMode
+  /**
+   * How this run was STARTED — execution provenance, which is the caller's to know and nothing to
+   * do with what the document is. It travels into the audit rows and nowhere else.
+   */
   trigger: BackgroundTrigger
-  source: IntakeSource
   deps?: StoredRunDeps
 }): Promise<StoredRunResult> {
-  const { documentId, ownerId, mode, trigger, source } = args
+  const { documentId, ownerId, mode, trigger } = args
   const pipeline = args.deps?.pipeline ?? createPipelineClient()
   const now = args.deps?.now ?? new Date()
 
@@ -129,6 +147,16 @@ export async function processStoredDocument(args: {
       case "unavailable": return { kind: "unavailable" }
     }
     const doc = load.doc
+
+    // [ONTVANGEN] Everything that describes the RECEIVED document comes from the row. `source` is
+    // identity — it is in the audit trail and on the document card — so a caller cannot hand it in.
+    if (!(INTAKE_SOURCES as readonly string[]).includes(doc.source)) {
+      console.error("[ONTVANGEN] a stored document from another door reached the intake processor", {
+        documentId, source: doc.source,
+      })
+      return { kind: "wrong_door", source: doc.source }
+    }
+    const source = doc.source as IntakeSource
 
     // ── 3. Does this document already have an invoice? ───────────────────────────────────────
     const existing = await findInvoiceForDocument(documentId, ownerId, pipeline)
@@ -207,6 +235,7 @@ async function resumeStoredTail(args: {
   const notify = args.deps?.notify ?? createNotification
   const reconcileCash = args.deps?.reconcileCash ?? reconcileCashWithRetry
   const bankConfirm = args.deps?.bankConfirm ?? runBankAutoConfirm
+  const resolveFolder = args.deps?.resolveFolder ?? resolveImportTarget
 
   // The breadcrumb, best-effort and never a reason to do anything financial. A refusal here means
   // the document is already the evidence of a DIFFERENT invoice, which is a thing to see, not to
@@ -220,7 +249,7 @@ async function resumeStoredTail(args: {
 
   const { data: inv, error } = await pipeline
     .from("invoices")
-    .select("id, status, client_name, invoice_number, field_confidence")
+    .select("id, status, client_name, invoice_number, invoice_date, field_confidence")
     .eq("id", invoiceId)
     .eq("receiver_id", ownerId)
     .maybeSingle()
@@ -233,53 +262,101 @@ async function resumeStoredTail(args: {
     return
   }
 
-  // [BON-AUTO] Whether this invoice was MEANT to settle itself is written on the invoice, by the
-  // run that created it, in the same insert — so it survives that run's death. Replaying the call
-  // is free: apply_manual_payment answers replayed=true on the same (client_key, user, invoice) and
-  // moves no money. If the crash happened BEFORE the payment, this is the call that finishes it.
-  const paid = (inv.field_confidence as { _auto_paid?: { method?: string; date?: string } } | null)?._auto_paid
-  if (paid?.method && paid?.date) {
-    const { error: settleErr } = await pipeline.rpc("apply_manual_payment", {
-      p_user_id: ownerId,
-      p_invoice_id: invoiceId,
-      p_amount: null,
-      p_pay_date: paid.date,
-      p_method: paid.method,
-      p_payable_statuses: ["received"],
-      p_client_key: autoSettlementKey(doc.id),
-    })
-    if (settleErr) {
-      console.error("[ONTVANGEN] resume could not replay the receipt settlement", {
-        documentId: doc.id, invoiceId, error: settleErr.message,
+  const fc = (inv.field_confidence ?? null) as {
+    _auto_verified?: unknown
+    _auto_paid?: { method?: string; date?: string }
+    _intake_kind?: string
+  } | null
+
+  // [ONTVANGEN] Did the run that created this invoice take the AUTO road, or did it leave the
+  // invoice in the verify queue for a human?
+  //
+  // The whole tail hangs off that, and it must hang off it here exactly as it does there — a bon
+  // that was never going to settle itself, never going to move the drawer and never going to ring
+  // a bell must not acquire all three merely because the worker that booked it died. `_auto_verified`
+  // is written into the SAME insert that creates the invoice, so it survives that death.
+  const autoVerified = fc?._auto_verified != null
+  if (autoVerified) {
+    // [BON-AUTO] Whether this invoice was MEANT to settle itself is written on the invoice, by the
+    // run that created it, in the same insert. Replaying the call is free: apply_manual_payment
+    // answers replayed=true on the same (client_key, user, invoice) and moves no money. If the
+    // crash happened BEFORE the payment, this is the call that finishes it.
+    const paid = fc?._auto_paid
+    let settled = false
+    if (paid?.method && paid?.date) {
+      const { error: settleErr } = await pipeline.rpc("apply_manual_payment", {
+        p_user_id: ownerId,
+        p_invoice_id: invoiceId,
+        p_amount: null,
+        p_pay_date: paid.date,
+        p_method: paid.method,
+        p_payable_statuses: ["received"],
+        p_client_key: autoSettlementKey(doc.id),
       })
+      if (settleErr) {
+        console.error("[ONTVANGEN] resume could not replay the receipt settlement", {
+          documentId: doc.id, invoiceId, error: settleErr.message,
+        })
+      } else {
+        settled = true
+      }
     }
+    // Same order as the fresh tail: the kasboek entry exists before the drawer is reconciled.
     await reconcileCash(pipeline, ownerId)
     try { await bankConfirm({ payClient: pipeline, pipeline, userId: ownerId }) } catch { /* non-fatal */ }
+
+    // The bell. Its event key is what makes this safe to call on every resume: the run that already
+    // rang it wrote the same key, so this one writes nothing and sends no second push.
+    const bel = await notify({
+      userId: ownerId,
+      title: settled ? "Bon automatisch verwerkt en afgeboekt" : "Factuur automatisch verwerkt",
+      body: `${inv.client_name || "Een leverancier"} — ${inv.invoice_number ?? ""} is automatisch verwerkt en geboekt.`.replace(/ {2,}/g, " "),
+      type: "invoice",
+      link: `/dashboard/incoming/manage?focus=${invoiceId}`,
+      eventKey: autoFinishedEventKey(doc.id),
+    })
+    // [ONTVANGEN-MELDING] Not finalising is the whole point of the bell standing before the final
+    // state. A document that leaves the queue with no bell is one nothing will look at again, and
+    // an owner who is never told their invoice was booked.
+    if (!bel.ok) {
+      console.error("[ONTVANGEN-MELDING] resume could not tell the owner — the document stays waiting", {
+        documentId: doc.id, invoiceId, error: bel.error,
+      })
+      return
+    }
   }
 
-  // The bell. Its event key is what makes this safe to call on every resume: the run that already
-  // rang it wrote the same key, so this one writes nothing and sends no second push.
-  await notify({
-    userId: ownerId,
-    title: paid?.method ? "Bon automatisch verwerkt en afgeboekt" : "Factuur automatisch verwerkt",
-    body: `${inv.client_name || "Een leverancier"} — ${inv.invoice_number ?? ""} is verwerkt.`.replace(/ {2,}/g, " "),
-    type: "invoice",
-    link: `/dashboard/incoming/manage?focus=${invoiceId}`,
-    eventKey: autoFinishedEventKey(doc.id),
-  })
+  // [ONTVANGEN] The final placement, rebuilt from the INVOICE and not from where the handoff
+  // happened to put the file.
+  //
+  // The fresh road files a booked invoice under facturen/<year>/<quarter>, derived from the
+  // invoice date. `doc.folderId` is where RECEIVE put it — "Geïmporteerde bestanden" — and writing
+  // that here would mean a crash and a clean run leave the same money in two different folders,
+  // with no cent wrong and the document nowhere the accountant looks. Same call, same date, same
+  // year helper as the fresh road, so the two cannot answer differently.
+  const invoiceDate = (inv.invoice_date ?? null) as string | null
+  let folderId: string
+  try {
+    folderId = await resolveFolder(ownerId, invoiceDate, "facturen", "pipeline")
+  } catch (e) {
+    // No invented folder, and no declared ending. The document stays waiting and the next pass
+    // rebuilds the same placement — which is recoverable, where a wrong folder is silent.
+    console.error("[ONTVANGEN] resume could not resolve the final folder — leaving the document waiting", {
+      documentId: doc.id, invoiceId, error: e instanceof Error ? e.message : String(e),
+    })
+    return
+  }
 
-  // And only now the final state, as a compare-and-set on the state this run loaded.
   const finished = await updateClassification(
     doc.id, ownerId, doc.waitingState,
     {
       doc_type: "factuur",
-      folder_id: doc.folderId,
+      folder_id: folderId,
+      year: placementYear(invoiceDate),
       ai_processed: true,
       // What it IS was decided by the run that booked the invoice. A resume does not re-decide it;
       // it reads it off the row that already carries the answer.
-      ai_doc_type: (inv.field_confidence as { _intake_kind?: string } | null)?._intake_kind === "receipt"
-        ? "receipt"
-        : "invoice",
+      ai_doc_type: fc?._intake_kind === "receipt" ? "receipt" : "invoice",
     },
     pipeline,
   )
