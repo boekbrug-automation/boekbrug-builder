@@ -30,6 +30,7 @@ import { processStoredDocument } from "./stored-document-processor"
 import { autoSettlementKey } from "./settlement-key"
 import { autoFinishedEventKey } from "./stored-document"
 import { DOC_TYPE_WACHT_OP_LEZEN } from "./skipped-import"
+import { selectDrainCandidates, runIntakeDrain } from "./intake-drain"
 import { STORED_DOCUMENT_CLAIM_TTL_MS } from "./stored-document-claim"
 
 const OWNER = "11111111-1111-1111-1111-111111111111"
@@ -86,12 +87,19 @@ class World {
     const world = this as World
     const build = (op: "select" | "insert" | "update" | "delete", payload?: Row) => {
       const filters: Array<[string, unknown]> = []
+      // The membership filter the drain selects with, and the ordering it relies on. Modelled
+      // rather than stubbed: a fake that ignored `.in` would let a drain test pass while the
+      // e-mail rows it must never pick up were being handed straight to the processor.
+      const members: Array<[string, unknown[]]> = []
+      let cap = Infinity
       const q = {
         eq: (c: string, v: unknown) => { filters.push([c, v]); return q },
         is: (c: string, v: unknown) => { filters.push([c, v]); return q },
         neq: (c: string, v: unknown) => { filters.push([`!${c}`, v]); return q },
+        in: (c: string, v: unknown[]) => { members.push([c, v]); return q },
+        order: () => q,
         lt: () => q,
-        limit: () => q,
+        limit: (n: number) => { cap = n; return q },
         select: () => q,
         maybeSingle: async () => {
           const { data, error } = await q.run()
@@ -107,8 +115,9 @@ class World {
           await Promise.resolve()
           const match = (r: Row) => filters.every(([c, v]) =>
             c.startsWith("!") ? r[c.slice(1)] !== v : (v === null ? (r[c] ?? null) === null : r[c] === v))
+            && members.every(([c, vs]) => vs.includes(r[c] as never))
           switch (op) {
-            case "select": return { data: rows.filter(match), error: null }
+            case "select": return { data: rows.filter(match).slice(0, cap), error: null }
             case "update": {
               const hit = rows.filter(match)
               for (const r of hit) Object.assign(r, payload)
@@ -288,6 +297,7 @@ function freshWorld(): World {
     folder_id: RECEIVE_FOLDER, source: "camera",
     ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN, ai_processed: false,
     content_hash: "abc123", invoice_id: null, intake_ai_counted_period: null, year: null,
+    intake_retry_after: null, created_at: "2026-09-18T09:00:00Z",
   })
   w.blobs.set(PATH, "%PDF-1.4 de bon")
   return w
@@ -321,6 +331,14 @@ function runOnce(world: World, crashAfter: Step | null): Promise<any> {
       bankConfirm: (async () => { world.bankConfirms += 1 }) as any,
     },
   })
+}
+
+/** The same run, addressed the way the drain addresses it. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function runOnceAs(world: World, crashAfter: Step | null, args: { documentId: string; ownerId: string }): Promise<any> {
+  assert.equal(args.documentId, DOCUMENT)
+  assert.equal(args.ownerId, OWNER)
+  return runOnce(world, crashAfter)
 }
 
 /** Everything the owner's list asks to be at most one of. */
@@ -511,6 +529,64 @@ test("[ONTVANGEN] a document from another door is refused, never processed", asy
   assert.equal(world.readerCalls, 0, "nothing was read")
   assert.equal(world.invoices.length, 0, "and nothing was booked")
   assert.equal(world.claims.length, 0, "…and the claim it took was given back")
+})
+
+// ── [ONTVANGEN-CUTOVER] The browser is gone, and the promise still holds ──────────────────────
+
+test("[ONTVANGEN-CUTOVER] the browser dies, the kick never starts, and the drain finishes the job", async () => {
+  // The whole point of receive-first: the bytes and the row are durable, the owner has been told,
+  // and the immediate worker never ran — a cold start that lost it, a platform that dropped it, a
+  // process killed the instant the response flushed. Nothing about the document says so.
+  const clean = await cleanRun()
+  const world = freshWorld()
+
+  // No kick. The document simply sits there in wacht_op_lezen, exactly as the handoff left it.
+  assert.equal(world.documents[0].ai_doc_type, DOC_TYPE_WACHT_OP_LEZEN)
+  assert.equal(world.invoices.length, 0)
+  assert.equal(world.readerCalls, 0)
+
+  // Later, the drain comes past. It is a different trigger and a different mode, and it walks the
+  // same road.
+  const picked = await selectDrainCandidates({ pipeline: world, now: new Date() })
+  assert.deepEqual(picked.map((c) => c.documentId), [DOCUMENT],
+    "a document whose kick never ran must be visible to the drain")
+
+  await runIntakeDrain({
+    pipeline: world, now: new Date(),
+    run: (async (args: { documentId: string; ownerId: string }) =>
+      runOnceAs(world, null, args)),
+  })
+
+  const t = tally(world)
+  assert.equal(t.invoices, 1, "invoice ≤ 1")
+  assert.equal(t.charged, 1, "AI allowance charge ≤ 1")
+  assert.equal(t.payments, 1)
+  assert.equal(t.bells, 1)
+  assert.equal(t.finalState, clean.finalState, "and it converges to what an uninterrupted run leaves")
+  assert.equal(t.folder, clean.folder)
+  assert.equal(t.year, clean.year)
+})
+
+test("[ONTVANGEN-CUTOVER] the kick and the drain reach the same document — one of them runs", async () => {
+  // Both are alive, both start, and neither knows about the other. The claim is what separates
+  // them; the durable guards are what make the loser's arrival harmless either way.
+  const world = freshWorld()
+  const [a, b] = await Promise.all([
+    runOnce(world, null),                                     // the after-receive kick
+    runOnce(world, null),                                     // the drain, a moment later
+  ])
+
+  const ran = [a, b].filter((r) => r.kind === "processed" || r.kind === "resumed")
+  const stood = [a, b].filter((r) => r.kind === "busy")
+  assert.equal(stood.length, 1, "exactly one of the two must be told to stand down")
+  assert.equal(ran.length, 1)
+
+  const t = tally(world)
+  assert.equal(t.invoices, 1, "one document, one invoice")
+  assert.equal(t.charged, 1)
+  assert.equal(t.payments, 1)
+  assert.equal(t.bells, 1)
+  assert.equal(world.readerCalls, 1, "and only one of them paid for the read")
 })
 
 // ── The two refusals that must not start any work ─────────────────────────────────────────────

@@ -39,9 +39,10 @@ import { createPipelineClient } from "@/lib/supabase-pipeline"
 import type { createServerSupabaseClient } from "@/lib/supabase-server"
 import { claimStoredDocument } from "@/lib/stored-document-claim"
 import {
-  loadStoredDocument, autoFinishedEventKey,
+  loadStoredDocument, autoFinishedEventKey, pauseDocumentForFairUse, holdForDuplicateDecision,
   type ProcessMode, type StoredDocument,
 } from "@/lib/stored-document"
+import { readStoredOutcome } from "@/lib/stored-outcome"
 import {
   findInvoiceForDocument, linkDocumentToInvoice, updateClassification, placementYear,
 } from "@/lib/document-placement"
@@ -64,6 +65,13 @@ import { runBankAutoConfirm } from "@/lib/bank-auto-confirm"
 export type StoredRunResult =
   /** The reader ran and the door answered. `outcome` is exactly what the interactive door returns. */
   | { kind: "processed"; outcome: IntakeOutcome }
+  /** The month's allowance refused the read. The document waits for the 1st; the owner is told once. */
+  | { kind: "paused"; until: string | null }
+  /**
+   * The reader found this invoice already booked from a DIFFERENT file, and only a human can say
+   * whether that is the same bill. The document now waits on the OWNER, and the drain leaves it.
+   */
+  | { kind: "owner_decision" }
   /** An invoice already existed. Nothing was read, nothing was charged, the tail was replayed. */
   | { kind: "resumed"; invoiceId: string }
   /** Another worker holds this document and is alive. Not an error. */
@@ -202,6 +210,36 @@ export async function processStoredDocument(args: {
         plan,
       },
     })
+    // [ONTVANGEN] The door answered a REQUEST. Under receive-first that answer has to become
+    // durable STATE, because the row is the only thing that decides whether this document is ever
+    // looked at again. The reading is a pure function — see stored-outcome.ts.
+    const verdict = readStoredOutcome(outcome)
+    if (verdict.kind === "pause_fair_use") {
+      const paused = await pauseDocumentForFairUse({
+        documentId, userId: ownerId, metric: verdict.metric, now, deps: { pipeline },
+      })
+      return { kind: "paused", until: paused.kind === "failed" ? null : paused.retryAfter }
+    }
+    if (verdict.kind === "owner_decision") {
+      // The AI read has already happened and has already been charged. Asking again would buy the
+      // same answer to a question no read can settle, so the document waits on a human instead.
+      const held = await holdForDuplicateDecision({
+        documentId, userId: ownerId, expectedAiDocType: doc.waitingState,
+        candidateInvoiceId: verdict.candidateInvoiceId, pipeline,
+      })
+      if (held.kind === "failed") {
+        // The state did not move, so the drain will see this document again — and pay again. Say
+        // so loudly: this is the one transition whose failure has a running cost.
+        console.error("[ONTVANGEN] could not hold the document for the owner — it will be re-read", {
+          documentId,
+        })
+        return { kind: "unavailable" }
+      }
+      return { kind: "owner_decision" }
+    }
+    // "done" needs nothing: the door wrote the final state itself, as the LAST thing it did.
+    // "retry_later" needs nothing either, and that is the point — the document is still waiting
+    // exactly as it was, and the next pass walks the same road.
     return { kind: "processed", outcome }
   } catch (e) {
     // A drain runs many documents. One that throws must cost that document a pass, never the run.

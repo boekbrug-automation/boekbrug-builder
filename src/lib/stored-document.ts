@@ -34,7 +34,10 @@
 
 import { createPipelineClient } from "@/lib/supabase-pipeline"
 import { intentFromStoredDocument, type IntakeIntent } from "@/lib/intake-intent"
-import { mayDrainRetry, isTimeGatedWait, SKIPPED_DOC_TYPES, DOC_TYPE_WACHT_OP_LIMIET } from "@/lib/skipped-import"
+import {
+  mayDrainRetry, isTimeGatedWait, SKIPPED_DOC_TYPES,
+  DOC_TYPE_WACHT_OP_LIMIET, DOC_TYPE_WACHT_OP_BESLUIT,
+} from "@/lib/skipped-import"
 import { pauseIsOver, pauseForFairUse, pauseColumns } from "@/lib/fair-use-pause"
 import type { FairUseKey } from "@/lib/fair-use"
 
@@ -397,4 +400,64 @@ export async function wakePausedDocumentsForPlanChange(args: {
  */
 export function autoFinishedEventKey(documentId: string): string {
   return `intake:auto-finished:${documentId}`;
+}
+
+// ── [ONTVANGEN] Moving a document into the owner's hands ──────────────────────────────────────
+
+export type HoldWrite =
+  /** The state changed; the document now waits on a human. */
+  | { kind: "held" }
+  /** Nothing was written — the row is gone, is not this owner's, or has moved on. */
+  | { kind: "failed" }
+
+/**
+ * Hold a document for the owner's answer to a semantic duplicate.
+ *
+ * A compare-and-set on the state this run loaded, for the same reason every other final write on
+ * this road is one: the owner may already have deleted the file, or a successor may already have
+ * finished the job, while this run was busy asking the model.
+ *
+ * `wacht_op_besluit` is deliberately NOT `could_not_read`: the read succeeded, and labelling it as
+ * a failure would put the document in the "Overgeslagen bij import" panel with a "Lees opnieuw"
+ * button — an offer to spend another AI read on a question no read can answer. mayDrainRetry()
+ * refuses this state, so the drain will not pick it up again either.
+ */
+export async function holdForDuplicateDecision(args: {
+  documentId: string
+  userId: string
+  /** The waiting state this run loaded. */
+  expectedAiDocType: string
+  /** The invoice the reader believes this is a second copy of, when it could name one. */
+  candidateInvoiceId: string | null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pipeline?: any
+}): Promise<HoldWrite> {
+  const client = args.pipeline ?? createPipelineClient()
+  try {
+    const { data, error } = await client
+      .from("documents")
+      .update({
+        ai_doc_type: DOC_TYPE_WACHT_OP_BESLUIT,
+        // The reader DID run: saying otherwise would make the reader-quality panel count a
+        // successful read as a failure, and would offer the owner a second read to pay for.
+        ai_processed: true,
+        duplicate_candidate_invoice_id: args.candidateInvoiceId,
+      })
+      .eq("id", args.documentId)
+      .eq("user_id", args.userId)
+      .eq("ai_doc_type", args.expectedAiDocType)
+      .select("id")
+    if (error) {
+      console.error("[ONTVANGEN] could not hold the document for the owner's answer", {
+        documentId: args.documentId, error: error.message,
+      })
+      return { kind: "failed" }
+    }
+    return (data ?? []).length ? { kind: "held" } : { kind: "failed" }
+  } catch (e) {
+    console.error("[ONTVANGEN] the duplicate hold threw", {
+      documentId: args.documentId, error: e instanceof Error ? e.message : String(e),
+    })
+    return { kind: "failed" }
+  }
 }

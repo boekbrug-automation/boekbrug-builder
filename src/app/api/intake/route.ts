@@ -30,10 +30,15 @@ import {
 import { resolveImportTarget, ensureImportedFolder } from "@/lib/bestanden"
 import { computeContentHash } from "@/lib/content-hash"
 // [BEWAAR-EERST] Shared with /api/bank/attach-invoice — one keep-the-file path, not two.
-import { storeRawIncoming } from "@/lib/store-raw-incoming"
+import { storeRawIncoming, receiveRawIncoming } from "@/lib/store-raw-incoming"
+// [ONTVANGEN] The cutover's three pieces: wrap the photo, say what state the document waits in,
+// and ask for the work without waiting for it.
+import { maybeImageToPdf } from "@/lib/image-to-pdf"
+import { DOC_TYPE_WACHT_OP_LEZEN } from "@/lib/skipped-import"
+import { kickStoredDocument } from "@/lib/intake-kick"
 // [ONTVANGEN] The processing half — see that file's header for why it is its own module.
 import { readIntentFromForm } from "@/lib/intake-intent"
-import { processIntakeDocument, INTAKE_SOURCES, type IntakeSource } from "@/lib/intake-processor"
+import { INTAKE_SOURCES, type IntakeSource } from "@/lib/intake-processor"
 // [BEWAAR-EERST] The label the skipped panel counts, so a file we could not read yet gets its
 // "Lees opnieuw" button — see skipped-import.ts and [TWEEDE-KANS].
 import { buildFolderBreadcrumb } from "@/lib/documents"
@@ -265,7 +270,10 @@ async function runIntake(req: NextRequest) {
   // [ONTVANGEN] One derivation, shared with the background pass — see intake-derived.ts. Written
   // twice, the live read and the later read would drift, and the drift would be invisible: both
   // halves keep answering, just not the same answer, and a file booked differently never fails.
-  const { isEInvoice, effectiveType, okForAi } = describeBytes(buffer, file.name, file.type)
+  // `isEInvoice` is not read here any more: the reader road is now asynchronous, and the stored
+  // pass derives the same three facts from the same function (intake-derived.ts) off the bytes it
+  // reads back. What this door still needs is only whether the file may go down that road at all.
+  const { effectiveType, okForAi } = describeBytes(buffer, file.name, file.type)
 
   // [INTAKE-KEEP-ALL] Never hard-reject a plausible document. A file the extractor can't read —
   // a Word/Excel document, a .csv that isn't a bank export — must NOT be lost: store it in
@@ -413,7 +421,10 @@ async function runIntake(req: NextRequest) {
   // [ONE-INVOICE-UNVERIFIED] Het paginacijfer komt uit diezelfde ene keer openen mee.
   // [ONTVANGEN] Same shared derivation; the daily-sales branch stays HERE because it answers the
   // request and stops, which is the door's business and not a description of the file.
-  const { pdfText, pdfPages, isPdf } = await readPdfLayer(buffer, file.name, effectiveType)
+  // Same reason: the page count belongs to the read, and the read has moved. The text layer is
+  // still needed HERE, because the daily-sales check is a deterministic door that answers the
+  // request and stops — it is the door's business, not a description of the file.
+  const { pdfText, isPdf } = await readPdfLayer(buffer, file.name, effectiveType)
   // `isPdf`, not `pdfText !== null`: a scanned PDF with no text layer answers null and the
   // daily-sales check still has to see it, exactly as it did before this was shared.
   if (isPdf) {
@@ -421,31 +432,103 @@ async function runIntake(req: NextRequest) {
     if (dailyResp) return dailyResp
   }
 
-  // ── [ONTVANGEN] Everything that needs the reader lives in intake-processor.ts ──────────────
+  // ── [ONTVANGEN] Receive first, process after ───────────────────────────────────────────────
   //
-  // The block that used to continue here — Fair Use, the Claude call, the semantic duplicate
-  // gate, the intake claim, storage, supplier resolution, the invoice insert, auto-advance, the
-  // receipt settlement, cash reconcile, bank auto-confirm, the notification and the audit rows —
-  // was MOVED, not changed. It still runs here, synchronously, in the same order, before this
-  // request answers. Step 2 of [ONTVANGEN] is what moves it in TIME; this step only gave it an
-  // edge, so that move can be made without also rewriting the block behind it.
-  const outcome = await processIntakeDocument({
-    // [ONTVANGEN] This door still runs inside the owner's own request, so the address is real.
-    run: { kind: "request", ip: getClientIP(req) },
-    // [ONTVANGEN] The same reader the durable path uses — one meaning for "paid_method", whether
-    // it arrives on a live form or comes back out of the documents row.
-    intent: readIntentFromForm(formData),
-    supabase, user, file, buffer, source, force,
-    effectiveType, isEInvoice, pdfText, pdfPages, contentHash,
+  // This is the cutover, and it applies to exactly ONE road: the human document — a photographed
+  // bon, a PDF invoice, a scan. Everything deterministic has already answered above and gone home:
+  // the bank statement, the spreadsheet, the UBL e-invoice, the daily-sales PDF. Those are
+  // specialised paths with their own parsing and their own guards, and a file does not belong on
+  // the generic road merely because it could be stored.
+  //
+  // What changes here is WHEN, not WHAT. The block that used to run before this request answered
+  // — Fair Use, the Claude call, the semantic duplicate gate, the invoice insert, the settlement,
+  // the reconcile, the bell — still runs, in the same order, in intake-processor.ts. It just no
+  // longer runs while a person holds a phone and waits for it.
+  //
+  // ── THE PROMISE, AND WHAT IT COSTS TO MAKE IT ────────────────────────────────────────────
+  //
+  // "Ontvangen" may only be said when the bytes, the row AND the owner's intent are durable —
+  // all three, in one handoff. The intent (contant betaald, en wanneer) exists nowhere but the
+  // browser, so writing it afterwards would leave a window in which we have promised to have the
+  // file and the intent is still only in a tab that may already be closed.
+  //
+  // receiveRawIncoming answers `created`, `existing` or `failed` for exactly that reason, and
+  // `failed` is the one that must never reach the owner as reassurance.
+
+  // [INTAKE-IMG-PDF] The photo becomes a PDF BEFORE storage, so every invoice lives as a PDF from
+  // day one. Lossless: the original JPEG is embedded, never re-compressed.
+  const upload = await maybeImageToPdf(buffer, effectiveType, file.name)
+  const uploadType = upload.fileType || "application/octet-stream"
+
+  // [OPSLAG-DEUR] Measured on the bytes that will actually be STORED, not on the ones that
+  // arrived — the owner's meter counts what is in their account, and a wrapped photo is what
+  // lands there. Before a byte is written, and fails open; see gateStorage.
+  const space = await gateStorage({ client: supabase, userId: user.id, bytes: upload.buffer.length })
+  if (!space.allowed) return space.response!
+
+  const intent = readIntentFromForm(formData)
+  const received = await receiveRawIncoming(
+    buffer, file, user.id, supabase, DOC_TYPE_WACHT_OP_LEZEN, source,
+    {
+      // Nothing has read it yet, and saying otherwise would make the reader-quality panel count a
+      // read that never happened as a successful one.
+      aiProcessed: false,
+      intakePaidMethod: intent.paidMethod,
+      intakePaidDate: intent.paidDate,
+      // [ONTVANGEN] The hash stays the hash of the bytes the owner handed over; only the STORED
+      // object is the wrapped one. pdf-lib stamps a creation date, so hashing the wrapper would
+      // make every photo unique by construction and switch the duplicate gate off in silence.
+      storeInstead: { buffer: upload.buffer, fileName: upload.fileName, fileType: uploadType },
+    },
+  )
+
+  if (received.kind === "failed") {
+    // No Ontvangen. Whatever else is true, the owner must not be told we have a file we do not.
+    console.error("[ONTVANGEN] the handoff did not become durable — nothing was promised", {
+      reason: received.reason, userId: user.id,
+    })
+    return NextResponse.json(
+      { error: "We konden dit bestand nu niet bewaren. Bewaar het zelf even en probeer het zo opnieuw." },
+      { status: 503 },
+    )
+  }
+
+  if (received.kind === "existing") {
+    // These exact bytes are already here. The byte-hash gate above answers this for a normal
+    // upload; reaching it HERE means two requests raced. The earlier document is already read,
+    // waiting or booked — so no state is reset, no second pass is scheduled, and no second
+    // financial effect can follow from this request.
+    const folderPath = await buildFolderBreadcrumb(supabase, user.id, null).catch(() => [])
+    return NextResponse.json({
+      error: "Dit bestand is al toegevoegd.",
+      duplicate: true,
+      existing: { id: received.documentId, folder_id: null, folder_name: folderPath.length ? folderPath[folderPath.length - 1] : null },
+    }, { status: 409 })
+  }
+
+  // Durable. From here the browser is finished — and the kick is deliberately not awaited and
+  // deliberately not checked: a kick that never starts leaves the document in wacht_op_lezen,
+  // which is exactly what the drain is for. Making the promise depend on it would put it back on
+  // a network connection that, on a phone in a van, is usually already gone.
+  kickStoredDocument({ documentId: received.documentId, ownerId: user.id })
+
+  await logAuditAction({
+    userId: user.id,
+    action: "document.received",
+    entityType: "document",
+    entityId: received.documentId,
+    newValue: { source, file_name: file.name, content_hash: received.contentHash },
+    ipAddress: getClientIP(req),
+  }).catch(() => {})
+
+  return NextResponse.json({
+    ok: true,
+    received: true,
+    destination: "received",
+    documentId: received.documentId,
+    // [ONTVANGEN] The whole promise, in one sentence: we have it, and you are free to go.
+    message: "Ontvangen — je kunt verder. We lezen dit bestand zo voor je uit; je hoeft niet te wachten.",
   })
-  // A library-built Response (rate limit, Fair Use, storage) carries headers a client reads, so
-  // it is handed back whole rather than rebuilt from a body and a status.
-  // [ONTVANGEN] "paused" carries a domain fact AND the library-built 402. This door still has a
-  // client, so it hands back the answer it always did; the background caller reads the fact and
-  // writes the durable state instead.
-  return outcome.kind === "response" || outcome.kind === "paused"
-    ? outcome.response
-    : NextResponse.json(outcome.body, { status: outcome.status })
 }
 
 // ── Shared helpers for the sheet/daily-report booking paths ──────────────────────────────────

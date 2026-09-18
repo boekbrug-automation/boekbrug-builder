@@ -275,6 +275,10 @@ export type AuditAction =
   | 'supplier.merged'
   // Level 3 — Files
   | 'document.uploaded'
+  // [ONTVANGEN] The receive-first handoff: bytes, row and the owner's intent all durable, and the
+  // owner told "Ontvangen". The row that proves WHEN we took responsibility for a file, which is a
+  // different moment from when we managed to read it.
+  | 'document.received'
   | 'document.duplicate_blocked'      // ← [BRIDGE-EXTRACT] byte-hash dedup: re-upload of identical file refused
   | 'document.deleted'
   | 'document.bulk_deleted'

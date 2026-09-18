@@ -13463,6 +13463,10 @@ export const MESSAGES = {
   'log.supplier.updated': { nl: 'Gegevens van een leverancier aangepast', en: 'Supplier details changed', ar: 'عُدّلت بيانات مورّد' },
   'log.supplier.merged': { nl: 'Twee leveranciers samengevoegd tot één', en: 'Two suppliers merged into one', ar: 'دُمج مورّدان في واحد' },
   'log.document.uploaded': { nl: 'Bestand geüpload', en: 'File uploaded', ar: 'رُفع ملف' },
+  // [ONTVANGEN] A different moment from "geüpload": this is when the bytes, the row and the
+  // owner's intent all became durable and we said we had it — which is when we took
+  // responsibility, and is not the same as when we managed to read it.
+  'log.document.received': { nl: 'Bestand ontvangen', en: 'File received', ar: 'استُلم ملف' },
   'log.document.duplicate_blocked': { nl: 'Dubbel bestand geweigerd', en: 'Duplicate file refused', ar: 'رُفض ملف مكرر' },
   'log.document.deleted': { nl: 'Bestand verwijderd', en: 'File deleted', ar: 'حُذف ملف' },
   'log.document.bulk_deleted': { nl: 'Meerdere bestanden verwijderd', en: 'Several files deleted', ar: 'حُذفت عدة ملفات' },
