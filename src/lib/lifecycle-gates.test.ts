@@ -32618,6 +32618,95 @@ test("[AANHECHT-EERST] a reader outage never mints a paid invoice, and never eat
     "intake grew its own copy back — the two doors can now drift apart again");
 });
 
+// ─── [ONTVANGEN-PARITEIT] The intake tail was MOVED, not rewritten ───────────────────────────
+//
+// [ONTVANGEN] #129 has two steps, and this gate is what makes the first one safe to do at all.
+//
+// Step 1 took /api/intake's whole tail — Fair Use, the reader, the duplicate gate, the claim,
+// storage, supplier resolution, the invoice insert, auto-advance, the receipt settlement, cash
+// reconcile, bank auto-confirm, the notification — and moved it into intake-processor.ts. The
+// route still calls it synchronously, so nothing about behaviour changed. Step 2 moves it in
+// TIME: receive first, answer "Ontvangen", process afterwards.
+//
+// Doing both at once would mean debugging a refactor of the highest-risk financial block in the
+// app and a change to when it runs, with the same symptom for both. So step 1 must be provably
+// behaviour-free, and "provably" cannot mean "I read the diff": the block is 1.235 lines.
+//
+// This gate pins the two things a move can silently break and a type-check cannot see:
+//
+//   1. every financial effect is still THERE, and
+//   2. still in the SAME ORDER relative to each other.
+//
+// Order is not decoration here. The receipt settlement must come after the invoice exists; the
+// cash reconcile must come after the settlement; the bank auto-confirm after that. Re-ordering
+// them is how an invoice gets settled against a payment nobody has booked yet.
+test("[ONTVANGEN-PARITEIT] every financial effect survived the move, in the same order", () => {
+  const proc = code("src/lib/intake-processor.ts");
+  const body = proc.slice(proc.indexOf("} = ctx"));
+  assert.ok(body.length > 20000, "[ONTVANGEN-PARITEIT] the processor body window found almost nothing");
+
+  // The order the tail had in the route on the day it was moved, measured rather than recalled.
+  const ORDER = [
+    "gateFairUseForRead",        // the AI allowance, reserved before the model is called
+    "verifyInvoiceFromPdf(",     // the single Claude call
+    "findSemanticDuplicate(",    // "is this invoice already in the books?"
+    'from("intake_claims")',     // [INTAKE-CLAIM] the race backstop behind that question
+    "gateStorage(",              // [OPSLAG-DEUR] before a byte is written
+    "resolveSupplierAtIntake(",  // [LEVERANCIER-INTAKE]
+    "planReceiptSettlement(",    // what a paid receipt would settle
+    "autoBoekenAllowed(",        // [ZELF-EERST] the owner's own switch
+    "shouldAutoAdvanceInvoice(", // and whether THIS invoice qualifies
+    "apply_manual_payment",      // [EEN-SCHRIJFPAD] the one RPC that may mark an invoice paid
+    "reconcileCashWithRetry(",   // after the settlement, never before
+    "runBankAutoConfirm(",       // and after that
+    "createNotification(",       // last: the owner is told once the money truth is settled
+  ];
+
+  let at = -1;
+  for (const call of ORDER) {
+    const next = body.indexOf(call, at + 1);
+    assert.notEqual(next, -1, `[ONTVANGEN-PARITEIT] ${call} is gone from the intake path`);
+    assert.ok(next > at, `[ONTVANGEN-PARITEIT] ${call} moved earlier than it was — the order of the financial effects changed`);
+    at = next;
+  }
+
+  // Moved, not COPIED. A second copy left behind in the route is how two intake paths are born,
+  // and the second one drifts because nobody remembers it is there.
+  const route = code("src/app/api/intake/route.ts");
+  for (const call of ["verifyInvoiceFromPdf(", "apply_manual_payment", "runBankAutoConfirm(", "shouldAutoAdvanceInvoice("]) {
+    assert.ok(!route.includes(call),
+      `[ONTVANGEN-PARITEIT] ${call} is still in the route as well — the tail was copied, not moved`);
+  }
+  assert.match(route, /await processIntakeDocument\(\{/,
+    "the route no longer hands the work to the processor at all");
+
+  // Step 1 is synchronous BY DESIGN. The moment this stops being true the cutover has happened,
+  // and it may not happen by accident inside a refactor.
+  assert.doesNotMatch(route, /\bafter\(/,
+    "[ONTVANGEN] the route went asynchronous inside the extraction step — that is step 2, and it needs its own proof");
+});
+
+// ─── [ONTVANGEN-TWEEDE-KANS] The second chance stays more careful than a first read ──────────
+//
+// One processor does not mean one policy. A document reaching read-as-invoice has already failed
+// a reading once; that history is the reason it lands in the verify queue instead of being booked
+// automatically, however healthy the reader happens to be today. Fresh intake has no such history
+// and keeps its normal auto-advance and receipt settlement.
+//
+// The distinction is easy to lose the day these two share more code, so it is pinned now, while
+// they still do not.
+test("[ONTVANGEN-TWEEDE-KANS] a re-read never books itself, however good the reader got", () => {
+  const retry = code("src/app/api/documents/[id]/read-as-invoice/route.ts");
+
+  for (const call of ["autoBoekenAllowed(", "shouldAutoAdvanceInvoice(", "apply_manual_payment", "planReceiptSettlement("]) {
+    assert.ok(!retry.includes(call),
+      `[ONTVANGEN-TWEEDE-KANS] the second-chance door grew ${call} — a document that failed once may not book itself on the retry`);
+  }
+  // It says so out loud, and lands in the queue.
+  assert.match(retry, /status: "processing"/,
+    "the re-read no longer puts the invoice in the verify queue");
+});
+
 // ─── [ELKE-DEUR] Every door a person hands a file to keeps it when the reader is down ────────
 //
 // Three fixes in a row, on three doors, for one bug — because the keep-the-file path lived inside
