@@ -36676,3 +36676,74 @@ test("[ONTVANGEN-LIMIET] the hash and the stored size describe two different byt
   assert.doesNotMatch(receive, /computeContentHash\(kept/,
     "hashing the kept copy switches the duplicate gate off without failing anything");
 });
+
+// ── [CLAIM-LEASE] Two copies of one mutual-exclusion rule may not drift apart ──────────────────
+//
+// claim-lease.ts is the [EB-RACE] primitive, lifted out so the stored-document processor can use
+// it. enablebanking-claim.ts still carries its own copy on purpose: Enable Banking is frozen at the
+// owner's instruction, and rewriting the inside of the module that guards its financial sync is not
+// a change to make during a freeze.
+//
+// So the duplication is deliberate and temporary — which is exactly the kind of thing that is still
+// true three months later, with one copy improved and the other quietly left behind. This gate
+// holds both to the same six refusals until the retrofit happens.
+
+test("[CLAIM-LEASE] both copies of the claim refuse on the same six conditions", () => {
+  const copies = {
+    "src/lib/claim-lease.ts": code("src/lib/claim-lease.ts"),
+    "src/lib/enablebanking-claim.ts": code("src/lib/enablebanking-claim.ts"),
+  };
+
+  for (const [path, src] of Object.entries(copies)) {
+    // 1. The stamp is written by the caller, never defaulted — it is the ownership token.
+    assert.match(src, /insert\(\{\s*user_id:[^}]*created_at:\s*stamp/,
+      `${path}: the claim must write its own created_at, or release cannot prove ownership`);
+    // 2. Release deletes OUR version only.
+    assert.match(src, /\.delete\(\)[\s\S]{0,200}\.eq\("created_at",\s*stamp\)/,
+      `${path}: a release that does not filter on the stamp can delete a successor's live claim`);
+    // 3. A missing table refuses.
+    assert.match(src, /code === "42P01"[\s\S]{0,400}refused\("unavailable"\)/,
+      `${path}: without the table the guarantee cannot be established`);
+    // 4. Any other insert error refuses.
+    assert.match(src, /code !== "23505"[\s\S]{0,400}refused\("unavailable"\)/,
+      `${path}: an unexplained insert failure is not permission to run`);
+    // 5. An unparseable stamp refuses rather than being guessed stale or fresh.
+    assert.match(src, /Number\.isFinite\(ageMs\)[\s\S]{0,400}refused\("unavailable"\)/,
+      `${path}: stale-or-fresh may not be decided on a corrupt value`);
+    // 6. The takeover is a compare-and-set on the stamp that was read, never a blind update.
+    assert.match(src, /\.update\(\{\s*created_at:\s*stamp\s*\}\)[\s\S]{0,200}\.eq\("created_at",\s*holder\.created_at\)/,
+      `${path}: two workers at one dead claim would both take it over without the CAS`);
+    // And the whole path is wrapped, so a throw refuses too rather than escaping as permission.
+    assert.match(src, /catch \(err\)[\s\S]{0,400}refused\("unavailable"\)/,
+      `${path}: a throw must refuse, not propagate as an unhandled failure of the caller`);
+  }
+});
+
+test("[CLAIM-LEASE] the duplication is named where a reader will meet it", () => {
+  // A temporary copy that says nowhere that it is temporary is a permanent copy.
+  //
+  // Read RAW, not through codeFile(): this is the one assertion in this file whose subject IS a
+  // comment, and codeFile() strips comments. A gate written the usual way would look for the
+  // sentence in a string the stripper had already removed, and go red for the wrong reason.
+  const lease = readFileSync("src/lib/claim-lease.ts", "utf8");
+  assert.match(lease, /enablebanking-claim\.ts/,
+    "claim-lease.ts must name the copy it has not yet replaced, and why");
+  assert.match(lease, /frozen/,
+    "…including WHY it has not been replaced, or the next reader deletes one of the two");
+});
+
+test("[ONTVANGEN-CLAIM] the document claim is a wrapper, not a second implementation", () => {
+  const src = code("src/lib/stored-document-claim.ts");
+  assert.match(src, /acquireClaimLease\(\{/,
+    "the document claim must go through the shared primitive — a third copy is a third thing to drift");
+  // It may not re-derive any of the rules: no table name, no error codes, no takeover of its own.
+  assert.doesNotMatch(src, /intake_claims"/,
+    "the table belongs to the primitive; naming it here is the start of a second implementation");
+  assert.doesNotMatch(src, /23505|42P01/,
+    "the error codes belong to the primitive");
+  // The TTL must outlive the longest run it can be used from, and stay well inside the hourly
+  // key-blind sweep. Both halves are proved by value in stored-document-claim.test.ts; here only
+  // that the derivation still exists rather than a number typed twice.
+  assert.match(src, /STORED_DOCUMENT_CLAIM_TTL_MS\s*=\s*\(STORED_DOCUMENT_MAX_SECONDS \+ \d+\) \* 1000/,
+    "the TTL must be derived from the run ceiling, never typed beside it");
+});

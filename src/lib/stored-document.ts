@@ -361,3 +361,20 @@ export async function wakePausedDocumentsForPlanChange(args: {
     return { woken: 0 }
   }
 }
+
+// ── [ONTVANGEN-MELDING] The name of the event, not of the row ────────────────────────────────
+
+/**
+ * The durable idempotency key for "this stored document finished processing by itself".
+ *
+ * One key per document, per event. It is handed to createNotification({ eventKey }), where the
+ * partial UNIQUE (user_id, event_key) turns a second attempt into a no-op instead of a second
+ * bell — see supabase/migrations/ontvangen_melding_event_key.sql.
+ *
+ * Derived from the document id and nothing else: not from the clock, not from the run, not from
+ * what the reader concluded. A retry of a crashed run must produce the SAME key, or the guarantee
+ * is a comment rather than a constraint.
+ */
+export function autoFinishedEventKey(documentId: string): string {
+  return `intake:auto-finished:${documentId}`;
+}

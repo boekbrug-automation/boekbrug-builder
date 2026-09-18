@@ -6,11 +6,12 @@ import assert from "node:assert/strict"
 // [OBSERVABILITY] The constant, never the string. A literal here would stay green through a
 // rename while the code it claims to test had moved on — which is the drift skipped-import.ts
 // exists to prevent, and the gate scans test files for exactly that reason.
-import { DOC_TYPE_WACHT_OP_LEZEN } from "./skipped-import"
+import { DOC_TYPE_WACHT_OP_LEZEN, DOC_TYPE_WACHT_OP_LIMIET } from "./skipped-import"
 import {
   insertClassifiedDocument,
   updateClassification,
   IDENTITY_KEYS,
+  CLASSIFICATION_KEYS,
   type DocumentIdentity,
   type DocumentClassification,
 } from "./document-placement"
@@ -21,7 +22,10 @@ class FakePipeline {
   rows: Row[] = []
   insertError: { code?: string; message?: string } | null = null
   updateError: { message: string } | null = null
+  readError: { message: string } | null = null
   lastUpdate: { patch: Row; filters: Array<[string, unknown]> } | null = null
+  /** Every re-read the compare-and-set performed, so a test can prove it looked rather than guessed. */
+  reads = 0
   inserted: Row[] = []
 
   from() {
@@ -39,12 +43,30 @@ class FakePipeline {
         const filters: Array<[string, unknown]> = []
         const b = {
           eq: (c: string, v: unknown) => { filters.push([c, v]); return b },
+          // PostgREST's IS NULL. Recorded as its own filter shape, because a fake that let `.eq`
+          // stand in for it would pass the one case the production call has to get right.
+          is: (c: string, v: unknown) => { filters.push([c, v === null ? null : v]); return b },
           select: async () => {
             this.lastUpdate = { patch, filters }
             if (this.updateError) return { data: null, error: this.updateError }
-            const hit = this.rows.filter((r) => filters.every(([c, v]) => r[c] === v))
+            const hit = this.rows.filter((r) =>
+              filters.every(([c, v]) => (v === null ? (r[c] ?? null) === null : r[c] === v)),
+            )
             for (const r of hit) Object.assign(r, patch)
             return { data: hit.map((r) => ({ id: r.id })), error: null }
+          },
+        }
+        return b
+      },
+      select: () => {
+        const filters: Array<[string, unknown]> = []
+        const b = {
+          eq: (c: string, v: unknown) => { filters.push([c, v]); return b },
+          maybeSingle: async () => {
+            this.reads += 1
+            if (this.readError) return { data: null, error: this.readError }
+            const hit = this.rows.filter((r) => filters.every(([c, v]) => r[c] === v))
+            return { data: hit[0] ?? null, error: null }
           },
         }
         return b
@@ -124,7 +146,7 @@ test("[ONTVANGEN] the later reading writes what the document IS, and nothing abo
   const p = new FakePipeline()
   p.rows = [{ id: "doc-1", ...IDENTITY, doc_type: "overig", ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN, ai_processed: false }]
 
-  const r = await updateClassification("doc-1", USER, AS_INVOICE, p)
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
   assert.equal(r.kind, "placed")
 
   // The reading landed…
@@ -147,9 +169,12 @@ test("[ONTVANGEN] a classification is never written onto another owner's documen
   // RLS is off on this table, so the filter in the statement is the only tenant boundary. Writing
   // here would move a stranger's file into a folder and a year they never chose.
   const p = new FakePipeline()
-  p.rows = [{ id: "doc-1", ...IDENTITY, user_id: OTHER, doc_type: "overig" }]
+  p.rows = [{ id: "doc-1", ...IDENTITY, user_id: OTHER, doc_type: "overig", ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
 
-  assert.deepEqual(await updateClassification("doc-1", USER, AS_INVOICE, p), { kind: "gone" })
+  assert.deepEqual(
+    await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p),
+    { kind: "gone" },
+  )
   assert.equal(p.rows[0].doc_type, "overig", "…and the row is untouched")
   assert.ok(p.lastUpdate?.filters.some(([c, v]) => c === "user_id" && v === USER))
   assert.ok(p.lastUpdate?.filters.some(([c, v]) => c === "id" && v === "doc-1"))
@@ -161,14 +186,17 @@ test("[ONTVANGEN] a document deleted while we were reading it is 'gone', never a
   // calling it success would book an invoice whose evidence no longer exists.
   const p = new FakePipeline()
   p.rows = []
-  assert.deepEqual(await updateClassification("doc-1", USER, AS_INVOICE, p), { kind: "gone" })
+  assert.deepEqual(
+    await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p),
+    { kind: "gone" },
+  )
 })
 
 test("[ONTVANGEN] a database that did not answer is a failure, and is NOT 'gone'", async () => {
   const p = new FakePipeline()
-  p.rows = [{ id: "doc-1", ...IDENTITY }]
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
   p.updateError = { message: "statement timeout" }
-  const r = await updateClassification("doc-1", USER, AS_INVOICE, p)
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
   assert.equal(r.kind, "failed", "a timeout must not be read as 'the owner deleted it'")
 })
 
@@ -176,13 +204,121 @@ test("[ONTVANGEN] the bestanden road leaves the year alone rather than writing n
   // Only the invoice/receipt road knows a year. A file going to bestanden has no opinion, and an
   // opinionless write of null would erase a year a previous reading had correctly established.
   const p = new FakePipeline()
-  p.rows = [{ id: "doc-1", ...IDENTITY, year: 2026 }]
+  p.rows = [{ id: "doc-1", ...IDENTITY, year: 2026, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
   const asDocument: DocumentClassification = {
     doc_type: "overig", folder_id: "folder-import", ai_processed: true, ai_doc_type: "other",
   }
-  await updateClassification("doc-1", USER, asDocument, p)
+  await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, asDocument, p)
   assert.ok(!("year" in (p.lastUpdate?.patch ?? {})), "an absent year must not be sent as null")
   assert.equal(p.rows[0].year, 2026)
+})
+
+// ── The compare-and-set: what "zero rows" actually meant ──────────────────────────────────────
+
+test("[ONTVANGEN-CAS] the write states what it believed the document still was", async () => {
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.ok(
+    p.lastUpdate?.filters.some(([c, v]) => c === "ai_doc_type" && v === DOC_TYPE_WACHT_OP_LEZEN),
+    "without the expected state in the statement this is a blind UPDATE, whatever it is called",
+  )
+  // And it did not need to look afterwards: the row matched.
+  assert.equal(p.reads, 0)
+})
+
+test("[ONTVANGEN-CAS] a document another pass moved to a different WAIT is superseded", async () => {
+  // Still waiting, but on something else: Fair Use paused it while this run was reading. Nothing
+  // final was decided, and nothing is lost — but this run's conclusion is about a state that is
+  // gone, and writing it would un-pause a document the limit says must wait.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_processed: false, ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET }]
+
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.equal(r.kind, "superseded")
+  assert.equal(r.kind === "superseded" ? r.aiDocType : null, DOC_TYPE_WACHT_OP_LIMIET, "say what it became")
+  assert.equal(p.rows[0].ai_doc_type, DOC_TYPE_WACHT_OP_LIMIET, "…and the row is untouched")
+  assert.equal(p.reads, 1, "the distinction must be read, not assumed")
+})
+
+test("[ONTVANGEN-CAS] a document finished by somebody else is 'completed elsewhere', never overwritten", async () => {
+  // The real sequence: this run's claim went stale, a successor finished the whole job, the owner
+  // checked the invoice — and only then does this worker come back with its conclusion. Writing it
+  // would move a booked document back into an AI classification the owner has already answered.
+  const p = new FakePipeline()
+  p.rows = [{
+    id: "doc-1", ...IDENTITY,
+    doc_type: "factuur", folder_id: "folder-maart", year: 2026,
+    ai_processed: true, ai_doc_type: "receipt",
+  }]
+
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.equal(r.kind, "completed_elsewhere")
+  assert.equal(r.kind === "completed_elsewhere" ? r.identical : true, false,
+    "somebody else's conclusion, not ours")
+  assert.equal(p.rows[0].ai_doc_type, "receipt", "…and the row is untouched")
+})
+
+test("[ONTVANGEN-CAS] a replay of a write that already landed is identical, not a conflict", async () => {
+  // A crash between the UPDATE committing and the run finishing. The retry arrives with exactly
+  // the conclusion that already stands, so the caller may carry on with its idempotent tail
+  // instead of treating the document as somebody else's.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ...AS_INVOICE }]
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.deepEqual(r, { kind: "completed_elsewhere", aiDocType: "invoice", identical: true })
+})
+
+test("[ONTVANGEN-CAS] the same doc type in a different folder is NOT our write having happened", async () => {
+  // ai_doc_type alone would say "identical" here. It is not: the owner (or another pass) filed it
+  // somewhere else, and reporting our write as landed would leave the document where we did not
+  // put it — with nothing to show that the two disagreed.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ...AS_INVOICE, folder_id: "folder-elders" }]
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.equal(r.kind, "completed_elsewhere")
+  assert.equal(r.kind === "completed_elsewhere" ? r.identical : true, false)
+})
+
+test("[ONTVANGEN-CAS] ai_processed is deliberately NOT a second predicate", async () => {
+  // A document that is waiting but already carries ai_processed = true must still be classifiable.
+  // With `AND ai_processed = false` in the statement it would match nothing, and every run would
+  // report superseded on a document nobody had touched — a wedge, produced by a redundant lock.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_processed: true, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.equal(r.kind, "placed")
+  assert.ok(
+    !p.lastUpdate?.filters.some(([c]) => c === "ai_processed"),
+    "the waiting doc types ARE the not-yet-final states; a second lock is a second thing to agree",
+  )
+})
+
+test("[ONTVANGEN-CAS] every classification field is compared, so the list cannot quietly shrink", () => {
+  // The comparison is driven by CLASSIFICATION_KEYS. A field added to the type but not to the list
+  // would fall outside it, and a replay that differs only in that field would read as already_done.
+  assert.deepEqual([...CLASSIFICATION_KEYS].sort(), Object.keys(AS_INVOICE).sort())
+  for (const key of IDENTITY_KEYS) {
+    assert.ok(!CLASSIFICATION_KEYS.includes(key as never), `"${key}" is identity, not classification`)
+  }
+})
+
+test("[ONTVANGEN-CAS] a document with no ai_doc_type yet is matched with IS NULL, not = NULL", async () => {
+  // PostgREST has no `= NULL`. If this degraded to .eq, the compare-and-set would match nothing and
+  // every first classification of such a row would report superseded and never write.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_doc_type: null }]
+  const r = await updateClassification("doc-1", USER, null, AS_INVOICE, p)
+  assert.equal(r.kind, "placed")
+  assert.equal(p.rows[0].ai_doc_type, "invoice")
+})
+
+test("[ONTVANGEN-CAS] a re-read that fails is a failure, not a verdict about the document", async () => {
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_doc_type: "receipt" }]
+  p.readError = { message: "statement timeout" }
+  const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.equal(r.kind, "failed", "a timeout must not be read as 'the owner deleted it'")
 })
 
 // ── [ONTVANGEN] LINKAGE — repairable, owner-scoped, and never a reason to mint ────────────────

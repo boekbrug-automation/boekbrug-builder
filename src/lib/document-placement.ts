@@ -33,6 +33,7 @@
 // to book an invoice whose evidence no longer exists.
 
 import { createPipelineClient } from "@/lib/supabase-pipeline"
+import { isWachtendDocType } from "@/lib/skipped-import"
 
 /** Written once, at the handoff. The processor may never write any of these. */
 export interface DocumentIdentity {
@@ -58,6 +59,15 @@ export interface DocumentClassification {
 /** The identity keys, as data, so a test can assert the classification never names one. */
 export const IDENTITY_KEYS: readonly (keyof DocumentIdentity)[] = [
   "user_id", "file_name", "file_url", "file_size", "file_type", "content_hash", "source",
+]
+
+/**
+ * The classification keys, as data, so the compare-and-set re-reads exactly the fields it would
+ * have written — and so a field added to DocumentClassification cannot quietly fall outside the
+ * "already done" comparison and turn a replay into a superseded.
+ */
+export const CLASSIFICATION_KEYS: readonly (keyof DocumentClassification)[] = [
+  "doc_type", "folder_id", "year", "ai_processed", "ai_doc_type",
 ]
 
 export type PlaceOutcome =
@@ -100,30 +110,100 @@ export async function insertClassifiedDocument(
 }
 
 /**
- * Say what an ALREADY RECEIVED document turned out to be.
+ * What a compare-and-set classification did, or why it did nothing.
  *
- * Scoped to the owner because RLS is off on this table, so the filter in the statement is the
- * only tenant boundary there is — and because a classification written onto a stranger's document
- * would move their file into a folder and a year they never chose.
+ * `placed` is the only one that wrote. The other three are the ways "zero rows matched" can mean
+ * different things, and collapsing them is how a stale worker either overwrites a decision the
+ * owner has already made, or retries forever against a document that has moved on:
+ *
+ *   · gone                — the row is not there any more, or never was this owner's. Stop.
+ *   · superseded          — it is still waiting, but on something else: another pass paused it on
+ *                           Fair Use, or the owner was asked a question. Our conclusion is stale.
+ *   · completed_elsewhere — it is already final. `identical` says whether that final state is
+ *                           exactly what we were going to write, which is the difference between
+ *                           "our own write landed and then we crashed" and "somebody else
+ *                           concluded something else". Neither is a retry, and neither is an error.
+ */
+export type ClassifyOutcome =
+  | { kind: "placed"; documentId: string }
+  | { kind: "gone" }
+  | { kind: "superseded"; aiDocType: string | null }
+  | { kind: "completed_elsewhere"; aiDocType: string | null; identical: boolean }
+  | { kind: "failed"; error: string | null }
+
+/**
+ * Say what an ALREADY RECEIVED document turned out to be — as a compare-and-set.
+ *
+ * Scoped to the owner because RLS is off on this table, so the filter in the statement is the only
+ * tenant boundary there is — and because a classification written onto a stranger's document would
+ * move their file into a folder and a year they never chose.
  *
  * Takes no identity argument at all. There is nowhere to pass one.
+ *
+ * ── WHY EXPECTED-STATE, AND NOT A CLAIM ──────────────────────────────────────────────────────
+ *
+ * The claim ([ONTVANGEN-CLAIM]) keeps two LIVE workers apart. It cannot keep a worker apart from
+ * its own crashed predecessor, nor from the owner: while a run was reading a document, its claim
+ * can go stale, a successor can finish the whole job, and the first worker can then wake up with a
+ * conclusion about a document that has since been booked, corrected or deleted.
+ *
+ * A blind UPDATE at that moment is not a late write. It moves a booked document back into an AI
+ * classification the owner has already acted on. So the write states what it believed the document
+ * still was, and the database decides whether that is still true.
+ *
+ * `expectedAiDocType` is that belief — normally one of the waiting states (wacht_op_lezen,
+ * wacht_op_limiet, wacht_op_besluit), read from the same row this run loaded.
+ *
+ * It is the ONLY predicate beyond identity and owner, deliberately. `ai_processed = false` looks
+ * like a free second lock and is not one: it would be a second place that has to agree with the
+ * waiting states, and the day one of them is written with ai_processed already true, the write
+ * stops matching and every run reports superseded on a document nobody touched. The waiting doc
+ * types ARE the not-yet-final states; one predicate says that, and says it in one place.
  */
 export async function updateClassification(
   documentId: string,
   userId: string,
+  expectedAiDocType: string | null,
   classification: DocumentClassification,
   pipeline: Pipeline = createPipelineClient(),
-): Promise<PlaceOutcome> {
+): Promise<ClassifyOutcome> {
   try {
-    const { data, error } = await pipeline
+    const owned = pipeline
       .from("documents")
       .update(classification)
       .eq("id", documentId)
       .eq("user_id", userId)
-      .select("id")
+    // PostgREST has no `= NULL`: a document that never carried an ai_doc_type must be matched with
+    // IS NULL, or the compare-and-set silently matches nothing and every run reports superseded.
+    const { data, error } = await (
+      expectedAiDocType === null
+        ? owned.is("ai_doc_type", null)
+        : owned.eq("ai_doc_type", expectedAiDocType)
+    ).select("id")
     if (error) return { kind: "failed", error: error.message ?? null }
-    if (!(data ?? []).length) return { kind: "gone" }
-    return { kind: "placed", documentId }
+    if ((data ?? []).length) return { kind: "placed", documentId }
+
+    // Zero rows. Three different facts look identical from here, so read the row and say which.
+    const { data: row, error: readError } = await pipeline
+      .from("documents")
+      .select(CLASSIFICATION_KEYS.join(", "))
+      .eq("id", documentId)
+      .eq("user_id", userId)
+      .maybeSingle()
+    if (readError) return { kind: "failed", error: readError.message ?? null }
+    if (!row) return { kind: "gone" }
+
+    const aiDocType = (row as { ai_doc_type?: string | null }).ai_doc_type ?? null
+    // Still waiting, but on something else. Nothing final has been decided, so nothing has been
+    // lost — but this run's conclusion is about a state that no longer exists.
+    if (isWachtendDocType(aiDocType)) return { kind: "superseded", aiDocType }
+
+    // Final. Compare every field we would have set, not only ai_doc_type — a row can carry our doc
+    // type and still sit in a different folder or year, and that is not our write having happened.
+    const identical = CLASSIFICATION_KEYS.every(
+      (key) => classification[key] === undefined || row[key] === classification[key],
+    )
+    return { kind: "completed_elsewhere", aiDocType, identical }
   } catch (e) {
     return { kind: "failed", error: e instanceof Error ? e.message : String(e) }
   }

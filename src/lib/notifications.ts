@@ -31,6 +31,24 @@ interface CreateNotifOptions {
   body?: string | null
   type: NotificationType
   link?: string | null
+  /**
+   * [ONTVANGEN-MELDING] A durable name for the EVENT this notification reports, so a run that
+   * crashes after telling the owner cannot tell them again on the retry.
+   *
+   * Everything else in a background pass can be made at-most-once by the database — the invoice by
+   * a partial UNIQUE index, the payment by its replay key, the AI allowance by a per-document mark.
+   * The bell could not: nothing about "an invoice was booked for document X" is unique in the
+   * notifications table, so a crash between the notification and the end of the run produced a
+   * second identical line the next time round. An owner who sees the same invoice announced twice
+   * does not conclude "a worker restarted"; they go looking for the second invoice.
+   *
+   * Optional, and absent by default. The forty existing call sites report things that happen once
+   * because a human pressed something, and they keep writing exactly the row they wrote before —
+   * including on a database where the column does not exist yet.
+   *
+   * Shape: "<domain>:<event>:<id>", e.g. "intake:auto-finished:<documentId>".
+   */
+  eventKey?: string | null
 }
 
 /**
@@ -42,6 +60,36 @@ interface CreateNotifOptions {
 export interface NotificationResult {
   ok: boolean
   error: string | null
+  /**
+   * This exact event had already been reported, and nothing was written or pushed.
+   *
+   * `ok` is true, and that is not a softened failure: the owner HAS been told, which is the whole
+   * purpose of the call. Only a caller that counts what it sent needs to tell the two apart.
+   */
+  duplicate?: boolean
+}
+
+/**
+ * [ONTVANGEN-MELDING] What an insert error MEANS, as a value — the branch, away from the plumbing.
+ *
+ * Three of the four are indistinguishable at a glance, and getting them wrong costs different
+ * things: a second push for an event already reported, a caller told "sent" when the guarantee it
+ * asked for does not exist, or a real database failure read as success.
+ */
+export type NotificationInsertVerdict = 'written' | 'already_reported' | 'key_column_missing' | 'failed'
+
+export function classifyNotificationInsert(
+  error: { code?: string } | null | undefined,
+  hasEventKey: boolean,
+): NotificationInsertVerdict {
+  if (!error) return 'written'
+  // Both codes are only ever ABOUT the event key, so neither may be read as a verdict about a
+  // notification that never carried one: an ordinary 23505 on some future constraint would
+  // otherwise be reported to the caller as "already told them", with nothing written at all.
+  if (!hasEventKey) return 'failed'
+  if (error.code === '23505') return 'already_reported'
+  if (error.code === '42703') return 'key_column_missing'
+  return 'failed'
 }
 
 /** Write one notification for a user — always via service_role — and push it. */
@@ -51,6 +99,7 @@ export async function createNotification({
   body,
   type,
   link,
+  eventKey,
 }: CreateNotifOptions): Promise<NotificationResult> {
   try {
     const pipeline = createPipelineClient()
@@ -76,15 +125,42 @@ export async function createNotification({
     // which had just done the work the notification is about, went on believing the
     // owner had been told. Every insert in the app now runs through this one line,
     // so this was the single blind spot that covered all of them.
-    const { error } = await pipeline.from('notifications').insert({
+    // The column is only ever SENT when a caller asked for the guarantee. A notification without
+    // an event key must write exactly the row it wrote before this existed — including on a
+    // database where public.notifications.event_key has not been added yet.
+    const key = typeof eventKey === 'string' && eventKey.trim() ? eventKey.trim() : null
+    // ontvangen_melding_event_key.sql is applied BY HAND, and code ships before it runs. The column
+    // is therefore not in the generated types — same relaxed handle, and for the same reason, as
+    // the intake claim and the intake intent columns use on their tables.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = pipeline.from('notifications') as any
+    const { error } = await rows.insert({
       user_id: userId,
       title,
       body: body ?? null,
       type,
       read: false,
       link: veiligeLink,
+      ...(key ? { event_key: key } : {}),
     })
 
+    const verdict = classifyNotificationInsert(error, key !== null)
+    if (verdict === 'already_reported') {
+      // The partial UNIQUE (user_id, event_key) refused it: this event was already reported. The
+      // owner has the line and had the push; sending a second push now would be the duplicate the
+      // key exists to prevent, arriving with no row of its own to point at.
+      return { ok: true, error: null, duplicate: true }
+    }
+    if (verdict === 'key_column_missing') {
+      // The column is not there. A caller that asked for the guarantee is told it could not be
+      // given, rather than quietly getting a row that a retry will write again — the same
+      // precondition rule store-raw-incoming.ts applies to the intent columns.
+      console.error(
+        '[ONTVANGEN-MELDING] notifications.event_key is absent — refusing this notification. Apply ontvangen_melding_event_key.sql before enabling the stored processor.',
+        { userId, type },
+      )
+      return { ok: false, error: error?.message ?? 'event_key ontbreekt' }
+    }
     if (error) {
       console.error('[NOTIFY] notification insert failed', {
         userId,

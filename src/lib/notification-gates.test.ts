@@ -42,7 +42,13 @@ function sourceFiles(dir = "src"): string[] {
   return out;
 }
 
-const DIRECT_INSERT = /from\(\s*['"]notifications['"]\s*\)\s*\.insert/;
+// Two shapes, because there are two ways to write the row directly: straight through
+// `.from('notifications').insert(`, and the split form a file needs when the payload carries a
+// column that is not in the generated types — `const x = pipeline.from('notifications') as any`
+// followed by `x.insert(`. The canonical writer uses the second, and a gate that only knew the
+// first would have gone quiet about both the moment it did.
+const DIRECT_INSERT =
+  /from\(\s*['"]notifications['"]\s*\)\s*(\.insert|as\s+any[\s\S]{0,400}?\.insert)/;
 
 // ── [NOTIFY-EEN-DEUR] ────────────────────────────────────────────────────────
 test("[NOTIFY-EEN-DEUR] every notification is written through the one writer", () => {
@@ -79,7 +85,16 @@ test("[NOTIFY-EEN-DEUR] every notification is written through the one writer", (
 test("[NOTIFY-EEN-DEUR] negative control — the gate catches the shape it is about", () => {
   assert.match("await pipeline.from('notifications').insert({ user_id: x })", DIRECT_INSERT);
   assert.match('await pipeline.from("notifications").insert({', DIRECT_INSERT);
+  // The split form, which is how the canonical writer itself does it — and how any other file
+  // would have to do it to write a hand-applied column. It must not be a way past this gate.
+  assert.match(
+    "const rows = pipeline.from('notifications') as any\n  const { error } = await rows.insert({",
+    DIRECT_INSERT,
+  );
   assert.doesNotMatch("await createNotification({ userId: x })", DIRECT_INSERT);
+  // And it must still be about notifications: a relaxed handle on another table, followed much
+  // later by an unrelated insert, is not this shape.
+  assert.doesNotMatch("const rows = pipeline.from('documents') as any\n  await rows.insert({", DIRECT_INSERT);
 });
 
 // ── [NOTIFY-EERLIJK] ─────────────────────────────────────────────────────────
@@ -92,8 +107,16 @@ test("[NOTIFY-EERLIJK] the writer reads its own error, and does not push a row t
   // on believing the owner was told.
   assert.match(
     src,
-    /const\s*\{\s*error\s*\}\s*=\s*await\s+pipeline/,
+    /const\s*\{\s*error\s*\}\s*=\s*await\s+rows\.insert\(/,
     "the insert result must be destructured — an unread error is an unnoticed silence",
+  );
+  // `rows` is the relaxed handle on the SAME self-created service-role client, needed because
+  // notifications.event_key is applied by hand and is not in the generated types. It must not have
+  // become a second client, which is the mistake this file's header exists to prevent.
+  assert.match(
+    src,
+    /const\s+rows\s*=\s*pipeline\.from\('notifications'\)\s*as\s+any/,
+    "the relaxed handle must come from the pipeline client this function built, not a new one",
   );
 
   // And the order matters as much as the check. A push for a row that does not exist is worse than
@@ -110,6 +133,42 @@ test("[NOTIFY-EERLIJK] the writer reads its own error, and does not push a row t
     src.slice(errorBranch, push),
     /return\s*\{\s*ok:\s*false/,
     "and it must actually return there",
+  );
+});
+
+test("[ONTVANGEN-MELDING] the event key is only ever SENT when a caller asked for it", () => {
+  const src = code("src/lib/notifications.ts");
+
+  // Forty existing call sites report things that happened because a human pressed something. They
+  // must keep writing exactly the row they wrote before — including on a database where
+  // notifications.event_key does not exist yet. So the column is spread in conditionally, never
+  // written as a plain `event_key: ... ?? null`, which would send it on every notification in the
+  // app and turn one unapplied migration into forty broken doors.
+  assert.match(
+    src,
+    /\.\.\.\(key\s*\?\s*\{\s*event_key:\s*key\s*\}\s*:\s*\{\}\)/,
+    "event_key must be absent from the payload unless the caller supplied one",
+  );
+  assert.doesNotMatch(
+    src,
+    /event_key:\s*(eventKey|key)\s*\?\?/,
+    "a defaulted event_key is sent on every write, including the forty that never asked",
+  );
+
+  // The meaning of the two error codes lives in one pure function, so the branch can be proved by
+  // value (notification-event-key.test.ts) instead of by reading this file.
+  assert.match(src, /classifyNotificationInsert\(error,\s*key\s*!==\s*null\)/,
+    "the verdict must be computed from the real error and whether a key was actually sent");
+
+  // And the duplicate arm must not push. The first run already sent that push; a second one arrives
+  // with no row of its own, which is the exact duplicate the key exists to prevent.
+  const already = src.indexOf("'already_reported'", src.indexOf("const verdict"));
+  const push = src.indexOf("sendPushToUser(");
+  assert.ok(already > 0 && already < push, "the already-reported arm must sit before the push");
+  assert.match(
+    src.slice(already, push),
+    /return\s*\{\s*ok:\s*true,\s*error:\s*null,\s*duplicate:\s*true\s*\}/,
+    "an event already reported returns ok WITHOUT writing or pushing a second time",
   );
 });
 

@@ -156,6 +156,21 @@ CREATE TABLE public.documents (
   ai_processed             boolean DEFAULT false
 );
 
+-- [ONTVANGEN-MELDING] The bell. A production base table, stubbed to what the event-key boundary
+-- actually touches: who it is for, and the durable name of the event it reports. The CHECK on
+-- `type` and the link column are not part of that contract and are left out on purpose — a stub
+-- that copies a production table wholesale becomes a second schema to keep in step.
+CREATE TABLE public.notifications (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid,
+  title      text,
+  body       text,
+  type       text,
+  read       boolean DEFAULT false,
+  link       text,
+  created_at timestamptz DEFAULT now()
+);
+
 -- [UREN] The customer card. A production base table (not created by any migration in this repo —
 -- it predates them, like invoices), stubbed here to the two columns a foreign key needs: uren
 -- point at a client, and the FK is what makes "for whom" a relation instead of a typed-in name.
