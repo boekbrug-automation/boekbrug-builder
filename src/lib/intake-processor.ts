@@ -70,6 +70,8 @@ import { logAuditAction } from "@/lib/audit"
 // [ONTVANGEN] Who started this run. A background pass has no client and therefore no address —
 // see intake-provenance.ts for why carrying the upload-time IP forward is the thing to avoid.
 import { auditIpOf, runOriginOf, type IntakeRun } from "@/lib/intake-provenance"
+import { PAUSE_REASON_FAIR_USE } from "@/lib/fair-use-pause"
+import type { FairUseKey } from "@/lib/fair-use"
 import { decideFromAi } from "@/lib/intake-router"
 // [BON-BETAALWIJZE] Eén normalisator voor elke weg waarlangs een betaalwijze binnenkomt.
 import { type IntakeIntent } from "@/lib/intake-intent"
@@ -151,6 +153,20 @@ export type IntakeSource = (typeof INTAKE_SOURCES)[number]
 export type IntakeOutcome =
   | { kind: "json"; status: number; body: unknown }
   | { kind: "response"; response: Response }
+  /**
+   * [ONTVANGEN] The month's allowance refused the paid read.
+   *
+   * A DOMAIN outcome, not an HTTP one, because after the cutover there is no browser waiting for
+   * a 402. The background caller acts on `reason`/`metric`: it moves the document to
+   * `wacht_op_limiet` with a retry date and tells the owner once. The interactive route, which
+   * still has a client, hands back `response` — the library-built answer with its published
+   * count, limit, plan and both ways out, exactly as it does today.
+   *
+   * Both halves travel together on purpose. Dropping the Response would silently change what a
+   * live upload sees; dropping the reason would leave a background pass with nothing to record
+   * but a status code nobody will ever read.
+   */
+  | { kind: "paused"; reason: typeof PAUSE_REASON_FAIR_USE; metric: FairUseKey; response: Response }
 
 /** Same call shape as NextResponse.json, so the moved block needed no edit beyond the name. */
 function json(body: unknown, init?: { status?: number }): IntakeOutcome {
@@ -219,7 +235,11 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
   const gate = await gateFairUseForRead({
     client: supabase, userId: user.id, metric: "aiDocuments", costsAiCall: !isEInvoice,
   });
-  if (!gate.allowed) return raw(gate.response!);
+  if (!gate.allowed) {
+    // [ONTVANGEN] Not raw(): the quota gate is the one refusal that outlives the request. See the
+    // "paused" arm of IntakeOutcome, and fair-use-pause.ts for what the background caller does.
+    return { kind: "paused", reason: PAUSE_REASON_FAIR_USE, metric: "aiDocuments", response: gate.response! };
+  }
 
   const { data: me } = await supabase
     .from("profiles")

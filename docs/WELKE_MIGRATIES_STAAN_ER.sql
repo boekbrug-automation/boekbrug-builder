@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 158 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 159 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 19 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -379,6 +379,11 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('offerte_akkoord.sql', 'column', 'offerte_token', 'invoices', 'public'),
   ('offerte_akkoord.sql', 'constraint', 'invoices_offerte_response_check', null, 'public'),
   ('offerte_akkoord.sql', 'constraint', 'invoices_offerte_response_paired_check', null, 'public'),
+  ('ontvangen_fair_use_pauze.sql', 'column', 'intake_pause_metric', 'documents', 'public'),
+  ('ontvangen_fair_use_pauze.sql', 'column', 'intake_pause_reason', 'documents', 'public'),
+  ('ontvangen_fair_use_pauze.sql', 'column', 'intake_retry_after', 'documents', 'public'),
+  ('ontvangen_fair_use_pauze.sql', 'constraint', 'documents_intake_pause_reason_check', null, 'public'),
+  ('ontvangen_fair_use_pauze.sql', 'index', 'idx_documents_wacht_op_limiet', null, 'public'),
   ('ontvangen_intake_intent.sql', 'column', 'duplicate_candidate_invoice_id', 'documents', 'public'),
   ('ontvangen_intake_intent.sql', 'column', 'duplicate_decision', 'documents', 'public'),
   ('ontvangen_intake_intent.sql', 'column', 'intake_paid_date', 'documents', 'public'),
@@ -671,7 +676,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 19 van de 177
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 19 van de 178
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen

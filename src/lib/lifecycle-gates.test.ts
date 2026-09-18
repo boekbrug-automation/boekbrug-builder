@@ -36533,3 +36533,116 @@ test("[EB-TELLING] both sync doors report what the bank sent, not only what we s
   assert.match(cron, /pages, fetched, booked, pending, skipped, unreadable, busy,/,
     "the daily run stopped writing the counters into its heartbeat — nobody reads a cron's response body");
 });
+
+// ─── [ONTVANGEN-LIMIET] The month's allowance pauses a document; it does not fail or lose one ──
+//
+// Receive-first removes the listener. Before #129 the Fair Use gate refused inside the owner's own
+// request and they heard it at once; afterwards the refusal happens with nobody watching and the
+// owner has already been told "Ontvangen — je kunt verder".
+//
+// Four things have to stay true, and none of them can be read off a passing unit test:
+//   · the counter does not move when it says no (the promise on /eerlijk-gebruik);
+//   · the document gets its OWN state, never a read failure and never the skipped panel;
+//   · the notification is exactly-once because the WRITE says so, not because code compared first;
+//   · the hash and the stored size deliberately describe two different byte representations.
+
+test("[ONTVANGEN-LIMIET] a refusal costs the owner nothing — the counter does not move", () => {
+  // /eerlijk-gebruik says it in words: "mislukte pogingen komen nooit op jouw rekening". That
+  // promise is kept in SQL, and it matters more after the cutover than before: a drain that woke a
+  // paused document monthly would otherwise inflate the count the owner reads on their own screen.
+  const sql = readFileSync("supabase/migrations/fair_use_usage.sql", "utf8");
+  const fn = sql.indexOf("CREATE OR REPLACE FUNCTION public.fair_use_consume");
+  assert.ok(fn > 0, "[ONTVANGEN-LIMIET] fair_use_consume moved — re-point this gate");
+  const end = sql.indexOf("COMMENT ON FUNCTION public.fair_use_consume", fn);
+  assert.ok(end > fn, "[ONTVANGEN-LIMIET] the function's end marker moved — re-point this gate");
+  const body = sql.slice(fn, end);
+
+  const refuse = body.indexOf("IF p_limit > 0 AND v_new > p_limit THEN");
+  const update = body.indexOf("UPDATE public.usage_counters");
+  assert.ok(refuse > 0, "the over-the-limit branch must be findable");
+  assert.ok(update > refuse, "…and the increment must come AFTER it, never before");
+  const refusalBranch = body.slice(refuse, update);
+  assert.match(refusalBranch, /RETURN QUERY SELECT false, v_current/, "a refusal returns the CURRENT count…");
+  assert.match(refusalBranch, /\n\s*RETURN;/, "…and leaves the function before anything is written");
+  assert.doesNotMatch(refusalBranch, /UPDATE|INSERT/, "nothing is written on the way out");
+});
+
+test("[ONTVANGEN-LIMIET] the quota refusal is a domain outcome, not an HTTP answer nobody will read", () => {
+  // After the cutover there is no browser waiting for a 402. The processor owns the state
+  // transition; rendering belongs to a route that still has a client. Both halves travel on one
+  // outcome so that neither path silently loses what it needs.
+  const processor = codeFile("src/lib/intake-processor.ts");
+  assert.match(processor, /kind: "paused"; reason: typeof PAUSE_REASON_FAIR_USE; metric: FairUseKey; response: Response/,
+    "the paused outcome must carry the domain fact AND the rendered answer");
+  assert.match(processor, /return \{ kind: "paused", reason: PAUSE_REASON_FAIR_USE, metric: "aiDocuments", response: gate\.response! \}/,
+    "the Fair Use gate must return it — raw() would hand a background pass a status code and nothing else");
+  // The rate limit is a different thing (speed, not a month) and deliberately still raw().
+  assert.match(processor, /if \(!rl\.allowed\) return raw\(rateLimitResponse\(rl\)\)/);
+
+  const route = codeFile("src/app/api/intake/route.ts");
+  assert.match(route, /outcome\.kind === "response" \|\| outcome\.kind === "paused"/,
+    "the interactive door must still hand back the published count, limit, plan and both exits");
+});
+
+test("[ONTVANGEN-LIMIET] a paused document has its own state, and it is not a skip and not a question", () => {
+  const skipped = codeFile("src/lib/skipped-import.ts");
+  assert.match(skipped, /export const DOC_TYPE_WACHT_OP_LIMIET = "wacht_op_limiet" as const/);
+
+  // Not in the overgeslagen list: nothing was skipped and there is nothing wrong with the file.
+  const listStart = skipped.indexOf("export const SKIPPED_DOC_TYPES");
+  const listEnd = skipped.indexOf("];", listStart);
+  assert.ok(listEnd > listStart, "[ONTVANGEN-LIMIET] the skipped list's end marker moved");
+  assert.ok(!skipped.slice(listStart, listEnd).includes("WACHT_OP_LIMIET"),
+    "a paused file in the overgeslagen panel is a false alarm on a file with nothing wrong with it");
+
+  // But it IS a waiting state, so nothing treats it as finished.
+  const waitStart = skipped.indexOf("export const WACHTENDE_DOC_TYPES");
+  const waitEnd = skipped.indexOf("];", waitStart);
+  assert.ok(waitEnd > waitStart, "[ONTVANGEN-LIMIET] the waiting list's end marker moved");
+  assert.ok(skipped.slice(waitStart, waitEnd).includes("DOC_TYPE_WACHT_OP_LIMIET"));
+
+  // Ordinary drain work and time-gated work are two questions, so the time gate cannot be forgotten.
+  assert.match(skipped, /export function mayDrainRetry[\s\S]{0,200}=== DOC_TYPE_WACHT_OP_LEZEN/);
+  assert.match(skipped, /export function isTimeGatedWait[\s\S]{0,200}=== DOC_TYPE_WACHT_OP_LIMIET/);
+
+  // And the sentence the owner reads never borrows the phrase reserved for a real decision.
+  const pause = codeFile("src/lib/fair-use-pause.ts");
+  const notice = pause.slice(pause.indexOf("export function pauseNotice"));
+  assert.ok(notice.length > 100, "[ONTVANGEN-LIMIET] pauseNotice moved — re-point this gate");
+  assert.doesNotMatch(notice, /vraag voor jou/i, "a pause asks nothing; that phrase belongs to the duplicate decision");
+});
+
+test("[ONTVANGEN-LIMIET] the notification is exactly-once because the write says so", () => {
+  const store = codeFile("src/lib/stored-document.ts");
+  const fn = store.indexOf("export async function pauseDocumentForFairUse");
+  assert.ok(fn > 0, "[ONTVANGEN-LIMIET] pauseDocumentForFairUse moved — re-point this gate");
+  const body = store.slice(fn);
+
+  // Two passes that both read "not paused yet" before either writes would both send the notice.
+  // The database settles it instead — same shape as the [EB-RACE] claim.
+  assert.match(body, /\.neq\("ai_doc_type", DOC_TYPE_WACHT_OP_LIMIET\)/,
+    "without the neq, exactly-once is a hope");
+  assert.match(body, /return \{ kind: "entered", retryAfter: pause\.retryAfter \}/);
+  assert.match(body, /return \{ kind: "refreshed", retryAfter: pause\.retryAfter \}/);
+  // Both writes are tenant-scoped: RLS is off on this table.
+  const scoped = body.match(/\.eq\("user_id", args\.userId\)/g) ?? [];
+  assert.equal(scoped.length, 2, "both the transition and the refresh must be scoped to the owner");
+});
+
+test("[ONTVANGEN-LIMIET] the hash and the stored size describe two different byte representations, on purpose", () => {
+  // The image→PDF wrap is not byte-stable (pdf-lib stamps CreationDate/ModificationDate), so a
+  // hash taken from the stored copy would be unique per upload and the duplicate gate would be off
+  // for the whole camera path. But the storage meter measures what is really stored. Two truths,
+  // two representations, and neither may borrow the other's bytes.
+  const receive = codeFile("src/lib/store-raw-incoming.ts");
+  assert.match(receive, /const hash = computeContentHash\(buffer\)/,
+    "the hash identifies what ARRIVED");
+  assert.match(receive, /const kept = opts\.storeInstead \?\? \{ buffer, fileName: file\.name, fileType: file\.type \}/);
+  assert.match(receive, /file_size: kept\.buffer\.length/,
+    "the row's size must describe the object that is really in storage");
+  assert.match(receive, /\.upload\(storagePath, kept\.buffer/);
+  assert.match(receive, /content_hash: hash/);
+  // The one shape that would quietly undo it.
+  assert.doesNotMatch(receive, /computeContentHash\(kept/,
+    "hashing the kept copy switches the duplicate gate off without failing anything");
+});

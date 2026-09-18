@@ -243,3 +243,177 @@ test("[ONTVANGEN] an answered duplicate question is carried, and an unrecognised
   assert.equal(got2.kind === "ready" ? got2.doc.duplicateDecision : "x", null,
     "an answer we do not recognise is no answer — and 'add anyway' is not the safe guess")
 })
+
+// ── [ONTVANGEN] The month's allowance: paused, not lost and not failed ────────────────────────
+
+import { DOC_TYPE_WACHT_OP_LIMIET } from "./skipped-import"
+import { pauseDocumentForFairUse, wakePausedDocumentsForPlanChange } from "./stored-document"
+import { resumeVerdict } from "./stored-document"
+
+/** Records updates the way the real client applies them: filters included, rows returned. */
+class FakeUpdater {
+  rows: Row[] = []
+  updateError: { message: string } | null = null
+  updates: Array<{ patch: Row; filters: Array<[string, unknown]>; negated: Array<[string, unknown]> }> = []
+
+  from() {
+    return {
+      update: (patch: Row) => {
+        const filters: Array<[string, unknown]> = []
+        const negated: Array<[string, unknown]> = []
+        const builder = {
+          eq: (c: string, v: unknown) => { filters.push([c, v]); return builder },
+          neq: (c: string, v: unknown) => { negated.push([c, v]); return builder },
+          select: async () => {
+            this.updates.push({ patch, filters, negated })
+            if (this.updateError) return { data: null, error: this.updateError }
+            const hit = this.rows.filter(
+              (r) =>
+                filters.every(([c, v]) => r[c] === v) &&
+                negated.every(([c, v]) => r[c] !== v),
+            )
+            for (const r of hit) Object.assign(r, patch)
+            return { data: hit.map((r) => ({ id: r.id })), error: null }
+          },
+        }
+        return builder
+      },
+    }
+  }
+}
+
+const updateDeps = (u: FakeUpdater): Deps => ({ pipeline: u as unknown as NonNullable<Deps>["pipeline"] })
+const SEPT = new Date("2026-09-18T13:00:00Z")
+
+test("[ONTVANGEN] a refusal pauses the document — it is not lost and not called a read failure", async () => {
+  const u = new FakeUpdater()
+  u.rows = [{ id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+
+  const r = await pauseDocumentForFairUse({
+    documentId: "doc-1", userId: USER, metric: "aiDocuments", now: SEPT, deps: updateDeps(u),
+  })
+  assert.equal(r.kind, "entered")
+  assert.equal(r.kind === "entered" ? r.retryAfter : "", "2026-10-01T00:00:00.000Z")
+
+  // The row still exists and still points at its file — nothing was deleted, nothing was skipped.
+  const row = u.rows[0]
+  assert.equal(row.ai_doc_type, DOC_TYPE_WACHT_OP_LIMIET)
+  assert.notEqual(row.ai_doc_type, DOC_TYPE_COULD_NOT_READ, "we did not try and fail; we declined to spend")
+  assert.equal(row.intake_pause_reason, "fair_use")
+  assert.equal(row.intake_pause_metric, "aiDocuments")
+  assert.equal(row.ai_processed, false)
+})
+
+test("[ONTVANGEN] the owner is told once — the write decides that, not a comparison in code", async () => {
+  const u = new FakeUpdater()
+  u.rows = [{ id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  const call = () => pauseDocumentForFairUse({
+    documentId: "doc-1", userId: USER, metric: "aiDocuments", now: SEPT, deps: updateDeps(u),
+  })
+
+  assert.equal((await call()).kind, "entered", "the first pass moved the state and owes the notice")
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await call()).kind, "refreshed", "every later pass refreshes the date and tells nobody")
+  }
+
+  // The transition update refuses a row already in the state. Two passes that both read
+  // "not paused yet" before either writes cannot therefore both be told they transitioned.
+  assert.ok(
+    u.updates[0].negated.some(([c, v]) => c === "ai_doc_type" && v === DOC_TYPE_WACHT_OP_LIMIET),
+    "without the neq, exactly-once is a hope rather than a guarantee",
+  )
+  assert.ok(u.updates.every((x) => x.filters.some(([c, v]) => c === "user_id" && v === USER)))
+})
+
+test("[ONTVANGEN] a month that is full again moves the date forward instead of leaving a stale one", async () => {
+  // September's pause said 1 October. Woken on 1 October, refused again: it must now say
+  // 1 November. A stale past date would have the drain pick this row up on every single pass.
+  const u = new FakeUpdater()
+  u.rows = [{ id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-10-01T00:00:00.000Z" }]
+  const again = await pauseDocumentForFairUse({
+    documentId: "doc-1", userId: USER, metric: "aiDocuments",
+    now: new Date("2026-10-01T00:05:00Z"), deps: updateDeps(u),
+  })
+  assert.equal(again.kind, "refreshed")
+  assert.equal(u.rows[0].intake_retry_after, "2026-11-01T00:00:00.000Z")
+})
+
+test("[ONTVANGEN] a pause cannot be written onto someone else's document", async () => {
+  const u = new FakeUpdater()
+  u.rows = [{ id: "doc-1", user_id: OTHER, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  const r = await pauseDocumentForFairUse({
+    documentId: "doc-1", userId: USER, metric: "aiDocuments", now: SEPT, deps: updateDeps(u),
+  })
+  assert.equal(r.kind, "failed")
+  assert.equal(u.rows[0].ai_doc_type, DOC_TYPE_WACHT_OP_LEZEN, "…and the row is untouched")
+})
+
+test("[ONTVANGEN] a write that did not land is reported, never reported as a transition", async () => {
+  const u = new FakeUpdater()
+  u.rows = [{ id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  u.updateError = { message: "statement timeout" }
+  assert.deepEqual(
+    await pauseDocumentForFairUse({
+      documentId: "doc-1", userId: USER, metric: "aiDocuments", now: SEPT, deps: updateDeps(u),
+    }),
+    { kind: "failed" },
+  )
+})
+
+test("[ONTVANGEN] the drain does not touch a paused document before its date — and never reads it", async () => {
+  const p = new FakePipeline()
+  p.row = waitingRow({ ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-10-01T00:00:00.000Z" })
+
+  const early = await loadStoredDocument("doc-1", USER, "fresh_intake", deps(p), new Date("2026-09-30T23:59:59Z"))
+  assert.equal(early.kind, "paused")
+  assert.equal(early.kind === "paused" ? early.until : "", "2026-10-01T00:00:00.000Z")
+  assert.deepEqual(p.downloaded, [], "the bytes were not fetched, so no reader could have been invoked")
+
+  // …and it is NOT reported as finished, which would drop it out of the queue for good.
+  assert.notEqual(early.kind, "not_waiting")
+})
+
+test("[ONTVANGEN] once the date passes, the document is eligible again — and the gate still decides", async () => {
+  const p = new FakePipeline()
+  p.row = waitingRow({ ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-10-01T00:00:00.000Z" })
+
+  const late = await loadStoredDocument("doc-1", USER, "fresh_intake", deps(p), new Date("2026-10-01T00:00:00Z"))
+  assert.equal(late.kind, "ready", "eligible to ASK again")
+
+  // Eligible is not allowed. Nothing in the loader or the verdict grants allowance; reaching the
+  // date only means the answer CAN be different, and fair_use_consume is what answers.
+  assert.equal(resumeVerdict("fresh_intake", DOC_TYPE_WACHT_OP_LIMIET, "2026-10-01T00:00:00.000Z", new Date("2026-10-02T00:00:00Z")), "resume")
+  assert.equal(resumeVerdict("fresh_intake", DOC_TYPE_WACHT_OP_LIMIET, "2026-10-01T00:00:00.000Z", new Date("2026-09-20T00:00:00Z")), "paused")
+  assert.equal(resumeVerdict("fresh_intake", "invoice", null, SEPT), "not_waiting")
+})
+
+test("[ONTVANGEN] an upgrade wakes the paused documents early — without reading or spending anything", async () => {
+  const u = new FakeUpdater()
+  u.rows = [
+    { id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-10-01T00:00:00.000Z" },
+    { id: "doc-2", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-10-01T00:00:00.000Z" },
+    { id: "doc-3", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN },
+    { id: "doc-4", user_id: OTHER, ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-10-01T00:00:00.000Z" },
+  ]
+
+  const { woken } = await wakePausedDocumentsForPlanChange({ userId: USER, now: SEPT, deps: updateDeps(u) })
+  assert.equal(woken, 2, "only this owner's paused rows")
+  assert.equal(u.rows[0].intake_retry_after, SEPT.toISOString())
+  assert.equal(u.rows[3].intake_retry_after, "2026-10-01T00:00:00.000Z", "another account is untouched")
+
+  // The state stays what it is: still paused, now merely eligible to ask. The gate is what says
+  // yes, and an upgrade is not an allowance.
+  assert.equal(u.rows[0].ai_doc_type, DOC_TYPE_WACHT_OP_LIMIET)
+  assert.equal(resumeVerdict("fresh_intake", DOC_TYPE_WACHT_OP_LIMIET, SEPT.toISOString(), SEPT), "resume")
+
+  // Nothing is re-announced: a second webhook for the same subscription must not ring the bell.
+  const patch = u.updates.at(-1)!.patch
+  assert.deepEqual(Object.keys(patch), ["intake_retry_after"], "it moves a date and touches nothing else")
+})
+
+test("[ONTVANGEN] a failed wake-up is reported and never claimed as success", async () => {
+  const u = new FakeUpdater()
+  u.rows = [{ id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET }]
+  u.updateError = { message: "statement timeout" }
+  assert.deepEqual(await wakePausedDocumentsForPlanChange({ userId: USER, now: SEPT, deps: updateDeps(u) }), { woken: 0 })
+})

@@ -73,6 +73,25 @@ export const DOC_TYPE_WACHT_OP_LEZEN = "wacht_op_lezen" as const;
 export const DOC_TYPE_WACHT_OP_BESLUIT = "wacht_op_besluit" as const;
 
 /**
+ * [ONTVANGEN] BEWAARD en GELEZEN kon niet, omdat het BELEID het betaalde lezen nu pauzeert.
+ *
+ * De maandgrens uit /eerlijk-gebruik is bereikt. Dat is geen leesfout en geen vraag aan de
+ * eigenaar; het is een pauze met een einddatum die wij kennen. Vier waarheden die uit elkaar
+ * moeten blijven, want ze verdienen alle vier een ander antwoord:
+ *
+ *   wacht_op_lezen   → wij zijn hem nog verschuldigd, nu.
+ *   wacht_op_limiet  → wij hebben het bestand, maar het beleid pauzeert het betaalde lezen.
+ *   wacht_op_besluit → wij hebben een beslissing van de eigenaar nodig.
+ *   could_not_read   → wij hebben het geprobeerd en het lezen zelf mislukte.
+ *
+ * Nadrukkelijk GEEN overslaan: er is niets overgeslagen en er is niets mis met het bestand. Het
+ * hoort dus niet in het paneel "Overgeslagen bij import", en al helemaal niet onder "1 vraag voor
+ * jou" — er is geen vraag die alleen de eigenaar kan beantwoorden. Hij hoort één keer te horen dat
+ * het bestand veilig staat en wanneer wij het vanzelf opnieuw proberen.
+ */
+export const DOC_TYPE_WACHT_OP_LIMIET = "wacht_op_limiet" as const;
+
+/**
  * De toestanden waarin een document op IEMAND wacht in plaats van klaar te zijn.
  *
  * Eén lijst, omdat elk scherm dat "is hier nog iets mee aan de hand?" vraagt hem in zijn geheel
@@ -81,6 +100,7 @@ export const DOC_TYPE_WACHT_OP_BESLUIT = "wacht_op_besluit" as const;
  */
 export const WACHTENDE_DOC_TYPES: readonly string[] = [
   DOC_TYPE_WACHT_OP_LEZEN,
+  DOC_TYPE_WACHT_OP_LIMIET,
   DOC_TYPE_WACHT_OP_BESLUIT,
 ];
 
@@ -100,6 +120,19 @@ export function mayDrainRetry(aiDocType: string | null | undefined): boolean {
 }
 
 /**
+ * [ONTVANGEN] Wacht dit op ons, maar mag het pas NA een bepaald moment weer geprobeerd worden?
+ *
+ * Bewust een eigen vraag naast mayDrainRetry, en niet een derde waarde erin. Die functie zegt
+ * "hier mag je nu mee door"; deze zegt "hier mag je mee door, maar niet vóór een tijdstip dat
+ * ergens anders staat". Zou wacht_op_limiet gewoon in mayDrainRetry zitten, dan was de tijdpoort
+ * iets wat de aanroeper moet ONTHOUDEN — en een poort die je moet onthouden, vergeet iemand. Dan
+ * draait de drain elk uur tegen een grens die pas op de 1e verschuift.
+ */
+export function isTimeGatedWait(aiDocType: string | null | undefined): boolean {
+  return (aiDocType ?? "").trim() === DOC_TYPE_WACHT_OP_LIMIET;
+}
+
+/**
  * De volledige lijst die het overgeslagen-paneel moet tellen.
  *
  * DIT IS DE ENIGE PLEK waar die lijst staat. Voegt een nieuwe opnameweg ooit een derde reden
@@ -111,10 +144,14 @@ export const SKIPPED_DOC_TYPES: readonly string[] = [
   DOC_TYPE_UNSUPPORTED,
 ];
 
-// [ONTVANGEN] De twee wachttoestanden horen hier NIET bij, en dat is geen omissie. "Overgeslagen"
+// [ONTVANGEN] De DRIE wachttoestanden horen hier NIET bij, en dat is geen omissie. "Overgeslagen"
 // betekent: er kwam iets binnen dat wij niet hebben verwerkt. Een document dat nog in de rij staat
-// is niet overgeslagen, en een document dat op een antwoord van de eigenaar wacht al helemaal
-// niet — dat wacht op hem, niet op ons. Een gate hieronder houdt die twee lijsten uit elkaar.
+// is niet overgeslagen; een document dat op een antwoord van de eigenaar wacht al helemaal niet —
+// dat wacht op hem, niet op ons; en een document dat op de maandgrens wacht is niet overgeslagen
+// maar gepauzeerd, met een datum waarop wij het uit onszelf weer oppakken. Zou die laatste hier
+// wél staan, dan meldt het paneel "overgeslagen bij import" over een bestand waar niets mis mee
+// is en waar de eigenaar niets aan hoeft te doen — precies de valse alarmbel die de kop van dit
+// bestand beschrijft. Een gate hieronder houdt de lijsten uit elkaar.
 
 /**
  * Welke `ai_doc_type` hoort een opgeslagen document te krijgen?

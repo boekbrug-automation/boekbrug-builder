@@ -445,7 +445,10 @@ async function runIntake(req: NextRequest) {
   })
   // A library-built Response (rate limit, Fair Use, storage) carries headers a client reads, so
   // it is handed back whole rather than rebuilt from a body and a status.
-  return outcome.kind === "response"
+  // [ONTVANGEN] "paused" carries a domain fact AND the library-built 402. This door still has a
+  // client, so it hands back the answer it always did; the background caller reads the fact and
+  // writes the durable state instead.
+  return outcome.kind === "response" || outcome.kind === "paused"
     ? outcome.response
     : NextResponse.json(outcome.body, { status: outcome.status })
 }

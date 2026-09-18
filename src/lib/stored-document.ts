@@ -34,7 +34,9 @@
 
 import { createPipelineClient } from "@/lib/supabase-pipeline"
 import { intentFromStoredDocument, type IntakeIntent } from "@/lib/intake-intent"
-import { mayDrainRetry, SKIPPED_DOC_TYPES } from "@/lib/skipped-import"
+import { mayDrainRetry, isTimeGatedWait, SKIPPED_DOC_TYPES, DOC_TYPE_WACHT_OP_LIMIET } from "@/lib/skipped-import"
+import { pauseIsOver, pauseForFairUse, pauseColumns } from "@/lib/fair-use-pause"
+import type { FairUseKey } from "@/lib/fair-use"
 
 /** Why the processor was woken. A fresh handoff and a later sweep may pick up different states. */
 export type ProcessMode = "fresh_intake" | "retry_skipped"
@@ -62,13 +64,16 @@ export type StoredDocumentLoad =
   | { kind: "ready"; doc: StoredDocument }
   | { kind: "gone" }
   | { kind: "not_waiting"; state: string }
+  /** Waiting on us, but not before this moment — the month's allowance. Not a failure. */
+  | { kind: "paused"; until: string | null }
   | { kind: "bytes_missing"; storagePath: string }
   | { kind: "unavailable"; where: "row" | "bytes" }
 
 /** The columns the processor actually reads. Named once so the query and the type cannot drift. */
 const COLUMNS =
   "id, user_id, file_url, file_name, file_type, ai_doc_type, content_hash, " +
-  "intake_paid_method, intake_paid_date, duplicate_decision, duplicate_candidate_invoice_id"
+  "intake_paid_method, intake_paid_date, duplicate_decision, duplicate_candidate_invoice_id, " +
+  "intake_retry_after"
 
 type Row = {
   id: string
@@ -82,6 +87,7 @@ type Row = {
   intake_paid_date?: string | null
   duplicate_decision?: string | null
   duplicate_candidate_invoice_id?: string | null
+  intake_retry_after?: string | null
 }
 
 /**
@@ -110,7 +116,31 @@ type Row = {
  */
 export function mayResume(mode: ProcessMode, aiDocType: string | null | undefined): boolean {
   const state = (aiDocType ?? "").trim()
-  return mode === "fresh_intake" ? mayDrainRetry(state) : SKIPPED_DOC_TYPES.includes(state)
+  if (mode === "retry_skipped") return SKIPPED_DOC_TYPES.includes(state)
+  // A first reading covers what waits on us AND what is merely paused. Whether the pause has run
+  // out is a separate question with a separate answer — see resumeVerdict.
+  return mayDrainRetry(state) || isTimeGatedWait(state)
+}
+
+/**
+ * The full answer: may this run start, and if not, why not?
+ *
+ * Three outcomes rather than a boolean, because a paused document and a finished one want opposite
+ * treatment. "Not waiting" means never again; "paused" means not yet, and the drain must leave it
+ * alone WITHOUT treating it as done, without reading it, and without spending anything on it.
+ *
+ * The date is the only thing consulted here. Reaching it does not mean there is room — it means
+ * asking again can give a different answer, and the Fair Use gate remains the one that answers.
+ */
+export function resumeVerdict(
+  mode: ProcessMode,
+  aiDocType: string | null | undefined,
+  retryAfter: string | null | undefined,
+  now: Date,
+): "resume" | "not_waiting" | "paused" {
+  if (!mayResume(mode, aiDocType)) return "not_waiting"
+  if (isTimeGatedWait(aiDocType) && !pauseIsOver(retryAfter, now)) return "paused"
+  return "resume"
 }
 
 export interface LoadDeps {
@@ -131,6 +161,7 @@ export async function loadStoredDocument(
   userId: string,
   mode: ProcessMode,
   deps: LoadDeps = {},
+  now: Date = new Date(),
 ): Promise<StoredDocumentLoad> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pipeline: any = deps.pipeline ?? createPipelineClient()
@@ -154,7 +185,9 @@ export async function loadStoredDocument(
   }
 
   if (!row) return { kind: "gone" }
-  if (!mayResume(mode, row.ai_doc_type)) return { kind: "not_waiting", state: row.ai_doc_type ?? "" }
+  const verdict = resumeVerdict(mode, row.ai_doc_type, row.intake_retry_after, now)
+  if (verdict === "not_waiting") return { kind: "not_waiting", state: row.ai_doc_type ?? "" }
+  if (verdict === "paused") return { kind: "paused", until: row.intake_retry_after ?? null }
   // A waiting row with no file is not something to read; it is something to notice.
   if (!row.file_url) return { kind: "bytes_missing", storagePath: "" }
 
@@ -192,5 +225,139 @@ export async function loadStoredDocument(
       duplicateCandidateInvoiceId: row.duplicate_candidate_invoice_id ?? null,
       buffer,
     },
+  }
+}
+
+// ── [ONTVANGEN] Moving a document INTO the paused state ───────────────────────────────────────
+
+export type PauseWrite =
+  /** The state changed. This run, and only this run, owes the owner the one notification. */
+  | { kind: "entered"; retryAfter: string }
+  /** It was already paused; the date was refreshed. Nobody is told anything again. */
+  | { kind: "refreshed"; retryAfter: string }
+  /** Nothing was written — the row is gone, or is not this owner's. */
+  | { kind: "failed" }
+
+/**
+ * Record that the month's allowance has paused this document, and say whether that was a
+ * TRANSITION or a repeat.
+ *
+ * ── WHY THE ANSWER CARRIES THAT DISTINCTION ──
+ *
+ * The owner is told once, on entering the state. Deciding that in the caller would mean reading
+ * the row, deciding, then writing — and two passes that both read "not paused yet" before either
+ * writes would both send the notification. The rule is therefore decided BY the write: the update
+ * that moves the state refuses to match a row already in it, so exactly one caller can ever be
+ * told it transitioned. Same shape as the [EB-RACE] claim: the database settles it, not a
+ * comparison in application code.
+ *
+ * A second update then refreshes the date on a row that was already paused. That case is real and
+ * must not be skipped: a document paused in September, woken on 1 October and refused again
+ * because the new month is full too, needs November — not a date in the past that would have the
+ * drain pick it up on every pass for a month.
+ */
+export async function pauseDocumentForFairUse(args: {
+  documentId: string
+  userId: string
+  metric: FairUseKey
+  now?: Date
+  deps?: LoadDeps
+}): Promise<PauseWrite> {
+  const now = args.now ?? new Date()
+  const pause = pauseForFairUse(args.metric, now)
+  const columns = pauseColumns(pause)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pipeline: any = args.deps?.pipeline ?? createPipelineClient()
+
+  try {
+    // The transition. `neq` is what makes the notification exactly-once.
+    const entered = await pipeline
+      .from("documents")
+      .update({ ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, ai_processed: false, ...columns })
+      .eq("id", args.documentId)
+      .eq("user_id", args.userId)
+      .neq("ai_doc_type", DOC_TYPE_WACHT_OP_LIMIET)
+      .select("id")
+    if (entered.error) {
+      console.error("[ONTVANGEN] could not pause the document for fair use", {
+        documentId: args.documentId, error: entered.error.message,
+      })
+      return { kind: "failed" }
+    }
+    if ((entered.data ?? []).length > 0) return { kind: "entered", retryAfter: pause.retryAfter }
+
+    // Already paused — move the date, tell nobody.
+    const refreshed = await pipeline
+      .from("documents")
+      .update(columns)
+      .eq("id", args.documentId)
+      .eq("user_id", args.userId)
+      .eq("ai_doc_type", DOC_TYPE_WACHT_OP_LIMIET)
+      .select("id")
+    if (refreshed.error || (refreshed.data ?? []).length === 0) {
+      if (refreshed.error) {
+        console.error("[ONTVANGEN] could not refresh the pause date", {
+          documentId: args.documentId, error: refreshed.error.message,
+        })
+      }
+      return { kind: "failed" }
+    }
+    return { kind: "refreshed", retryAfter: pause.retryAfter }
+  } catch (e) {
+    console.error("[ONTVANGEN] the pause write threw", {
+      documentId: args.documentId, error: e instanceof Error ? e.message : String(e),
+    })
+    return { kind: "failed" }
+  }
+}
+
+/**
+ * [ONTVANGEN] A plan that grew may wake a paused document early.
+ *
+ * An owner who upgrades while a document waits should not be told to come back on the 1st. The
+ * measurement that made this cheap: the billing webhook already writes the plan label in one
+ * best-effort statement, so the wake-up is one more statement in the same place — no polling, no
+ * new billing architecture, and no drain that has to keep asking whether anyone upgraded.
+ *
+ * ── WHAT IT DOES AND DELIBERATELY DOES NOT DO ──
+ *
+ * It moves the retry point to now. That is all. The state stays `wacht_op_limiet`, because that is
+ * still what the row IS until something reads it; no allowance is consumed, no reader is invoked,
+ * and nobody is notified a second time. The next ordinary drain pass finds the pause over, asks
+ * the Fair Use gate, and the gate answers — with the new plan, which is the whole point.
+ *
+ * Never inferring an allowance from an upgrade is the same rule the retry date follows: reaching
+ * the moment means the answer CAN be different, not that it is.
+ *
+ * Best-effort by design, like the plan-label write it sits beside: a failure here costs an owner
+ * a wait they were already expecting, and must never take down the write that grants them access.
+ */
+export async function wakePausedDocumentsForPlanChange(args: {
+  userId: string
+  now?: Date
+  deps?: LoadDeps
+}): Promise<{ woken: number }> {
+  const now = args.now ?? new Date()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pipeline: any = args.deps?.pipeline ?? createPipelineClient()
+  try {
+    const { data, error } = await pipeline
+      .from("documents")
+      .update({ intake_retry_after: now.toISOString() })
+      .eq("user_id", args.userId)
+      .eq("ai_doc_type", DOC_TYPE_WACHT_OP_LIMIET)
+      .select("id")
+    if (error) {
+      console.error("[ONTVANGEN] could not wake the paused documents after a plan change", {
+        userId: args.userId, error: error.message,
+      })
+      return { woken: 0 }
+    }
+    return { woken: (data ?? []).length }
+  } catch (e) {
+    console.error("[ONTVANGEN] the plan-change wake-up threw", {
+      userId: args.userId, error: e instanceof Error ? e.message : String(e),
+    })
+    return { woken: 0 }
   }
 }
