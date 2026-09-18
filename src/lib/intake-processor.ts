@@ -41,6 +41,8 @@ import { randomUUID } from "node:crypto"
 // [DEUR-VANGNET] Eén vangnet voor elke deur waar een document binnenkomt.
 import { createServerSupabaseClient } from "@/lib/supabase-server"
 import { createPipelineClient } from "@/lib/supabase-pipeline"
+// [ONTVANGEN] One row, two owners: RECEIVE writes identity, the reading writes classification.
+import { insertClassifiedDocument } from "@/lib/document-placement"
 import { fetchAllRows, fetchAllRowsForIds } from "@/lib/supabase-paginate";
 import { createNotification } from "@/lib/notifications"
 import {
@@ -777,17 +779,22 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
     // we never assert it isn't an invoice when we simply didn't manage to read it.
     const couldNotRead = !(v.confidence > 0)
     const folderId = await ensureImportedFolder(user.id, "pipeline")
-    const { data: doc, error: docErr } = await pipeline
-      .from("documents")
-      .insert({
+    // [ONTVANGEN] Identity and classification are two owners of one row — see document-placement.ts.
+    // This door knows both at once, so it writes both at once; the background pass, which finds the
+    // identity already written, may only ever write the half below.
+    const placedA = await insertClassifiedDocument(
+      {
         user_id: user.id,
         file_name: upload.fileName,
         file_url: storagePath,
         file_size: upload.buffer.length,
         file_type: uploadType, // [MIME-HONEST] hetzelfde type als waarmee het in storage staat
+        content_hash: contentHash,
+        source,
+      },
+      {
         doc_type: "overig",
         folder_id: folderId,
-        source,
         // Only claim we processed it when we actually read it.
         ai_processed: !couldNotRead,
         // [OBSERVABILITY] En schrijf de REDEN weg, niet de gok. Hier stond
@@ -798,18 +805,17 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
         // binnenkwam is verwerkt". Dat is de zin die een ondernemer laat ophouden met zoeken
         // naar de bon die zijn boekhouder mist.
         ai_doc_type: docTypeForStoredFile(couldNotRead, v.document_kind),
-        content_hash: contentHash,
-      })
-      .select("id")
-      .single()
+      },
+      pipeline,
+    )
     // [R1] Don't report success on a failed write. Roll back the stored file so it isn't
     // orphaned in Storage (a leaked object with no row), and tell the owner to retry.
-    if (docErr || !doc) {
+    if (placedA.kind !== "placed") {
       await supabase.storage.from("documents").remove([storagePath])
       // [23505] De drie zuster-inserts vertalen een verloren race al naar een nette 409 — dit was
       // de enige zonder. Een dubbelklik op uploaden kreeg hier een 500 "probeer opnieuw" over een
       // bestand dat er net wél in kwam, vermomd als opslagfout.
-      if ((docErr as { code?: string } | null)?.code === "23505") {
+      if (placedA.kind === "duplicate") {
         return json(
           { error: "Dit bestand staat al in je bestanden.", duplicate: true },
           { status: 409 }
@@ -820,6 +826,7 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
         { status: 500 }
       )
     }
+    const doc = { id: placedA.documentId }
     // [INTAKE-FEEDBACK] resolve the folder name so the client can show "where"
     // and deep-link to it (same breadcrumb helper as the duplicate path).
     const docFolderPath = await buildFolderBreadcrumb(supabase, user.id, folderId)
@@ -928,35 +935,38 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
   // document and the invoice disagreed about the period of the same bill.
   const folderId = await resolveImportTarget(user.id, invoiceDate, "facturen", "pipeline")
 
-  const { data: doc, error: docErr } = await pipeline
-    .from("documents")
-    .insert({
+  // [ONTVANGEN] Same split as the bestanden road above: this door knows identity and
+  // classification together, so it writes them together.
+  const placedB = await insertClassifiedDocument(
+    {
       user_id: user.id,
       file_name: upload.fileName,
       file_url: storagePath,
       file_size: upload.buffer.length,
       file_type: uploadType, // [MIME-HONEST] hetzelfde type als waarmee het in storage staat
+      content_hash: contentHash,
+      source,
+    },
+    {
       doc_type: "factuur",
       folder_id: folderId,
       year: invoiceDate ? new Date(invoiceDate).getFullYear() : null,
-      source,
       ai_processed: true,
       ai_doc_type: decision.destination === "receipt" ? "receipt" : "invoice",
-      content_hash: contentHash,
-    })
-    .select("id")
-    .single()
+    },
+    pipeline,
+  )
   // [R1] The document row IS the evidence link for an incoming invoice (the closing
   // package resolves the PDF via invoices.document_id → documents.file_url). If it fails
   // to write, an invoice with document_id=null has unreachable evidence. Stop and roll
   // back the stored file rather than create a half-linked, evidence-less invoice.
-  if (docErr || !doc) {
+  if (placedB.kind !== "placed") {
     await supabase.storage.from("documents").remove([storagePath])
     // [DEDUP-ATOMIC] A concurrent double-submit that raced past the byte-hash SELECT above trips the
     // (user_id, content_hash) UNIQUE index here (23505). Treat it like the SELECT-found duplicate —
     // the other request already stored the document + created its invoice, so returning a duplicate
     // (not a 500) stops a second invoice from being created and double-counting the cost.
-    if (docErr && (docErr as { code?: string }).code === "23505") {
+    if (placedB.kind === "duplicate") {
       const { data: dup } = await supabase
         .from("documents").select("id, folder_id").eq("user_id", user.id).eq("content_hash", contentHash).limit(1).maybeSingle()
       const folderPath = dup ? await buildFolderBreadcrumb(supabase, user.id, dup.folder_id ?? null) : []
@@ -971,7 +981,7 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
       { status: 500 }
     )
   }
-  const documentId = doc.id
+  const documentId = placedB.documentId
 
   // [SMART-INTAKE] Merge an intake suggestion into field_confidence (same jsonb
   // pattern as _safecore). _intake_suggest='paid' tells the verify queue to
