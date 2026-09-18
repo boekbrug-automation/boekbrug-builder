@@ -103,10 +103,44 @@ import { planOchtendMail, takenVoorMail, type OchtendTaak } from "./ochtend-dige
  * inside a path-ish string follows a letter or a dot, so requiring the delimiter separates them
  * without needing a tokenizer.
  */
-function code(path: string): string {
+function codeFile(path: string): string {
   return readFileSync(path, "utf8")
     .replace(/(^|[\s{(,;=])\/\*[\s\S]*?\*\//g, "$1 ")
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+}
+
+/**
+ * [ONTVANGEN] A door that is spread over more than one file is still ONE door.
+ *
+ * Almost a hundred gates here name a route file and then assert what that DOOR does — that it
+ * resolves a supplier, that it books through the audited RPC, that it asks the owner's
+ * permission, that it never writes a variable it cannot fence. The file was the door, so naming
+ * the file was naming the door.
+ *
+ * [ONTVANGEN] #129 split /api/intake in two: the route keeps the guards and the deterministic
+ * branches, and intake-processor.ts holds everything that needs the reader. Not one of those
+ * invariants changed — but 33 gates went red at once, because they were looking at a file and
+ * the code had moved to its other half.
+ *
+ * Widening the lookup here, rather than editing 33 gates, is the honest fix and the safer one:
+ *
+ *   · every `match` keeps asking what it asked — "the intake door does X" — now over the whole
+ *     door instead of the half that used to hold all of it;
+ *   · every `doesNotMatch` gets STRONGER, because a forbidden thing can no longer hide by
+ *     moving to the other half;
+ *   · and editing 33 assertions by hand is 33 chances to weaken one by accident, on a path
+ *     where the assertions are about money.
+ *
+ * A gate that genuinely means one FILE — [ONTVANGEN-PARITEIT] asserts the tail was moved and not
+ * copied, so it must see the route alone — uses codeFile() and says why.
+ */
+const DOOR_HALVES: Record<string, readonly string[]> = {
+  "src/app/api/intake/route.ts": ["src/app/api/intake/route.ts", "src/lib/intake-processor.ts"],
+};
+
+function code(path: string): string {
+  const halves = DOOR_HALVES[path];
+  return halves ? halves.map(codeFile).join("\n") : codeFile(path);
 }
 
 test("[STRIPPER-BLIND] the comment stripper this whole file rests on does not eat code", () => {
@@ -8040,10 +8074,22 @@ test("[RLS-UIT] every service-role query on the money line is scoped to one owne
     "src/app/api/invoice", "src/app/api/pay", "src/app/api/documents", "src/app/api/email", "src/app/api/mollie",
     "src/app/api/intake", "src/app/api/aangifte", "src/app/api/readiness", "src/app/api/result",
     "src/app/api/accountant", "src/app/api/btw", "src/app/api/snelstart",
+    // [ONTVANGEN] A FILE, not a directory — and the reason it is named here is the finding.
+    //
+    // This audit walked API directories, because that is where the money-line service-role
+    // queries were. [ONTVANGEN] #129 moved /api/intake's tail — the invoice insert, the receipt
+    // settlement, apply_manual_payment, the claim, the documents write, 1.235 lines of it — into
+    // src/lib/, and the audit's own staleness check is what noticed: an exception stopped
+    // matching, because the query it pardoned had walked out of the audited area entirely.
+    //
+    // A refactor that silently removes code from a security audit is worse than the hole the
+    // audit looks for, because afterwards everything is green. So the walk follows the code.
+    "src/lib/intake-processor.ts",
   ];
   const walk = (dir: string): string[] => {
     const out: string[] = [];
     if (!existsSync(dir)) return out;
+    if (statSync(dir).isFile()) return dir.endsWith(".ts") ? [dir] : out;
     for (const e of readdirSync(dir)) {
       const p = `${dir}/${e}`;
       if (statSync(p).isDirectory()) out.push(...walk(p));
@@ -8156,7 +8202,10 @@ test("[RLS-UIT] every service-role query on the money line is scoped to one owne
     },
     // ── [DIEP-3] The seven widened roots — each flag read and cleared by hand ──
     {
-      file: "src/app/api/intake/route.ts", table: "intake_claims",
+      // [ONTVANGEN] The query did not change; it moved. /api/intake's tail is now
+      // intake-processor.ts, and this list is keyed on the FILE the query lives in — which is
+      // the right key, and why this entry had to follow it rather than be widened.
+      file: "src/lib/intake-processor.ts", table: "intake_claims",
       must: '.update({ created_at: new Date().toISOString() }).eq("id", holder.id)',
       why: "heartbeat takeover of a STALE claim; holder.id was read in this same request for this " +
         "supplier's own pipeline, and taking over a crashed claim is the intended semantics",
@@ -32641,7 +32690,7 @@ test("[AANHECHT-EERST] a reader outage never mints a paid invoice, and never eat
 // cash reconcile must come after the settlement; the bank auto-confirm after that. Re-ordering
 // them is how an invoice gets settled against a payment nobody has booked yet.
 test("[ONTVANGEN-PARITEIT] every financial effect survived the move, in the same order", () => {
-  const proc = code("src/lib/intake-processor.ts");
+  const proc = codeFile("src/lib/intake-processor.ts");
   const body = proc.slice(proc.indexOf("} = ctx"));
   assert.ok(body.length > 20000, "[ONTVANGEN-PARITEIT] the processor body window found almost nothing");
 
@@ -32672,7 +32721,8 @@ test("[ONTVANGEN-PARITEIT] every financial effect survived the move, in the same
 
   // Moved, not COPIED. A second copy left behind in the route is how two intake paths are born,
   // and the second one drifts because nobody remembers it is there.
-  const route = code("src/app/api/intake/route.ts");
+  // codeFile, not code: this gate is precisely about what is NOT in the route half.
+  const route = codeFile("src/app/api/intake/route.ts");
   for (const call of ["verifyInvoiceFromPdf(", "apply_manual_payment", "runBankAutoConfirm(", "shouldAutoAdvanceInvoice("]) {
     assert.ok(!route.includes(call),
       `[ONTVANGEN-PARITEIT] ${call} is still in the route as well — the tail was copied, not moved`);
