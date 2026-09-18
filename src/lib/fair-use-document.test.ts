@@ -5,6 +5,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { reserveAiDocument, releaseAiDocument } from "./fair-use-document"
+import { limitForPlan, type UsagePlan } from "./fair-use-usage"
 
 const USER = "11111111-1111-1111-1111-111111111111"
 const DOC = "0cbc765a-7244-4722-bbce-dc8e7ecfaeb3"
@@ -29,6 +30,7 @@ class FakeDb {
     if (name === "fair_use_consume_for_document") {
       const period = String(args.p_period)
       const limit = Number(args.p_limit)
+      assert.equal(args.p_metric, undefined, "the RPC takes no metric — the marker cannot represent one")
       if (this.marker !== null) {
         const used = this.counters[this.marker] ?? 0
         return { data: [{ allowed: true, used, remaining: limit > 0 ? Math.max(0, limit - used) : -1, replayed: true }], error: null }
@@ -43,6 +45,7 @@ class FakeDb {
     }
 
     if (name === "fair_use_release_for_document") {
+      assert.equal(args.p_metric, undefined, "the release takes no metric either")
       if (this.marker === null) return { data: [{ released: false, period: null }], error: null }
       const p = this.marker
       this.counters[p] = Math.max(0, (this.counters[p] ?? 0) - 1)
@@ -54,7 +57,7 @@ class FakeDb {
 }
 
 type Pipe = NonNullable<Parameters<typeof reserveAiDocument>[0]["pipeline"]>
-const call = (db: FakeDb, now: Date, plan: "free" | "plus" = "free") =>
+const call = (db: FakeDb, now: Date, plan: UsagePlan = "free") =>
   reserveAiDocument({ userId: USER, documentId: DOC, plan, now, pipeline: db as unknown as Pipe })
 
 const SEPT = new Date("2026-09-18T13:00:00Z")
@@ -148,4 +151,23 @@ test("[ONTVANGEN] a document that is not this owner's reserves nothing", async (
   assert.deepEqual(await call(db, SEPT), { kind: "unavailable" })
   assert.equal(db.marker, null)
   assert.deepEqual(db.counters, {}, "nobody's counter moved")
+})
+
+
+test("[ONTVANGEN] every plan gets the ceiling limitForPlan says it gets", async () => {
+  // The rule already has an owner: free gets the published ceiling, and EVERY paid plan gets 0,
+  // which the counter reads as "count, do not bound". Rebuilding it here as
+  // `plan === "plus" ? … : free` put boekhouder on the FREE ceiling — a plan that is supposed to
+  // have none. The defect was not the branch; it was owning a second copy of someone else's rule.
+  const seen: Record<string, number> = {}
+  for (const plan of ["free", "plus", "boekhouder"] as UsagePlan[]) {
+    const db = new FakeDb()
+    const spy = { rpc: async (n: string, a: Record<string, unknown>) => { seen[plan] = Number(a.p_limit); return db.rpc(n, a) } }
+    await reserveAiDocument({ userId: USER, documentId: DOC, plan, now: SEPT, pipeline: spy as unknown as Pipe })
+  }
+  assert.equal(seen.free, limitForPlan("aiDocuments", "free"), "free gets the published ceiling")
+  assert.equal(seen.free, 10, "…which is 10 aiDocuments a month")
+  assert.equal(seen.plus, 0, "plus is counted, not bounded")
+  assert.equal(seen.boekhouder, 0, "and so is boekhouder — the regression this test exists for")
+  assert.notEqual(seen.boekhouder, seen.free)
 })

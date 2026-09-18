@@ -67,3 +67,21 @@ COMMENT ON INDEX public.uq_invoices_document_id IS
 --
 -- Verwacht: indisunique=t, indisvalid=t, indisready=t, indislive=t,
 --           partieel_op = (document_id IS NOT NULL)
+--
+-- ── ALS DIE CONTROLE NIET KLOPT: DE HERSTELWEG ──────────────────────────────────────────────
+--
+-- Dit is de val waar IF NOT EXISTS een handlanger van is. CREATE INDEX CONCURRENTLY kan halverwege
+-- afbreken — een conflicterende transactie, een timeout, een deploy die wordt weggedrukt — en laat
+-- dan een index ACHTER MET DE GEVRAAGDE NAAM die INVALID is. Zo'n index dwingt niets af.
+--
+-- En dan: een tweede poging met IF NOT EXISTS ziet de NAAM, zegt "staat er al", en slaat het
+-- aanmaken over. De migratie meldt succes, \d toont een unique index, en er is geen grens. Precies
+-- de uitkomst waar deze hele grens tegen bedoeld is, bereikt door hem twee keer te draaien.
+--
+-- Dus: wanneer de controle hierboven iets anders dan vier keer 't geeft, eerst weg en dan opnieuw.
+-- Met de hand, los, en NOOIT binnen een transactie of als automatische stap in een andere migratie:
+-- een DROP die per ongeluk een GELDIGE index raakt haalt de grens weg waar iedereen op vertrouwt.
+--
+--   DROP INDEX CONCURRENTLY public.uq_invoices_document_id;
+--   -- daarna het CREATE-statement bovenaan dit bestand opnieuw, los,
+--   -- en daarna de pg_index-controle opnieuw. Pas bij vier keer 't is hij er echt.

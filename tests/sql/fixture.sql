@@ -83,9 +83,12 @@ CREATE TABLE public.invoice_counters (
   PRIMARY KEY (user_id, year, type)
 );
 
--- The two roles the migration GRANTs to. Created only if absent so a real Supabase-like database
--- can run this file too.
+-- The roles the migrations GRANT to. Created only if absent so a real Supabase-like database can
+-- run this file too. `anon` joins them because a privilege seam has to be able to ASK about the
+-- role that reaches the database with no session at all — the one whose EXECUTE rights matter most
+-- and are easiest to leave standing by accident.
 DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')          THEN CREATE ROLE anon;          END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role')  THEN CREATE ROLE service_role;  END IF;
 END $$;

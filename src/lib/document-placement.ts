@@ -153,8 +153,11 @@ export type LinkOutcome =
   | { kind: "linked" }
   /** Already pointing at this invoice. Nothing to do, and not an error. */
   | { kind: "already_linked" }
-  /** The pair does not hold together for this owner. Never repaired, never guessed at. */
-  | { kind: "refused"; why: "document" | "invoice" | "not_evidence" }
+  /**
+   * The pair does not hold together for this owner, OR the document is already the evidence of a
+   * DIFFERENT invoice. Never repaired, never guessed at, and above all never overwritten.
+   */
+  | { kind: "refused"; why: "document" | "invoice" | "not_evidence" | "linked_elsewhere" }
   | { kind: "failed"; error: string | null }
 
 /**
@@ -175,6 +178,23 @@ export type LinkOutcome =
  *
  * RLS is off on both tables, so the owner predicates in these statements are the whole boundary.
  */
+/** One read of the document's current link, so the CAS and its re-read cannot ask differently. */
+async function readDocumentLink(
+  documentId: string,
+  ownerId: string,
+  pipeline: Pipeline,
+): Promise<{ kind: "read"; linkedTo: string | null } | { kind: "refused"; why: "document" } | { kind: "failed"; error: string | null }> {
+  const { data, error } = await pipeline
+    .from("documents")
+    .select("id, invoice_id")
+    .eq("id", documentId)
+    .eq("user_id", ownerId)
+    .maybeSingle()
+  if (error) return { kind: "failed", error: error.message ?? null }
+  if (!data) return { kind: "refused", why: "document" }
+  return { kind: "read", linkedTo: (data.invoice_id as string | null) ?? null }
+}
+
 export async function linkDocumentToInvoice(
   documentId: string,
   ownerId: string,
@@ -182,15 +202,12 @@ export async function linkDocumentToInvoice(
   pipeline: Pipeline = createPipelineClient(),
 ): Promise<LinkOutcome> {
   try {
-    const { data: doc, error: docErr } = await pipeline
-      .from("documents")
-      .select("id, invoice_id")
-      .eq("id", documentId)
-      .eq("user_id", ownerId)
-      .maybeSingle()
-    if (docErr) return { kind: "failed", error: docErr.message ?? null }
-    if (!doc) return { kind: "refused", why: "document" }
-    if (doc.invoice_id === invoiceId) return { kind: "already_linked" }
+    const read = await readDocumentLink(documentId, ownerId, pipeline)
+    if (read.kind !== "read") return read
+    // Already the evidence of ANOTHER invoice. A repair tool fills a missing relation; it does not
+    // move a financial one. Overwriting here would silently detach the invoice that row belongs to.
+    if (read.linkedTo && read.linkedTo !== invoiceId) return { kind: "refused", why: "linked_elsewhere" }
+    if (read.linkedTo === invoiceId) return { kind: "already_linked" }
 
     const { data: inv, error: invErr } = await pipeline
       .from("invoices")
@@ -204,15 +221,31 @@ export async function linkDocumentToInvoice(
     // repair path could attach any document to any of the owner's invoices.
     if (inv.document_id !== documentId) return { kind: "refused", why: "not_evidence" }
 
+    // ── The compare-and-set ──────────────────────────────────────────────────────────────────
+    //
+    // `.is("invoice_id", null)` is what makes this safe against a slow worker. Between the read
+    // above and this write, an owner action or a successor may have linked the row; without the
+    // predicate our UPDATE would land anyway and overwrite a newer truth with an older one.
+    //
+    // Matching zero rows is therefore NOT a failure and NOT a reason to retry. It means the world
+    // moved, so we re-read and report what it moved to.
     const { data: written, error: wErr } = await pipeline
       .from("documents")
       .update({ invoice_id: invoiceId })
       .eq("id", documentId)
       .eq("user_id", ownerId)
+      .is("invoice_id", null)
       .select("id")
     if (wErr) return { kind: "failed", error: wErr.message ?? null }
-    if (!(written ?? []).length) return { kind: "refused", why: "document" }
-    return { kind: "linked" }
+    if ((written ?? []).length) return { kind: "linked" }
+
+    const after = await readDocumentLink(documentId, ownerId, pipeline)
+    if (after.kind !== "read") return after
+    if (after.linkedTo === invoiceId) return { kind: "already_linked" }   // a twin won; benign
+    if (after.linkedTo) return { kind: "refused", why: "linked_elsewhere" }
+    // Still null and still ours, yet the write matched nothing: something we cannot explain.
+    // Reporting "linked" here would claim a repair that did not happen.
+    return { kind: "failed", error: null }
   } catch (e) {
     return { kind: "failed", error: e instanceof Error ? e.message : String(e) }
   }

@@ -15,11 +15,18 @@
 // So the reservation is durable and belongs to the document: `documents.intake_ai_counted_period`
 // is written in the SAME transaction that increments the counter. There is no instant at which
 // the counter has moved and the document does not know it.
+//
+// ── AND IT IS ABOUT ONE METRIC, ON PURPOSE ───────────────────────────────────────────────────
+//
+// The marker is a single value. It can say "this document has paid" and nothing about WHICH
+// allowance it paid. A metric parameter here would therefore be a trap rather than a feature:
+// reserve metric A, the marker fills; ask later for metric B, the function sees a marker and
+// answers `replayed` — and B is never counted. Nothing fails, nothing logs, a counter simply
+// stands still. So there is no metric argument in this module and none in the SQL: the schema
+// cannot represent the generality, so the API does not offer it.
 
 import { createPipelineClient } from "@/lib/supabase-pipeline"
-import { currentPeriod } from "@/lib/fair-use-usage"
-import { fairUseLimit } from "@/lib/fair-use"
-import type { FairUseKey } from "@/lib/fair-use"
+import { currentPeriod, limitForPlan } from "@/lib/fair-use-usage"
 import type { UsagePlan } from "@/lib/fair-use-usage"
 
 export type DocumentAllowance =
@@ -47,20 +54,22 @@ export async function reserveAiDocument(args: {
   userId: string
   documentId: string
   plan: UsagePlan
-  metric?: FairUseKey
   now?: Date
   pipeline?: Pipeline
 }): Promise<DocumentAllowance> {
-  const metric: FairUseKey = args.metric ?? "aiDocuments"
   const period = currentPeriod(args.now)
-  const limit = args.plan === "plus" ? fairUseLimit(metric).plus : fairUseLimit(metric).free
+  // [ONTVANGEN] limitForPlan, not a ternary of my own. The rule is already written down once:
+  // free gets the published ceiling and EVERY paid plan gets 0, which means "count, do not bound".
+  // Rebuilding it here as `plan === "plus" ? … : free` quietly put boekhouder on the free ceiling —
+  // a plan that is supposed to have none. The bug is not the branch; it is having a second copy of
+  // a rule that already has an owner.
+  const limit = limitForPlan("aiDocuments", args.plan)
   const pipeline: Pipeline = args.pipeline ?? createPipelineClient()
   try {
     const { data, error } = await pipeline.rpc("fair_use_consume_for_document", {
       p_user_id: args.userId,
       p_document_id: args.documentId,
       p_period: period,
-      p_metric: metric,
       p_limit: limit,
     })
     if (error || !data || !data.length) {
@@ -91,7 +100,6 @@ export async function reserveAiDocument(args: {
 export async function releaseAiDocument(args: {
   userId: string
   documentId: string
-  metric?: FairUseKey
   pipeline?: Pipeline
 }): Promise<{ released: boolean; period: string | null }> {
   const pipeline: Pipeline = args.pipeline ?? createPipelineClient()
@@ -99,7 +107,6 @@ export async function releaseAiDocument(args: {
     const { data, error } = await pipeline.rpc("fair_use_release_for_document", {
       p_user_id: args.userId,
       p_document_id: args.documentId,
-      p_metric: args.metric ?? "aiDocuments",
     })
     if (error || !data || !data.length) {
       console.error("[ONTVANGEN] the per-document release failed", { documentId: args.documentId, error: error?.message })

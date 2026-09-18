@@ -34,11 +34,17 @@ create index if not exists idx_documents_ai_counted
 
 -- ── DE RESERVERING, ATOMAIR EN DOCUMENT-BEWUST ──────────────────────────────────────────────
 
+-- WAAROM HIER GEEN p_metric STAAT
+-- De markering op het document is ÉÉN waarde: "dit document heeft zijn aiDocument betaald". Zij kan
+-- niet uitdrukken welke teller er betaald is. Een generieke metric-parameter zou dus een val zijn:
+-- reserveer metric A → markering gevuld; roep later metric B aan → de functie ziet de markering,
+-- meldt replayed, en B wordt NOOIT geteld. Geen fout, geen log, een teller die stilstaat.
+-- Bouw geen algemeenheid die het schema niet kan dragen: deze functie gaat over aiDocuments, en
+-- dat staat hieronder één keer uitgeschreven in plaats van als argument binnen te komen.
 CREATE OR REPLACE FUNCTION public.fair_use_consume_for_document(
   p_user_id     uuid,
   p_document_id uuid,
   p_period      text,
-  p_metric      text,
   p_limit       integer
 )
 RETURNS TABLE (allowed boolean, used integer, remaining integer, replayed boolean)
@@ -47,6 +53,7 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
+  v_metric  constant text := 'aiDocuments';
   v_counted text;
   v_current integer;
   v_new     integer;
@@ -69,7 +76,7 @@ BEGIN
   IF v_counted IS NOT NULL THEN
     SELECT c.count INTO v_current
       FROM public.usage_counters c
-     WHERE c.user_id = p_user_id AND c.period = v_counted AND c.metric = p_metric;
+     WHERE c.user_id = p_user_id AND c.period = v_counted AND c.metric = v_metric;
     RETURN QUERY SELECT true, COALESCE(v_current, 0),
                         CASE WHEN p_limit > 0 THEN GREATEST(0, p_limit - COALESCE(v_current, 0)) ELSE -1 END,
                         true;
@@ -78,12 +85,12 @@ BEGIN
 
   -- Nog niet geteld: dezelfde rekensom als fair_use_consume, in dezelfde vorm.
   INSERT INTO public.usage_counters (user_id, period, metric, count)
-  VALUES (p_user_id, p_period, p_metric, 0)
+  VALUES (p_user_id, p_period, v_metric, 0)
   ON CONFLICT (user_id, period, metric) DO NOTHING;
 
   SELECT c.count INTO v_current
     FROM public.usage_counters c
-   WHERE c.user_id = p_user_id AND c.period = p_period AND c.metric = p_metric
+   WHERE c.user_id = p_user_id AND c.period = p_period AND c.metric = v_metric
    FOR UPDATE;
 
   v_new := v_current + 1;
@@ -97,7 +104,7 @@ BEGIN
 
   UPDATE public.usage_counters c
      SET count = v_new, updated_at = now()
-   WHERE c.user_id = p_user_id AND c.period = p_period AND c.metric = p_metric;
+   WHERE c.user_id = p_user_id AND c.period = p_period AND c.metric = v_metric;
 
   -- De markering en de ophoging staan in DEZELFDE transactie. Precies dat maakt de crash
   -- onschadelijk: er bestaat geen moment waarop de teller is opgehoogd en het document dat niet weet.
@@ -116,10 +123,10 @@ COMMENT ON FUNCTION public.fair_use_consume_for_document IS
 
 -- ── DE TERUGGAVE, OP DE BEWAARDE PERIODE ────────────────────────────────────────────────────
 
+-- Zelfde reden als hierboven: één markering, één teller, geen parameter om hem mis te wijzen.
 CREATE OR REPLACE FUNCTION public.fair_use_release_for_document(
   p_user_id     uuid,
-  p_document_id uuid,
-  p_metric      text
+  p_document_id uuid
 )
 RETURNS TABLE (released boolean, period text)
 LANGUAGE plpgsql
@@ -127,6 +134,7 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
+  v_metric  constant text := 'aiDocuments';
   v_counted text;
 BEGIN
   SELECT d.intake_ai_counted_period INTO v_counted
@@ -144,7 +152,7 @@ BEGIN
   -- Af van de maand waarin het IS opgehoogd, niet van de maand waarin wij nu toevallig zijn.
   UPDATE public.usage_counters c
      SET count = GREATEST(0, c.count - 1), updated_at = now()
-   WHERE c.user_id = p_user_id AND c.period = v_counted AND c.metric = p_metric;
+   WHERE c.user_id = p_user_id AND c.period = v_counted AND c.metric = v_metric;
 
   UPDATE public.documents d
      SET intake_ai_counted_period = NULL
@@ -157,8 +165,19 @@ $$;
 COMMENT ON FUNCTION public.fair_use_release_for_document IS
   '[ONTVANGEN] Geef de reservering van dit document terug, op de BEWAARDE periode. Idempotent: een tweede aanroep vindt geen markering meer en geeft niets terug.';
 
-GRANT EXECUTE ON FUNCTION public.fair_use_consume_for_document(uuid, uuid, text, text, integer) TO service_role;
-GRANT EXECUTE ON FUNCTION public.fair_use_release_for_document(uuid, uuid, text) TO service_role;
+-- ── WIE MAG DIT AANROEPEN ───────────────────────────────────────────────────────────────────
+--
+-- PostgreSQL geeft EXECUTE op een nieuwe functie standaard aan PUBLIC. Een GRANT aan service_role
+-- haalt dat er NIET af — hij zet er alleen iets naast. En deze twee zijn SECURITY DEFINER en nemen
+-- p_user_id als argument: wie ze mag aanroepen, mag namens iedereen tellen en teruggeven.
+--
+-- Dus eerst intrekken, dan geven. Dezelfde volgorde als fair_use_usage.sql, en om dezelfde reden:
+-- dit zijn interne serverprimitieven, geen browser-API. anon en authenticated horen er niet bij te
+-- kunnen, en een seam-test bewijst dat per rol in plaats van het aan te nemen.
+REVOKE ALL ON FUNCTION public.fair_use_consume_for_document(uuid, uuid, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.fair_use_release_for_document(uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.fair_use_consume_for_document(uuid, uuid, text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.fair_use_release_for_document(uuid, uuid) TO service_role;
 
 -- ── WANNEER WEL EN NIET TERUGGEVEN ──────────────────────────────────────────────────────────
 --

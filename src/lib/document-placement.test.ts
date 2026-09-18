@@ -195,6 +195,8 @@ class FakePair {
   invoices: Row[] = []
   selectError: { message: string } | null = null
   updates: Array<{ patch: Row; filters: Array<[string, unknown]> }> = []
+  /** Fired once, between the CAS read and the CAS write. */
+  beforeWrite: (() => void) | null = null
 
   from(table: string) {
     const rows = () => (table === "documents" ? this.documents : this.invoices)
@@ -211,11 +213,14 @@ class FakePair {
       select: () => build([]),
       update: (patch: Row) => {
         const filters: Array<[string, unknown]> = []
+        /** Runs between the read and the write, so a race can be staged exactly where it happens. */
         const b = {
           eq: (c: string, v: unknown) => { filters.push([c, v]); return b },
+          is: (c: string, v: unknown) => { filters.push([c, v]); return b },
           select: async () => {
             this.updates.push({ patch, filters })
-            const hit = rows().filter((r) => filters.every(([c, v]) => r[c] === v))
+            if (this.beforeWrite) { const f = this.beforeWrite; this.beforeWrite = null; f() }
+            const hit = rows().filter((r) => filters.every(([c, v]) => (r[c] ?? null) === v))
             for (const r of hit) Object.assign(r, patch)
             return { data: hit.map((r) => ({ id: r.id })), error: null }
           },
@@ -290,4 +295,58 @@ test("[ONTVANGEN] the resume lookup is owner-scoped and honest about not knowing
   broken.selectError = { message: "statement timeout" }
   assert.deepEqual(await findInvoiceForDocument("doc-1", USER, asPipe(broken)), { kind: "failed" },
     "a read that failed must not be reported as 'no invoice exists' — that is how a second one gets made")
+})
+
+
+// ── [ONTVANGEN] Linkage is a repair tool: it fills a gap, it never moves a relationship ───────
+
+test("[ONTVANGEN] a document already backing ANOTHER invoice is never re-pointed", async () => {
+  // Overwriting here would silently detach the invoice that row belongs to — its evidence link is
+  // how the closing package resolves its PDF. A repair tool may fill a missing relation. It may
+  // not move a financial one.
+  const p = pair()
+  p.documents[0].invoice_id = "inv-oud"
+  p.invoices.push({ id: "inv-oud", receiver_id: USER, document_id: "doc-1", status: "paid" })
+
+  assert.deepEqual(
+    await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(p)),
+    { kind: "refused", why: "linked_elsewhere" },
+  )
+  assert.equal(p.documents[0].invoice_id, "inv-oud", "…and the old link still stands")
+})
+
+test("[ONTVANGEN] a link written while we were reading is not overwritten", async () => {
+  // The stale-worker race: we read null, someone links the row, our UPDATE lands later. The
+  // compare-and-set on invoice_id IS NULL is what makes our write miss instead of win.
+  const p = pair()
+  p.invoices.push({ id: "inv-ander", receiver_id: USER, document_id: "doc-1", status: "received" })
+  p.beforeWrite = () => { p.documents[0].invoice_id = "inv-ander" }
+
+  assert.deepEqual(
+    await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(p)),
+    { kind: "refused", why: "linked_elsewhere" },
+  )
+  assert.equal(p.documents[0].invoice_id, "inv-ander", "the newer truth survived")
+
+  // And the write really did carry the predicate, rather than merely losing by luck.
+  assert.ok(
+    p.updates.at(-1)!.filters.some(([c, v]) => c === "invoice_id" && v === null),
+    "without `.is(invoice_id, null)` the UPDATE would have landed on top of the newer link",
+  )
+})
+
+test("[ONTVANGEN] a twin winning the same repair is benign, not an error", async () => {
+  // Two workers repairing the SAME missing link is the ordinary case for a retried pass. The
+  // loser must report already_linked — telling a caller the repair failed would send it looking
+  // for a problem that does not exist.
+  const p = pair()
+  p.beforeWrite = () => { p.documents[0].invoice_id = "inv-1" }
+  assert.deepEqual(await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(p)), { kind: "already_linked" })
+  assert.equal(p.documents[0].invoice_id, "inv-1")
+})
+
+test("[ONTVANGEN] a document that vanished mid-repair is refused, never reported as linked", async () => {
+  const p = pair()
+  p.beforeWrite = () => { p.documents.length = 0 }
+  assert.deepEqual(await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(p)), { kind: "refused", why: "document" })
 })
