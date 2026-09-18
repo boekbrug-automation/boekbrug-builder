@@ -173,7 +173,7 @@ export async function receiveRawIncoming(
     // either — same relaxed client and same [DEPLOY-SAFE] shape the intake claim uses.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const docs = pipelineDoc.from("documents") as any
-    let { data: doc, error: docErr } = await docs.insert({ ...baseRow, ...intent }).select("id").single()
+    const { data: doc, error: docErr } = await docs.insert({ ...baseRow, ...intent }).select("id").single()
     if (docErr && (docErr as { code?: string }).code === "42703" && wantsIntent) {
       // ── [ONTVANGEN] The columns are not there, so this handoff FAILS. ──────────────────────
       //
@@ -195,7 +195,7 @@ export async function receiveRawIncoming(
       console.error(
         "[ONTVANGEN] intake intent columns are absent — REFUSING the handoff and rolling the bytes back. Apply ontvangen_intake_intent.sql before enabling receive-first.",
         { userId, file: file.name },
-      );
+      )
       await supabase.storage.from("documents").remove([storagePath]).catch(() => {})
       return { kind: "failed", reason: "intent" }
     }
