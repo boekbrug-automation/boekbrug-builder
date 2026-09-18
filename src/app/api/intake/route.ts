@@ -32,6 +32,7 @@ import { computeContentHash } from "@/lib/content-hash"
 // [BEWAAR-EERST] Shared with /api/bank/attach-invoice — one keep-the-file path, not two.
 import { storeRawIncoming } from "@/lib/store-raw-incoming"
 // [ONTVANGEN] The processing half — see that file's header for why it is its own module.
+import { readIntentFromForm } from "@/lib/intake-intent"
 import { processIntakeDocument, INTAKE_SOURCES, type IntakeSource } from "@/lib/intake-processor"
 // [BEWAAR-EERST] The label the skipped panel counts, so a file we could not read yet gets its
 // "Lees opnieuw" button — see skipped-import.ts and [TWEEDE-KANS].
@@ -434,7 +435,12 @@ async function runIntake(req: NextRequest) {
   // request answers. Step 2 of [ONTVANGEN] is what moves it in TIME; this step only gave it an
   // edge, so that move can be made without also rewriting the block behind it.
   const outcome = await processIntakeDocument({
-    req, supabase, user, file, buffer, source, force, formData,
+    // [ONTVANGEN] This door still runs inside the owner's own request, so the address is real.
+    run: { kind: "request", ip: getClientIP(req) },
+    // [ONTVANGEN] The same reader the durable path uses — one meaning for "paid_method", whether
+    // it arrives on a live form or comes back out of the documents row.
+    intent: readIntentFromForm(formData),
+    supabase, user, file, buffer, source, force,
     effectiveType, isEInvoice, pdfText, pdfPages, contentHash,
   })
   // A library-built Response (rate limit, Fair Use, storage) carries headers a client reads, so

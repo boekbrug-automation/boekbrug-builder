@@ -26,6 +26,12 @@ export interface FileReminderInput {
   facts: ReminderFacts;
   /** Which door: shows in the audit row. */
   path: "intake" | "email";
+  /**
+   * [ONTVANGEN] How the run that filed this reminder was started — see intake-provenance.ts.
+   * Optional because a door that still runs inside the owner's request has nothing to add beyond
+   * its address; a background pass has no address, and this is what tells the two apart.
+   */
+  runOrigin?: string | null;
   ipAddress?: string | null;
 }
 
@@ -163,6 +169,7 @@ export async function fileReminder(input: FileReminderInput): Promise<FileRemind
     entityId: documentId,
     newValue: {
       path: input.path,
+      run_origin: input.runOrigin ?? null,
       reminder_number: reminderNumber(facts) || null,
       vendor: facts.vendor ?? null,
       total_inc_btw: facts.totalIncBtw ?? null,

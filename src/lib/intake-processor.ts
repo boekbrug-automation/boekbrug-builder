@@ -38,7 +38,6 @@
 import { round2 } from "@/lib/invoice-totals"
 import { effectiveTaxKind } from "@/lib/tax-letter"
 import { randomUUID } from "node:crypto"
-import { NextRequest } from "next/server"
 // [DEUR-VANGNET] Eén vangnet voor elke deur waar een document binnenkomt.
 import { createServerSupabaseClient } from "@/lib/supabase-server"
 import { createPipelineClient } from "@/lib/supabase-pipeline"
@@ -67,10 +66,13 @@ import { storeRawIncoming } from "@/lib/store-raw-incoming"
 // "Lees opnieuw" button — see skipped-import.ts and [TWEEDE-KANS].
 import { DOC_TYPE_COULD_NOT_READ } from "@/lib/skipped-import"
 import { buildFolderBreadcrumb } from "@/lib/documents"
-import { logAuditAction, getClientIP } from "@/lib/audit"
+import { logAuditAction } from "@/lib/audit"
+// [ONTVANGEN] Who started this run. A background pass has no client and therefore no address —
+// see intake-provenance.ts for why carrying the upload-time IP forward is the thing to avoid.
+import { auditIpOf, runOriginOf, type IntakeRun } from "@/lib/intake-provenance"
 import { decideFromAi } from "@/lib/intake-router"
 // [BON-BETAALWIJZE] Eén normalisator voor elke weg waarlangs een betaalwijze binnenkomt.
-import { normaliseerBetaalwijze } from "@/lib/bon-betaalwijze"
+import { type IntakeIntent } from "@/lib/intake-intent"
 // [OBSERVABILITY] Eén bron voor "dit bestand is bewaard maar niet gelezen" — gedeeld met het
 // overgeslagen-paneel, dat vroeger op een andere waarde las dan hier werd geschreven.
 import { docTypeForStoredFile, DOC_TYPE_REMINDER } from "@/lib/skipped-import"
@@ -167,8 +169,12 @@ function raw(response: Response): IntakeOutcome {
  * guessed. A context that carries more than the block reads is how the boundary blurs again.
  */
 export interface IntakeProcessContext {
-  /** Only for getClientIP() on the audit rows. */
-  req: NextRequest
+  /**
+   * How this run was started. Replaces the NextRequest the block used to hold: the only thing it
+   * ever read from the request was the client address for five audit rows, and a background run
+   * has no request to read one from.
+   */
+  run: IntakeRun
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>
   user: { id: string }
   file: File
@@ -176,8 +182,14 @@ export interface IntakeProcessContext {
   source: IntakeSource
   /** [INTAKE-FORCE] the owner overriding a SEMANTIC duplicate block. */
   force: boolean
-  /** Read for the two forced-payment fields only. */
-  formData: FormData
+  /**
+   * [ONTVANGEN] What the owner chose at upload time (Kas screen: "ik heb dit contant betaald").
+   *
+   * Was the whole FormData, read here for two fields. It is the pair now, because after
+   * receive-first this comes from the documents row rather than from a request that no longer
+   * exists — and one meaning, read two ways, is the point of intake-intent.ts.
+   */
+  intent: IntakeIntent
   effectiveType: string
   isEInvoice: boolean
   /** [MULTI-INVOICE] the PDF text layer, pulled once in the route and reused here. */
@@ -188,7 +200,7 @@ export interface IntakeProcessContext {
 
 export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<IntakeOutcome> {
   const {
-    req, supabase, user, file, buffer, source, force, formData,
+    run, supabase, user, file, buffer, source, force, intent,
     effectiveType, isEInvoice, pdfText, pdfPages, contentHash
   } = ctx
 
@@ -322,17 +334,16 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
   // [BON-BETAALWIJZE] Genormaliseerd naar bank|kas: de UI mag "pin" sturen, maar wat de
   // beslissing in gaat is wat de rest van de app kan lezen — cash-settle zoekt letterlijk op
   // payment_method = 'kas', bank/confirm schrijft 'bank'. Een derde waarde valt tussen wal en schip.
-  const forcedMethodRaw = formData.get("paid_method");
-  const forcedMethod =
-    typeof forcedMethodRaw === "string" ? normaliseerBetaalwijze(forcedMethodRaw) : null;
-  if (forcedMethod && (decision.destination === "invoice" || decision.destination === "receipt")) {
+  // [ONTVANGEN] Read from the intent, not from the request. Same two values, same normalisation
+  // (intake-intent.ts owns it now, on the way IN, so the durable column and the live form cannot
+  // disagree about what "pin" meant).
+  if (intent.paidMethod && (decision.destination === "invoice" || decision.destination === "receipt")) {
     decision.suggestPaid = true;
-    decision.paidMethod = forcedMethod;
+    decision.paidMethod = intent.paidMethod;
     // De ondernemer koos dit zelf in de UI — dat is het stevigste bewijs dat er is.
     decision.paidMethodZeker = true;
-    const forcedDateRaw = formData.get("paid_date");
-    if (typeof forcedDateRaw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(forcedDateRaw)) {
-      decision.paidDate = forcedDateRaw;
+    if (intent.paidDate) {
+      decision.paidDate = intent.paidDate;
     }
     // else: keep any AI-read date (or null) — the verify modal lets the human pick before confirming.
   }
@@ -421,8 +432,9 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
           total_inc_btw: v.total_inc_btw ?? v.amount ?? null,
           vendor: v.vendor ?? null,
           path: "intake",
+          run_origin: runOriginOf(run),
         },
-        ipAddress: getClientIP(req),
+        ipAddress: auditIpOf(run),
       })
     } else if (dup.duplicate && dup.match) {
       // Block the duplicate before any storage/insert. Truth in the audit log,
@@ -439,8 +451,9 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
           total_inc_btw: v.total_inc_btw ?? v.amount ?? null,
           rejected_vendor: v.vendor ?? null,
           path: "intake",
+          run_origin: runOriginOf(run),
         },
-        ipAddress: getClientIP(req),
+        ipAddress: auditIpOf(run),
       })
       const nr = dup.match.invoice_number ? `factuur ${dup.match.invoice_number}` : "deze factuur"
 
@@ -832,7 +845,8 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
       let originalInvoiceId: string | null = null
       try {
         const filed = await fileReminder({
-          pipeline, userId: user.id, documentId: doc.id, path: "intake", ipAddress: getClientIP(req),
+          pipeline, userId: user.id, documentId: doc.id, path: "intake",
+          runOrigin: runOriginOf(run), ipAddress: auditIpOf(run),
           facts: {
             isReminder: true,
             reminderOfInvoiceNumber: v.reminder_of_invoice_number ?? null,
@@ -1297,8 +1311,8 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
       entityType: "invoice",
       entityId: invoice.id,
       oldValue: { status: "processing" },
-      newValue: { status: "received", reason: autoAdv.reason, source: "intake_auto_advance" },
-      ipAddress: getClientIP(req),
+      newValue: { status: "received", reason: autoAdv.reason, source: "intake_auto_advance", run_origin: runOriginOf(run) },
+      ipAddress: auditIpOf(run),
     }).catch(() => {})
 
     // [BON-AUTO] The bon pays itself off. Through apply_manual_payment — the SAME audited, atomic,
@@ -1341,9 +1355,9 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
           newValue: {
             status: "paid", method: settlePlan.method, payment_date: settlePlan.payDate,
             reason: settlePlan.reason, evidence: decision.paidEvidence ?? null,
-            source: "intake_receipt_auto_settle",
+            source: "intake_receipt_auto_settle", run_origin: runOriginOf(run),
           },
-          ipAddress: getClientIP(req),
+          ipAddress: auditIpOf(run),
         }).catch(() => {});
       }
     }
