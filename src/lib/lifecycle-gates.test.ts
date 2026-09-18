@@ -15910,10 +15910,22 @@ test("[TWEEDE-KANS-BRON] the second-chance re-read gives the document back when 
   // reading. It was applied to the failed READ and not to the failed INSERT — the branch that ran
   // on every single attempt, so the one path that could rescue a skipped file also charged for it.
   const route = code("src/app/api/documents/[id]/read-as-invoice/route.ts");
-  const insertFailure = route.indexOf("if (insErr || !invoice)");
+  const insertFailure = route.indexOf("if (!booked)");
   assert.ok(insertFailure > 0, "the insert-failure branch still exists");
   const branch = route.slice(insertFailure, route.indexOf("}", route.indexOf("status: 500", insertFailure)));
   assert.match(branch, /await gate\.release\(\)/, "a reading that stored nothing is not charged");
+
+  // [ONTVANGEN] And the arm that was added beside it must NOT give anything back. A lost race on
+  // uq_invoices_document_id means the reading happened, cost a model call, and produced an invoice
+  // — the winner's. Refunding there would let two workers race for a free read, which is the
+  // opposite failure to the one this gate was written for, arriving through the same door.
+  const adopt = route.indexOf('code === "23505"');
+  assert.ok(adopt > 0 && adopt < insertFailure, "[TWEEDE-KANS-BRON] the adopt arm must sit before the failure branch");
+  const adoptArm = route.slice(adopt, insertFailure);
+  assert.match(adoptArm, /findInvoiceForDocument\(doc\.id, user\.id, pipeline\)/,
+    "a conflict is adopted only on an invoice that names THIS document and owner");
+  assert.doesNotMatch(adoptArm, /gate\.release\(\)/,
+    "the reading DID happen — losing a race is not a refund");
 });
 
 test("[NO-SILENT-EMPTY] the verify queue never reports an unread queue as a finished one", () => {
