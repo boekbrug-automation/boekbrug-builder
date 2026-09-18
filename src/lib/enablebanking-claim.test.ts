@@ -55,9 +55,9 @@ class Query {
     return this;
   }
 
-  async maybeSingle(): Promise<{ data: ClaimRow | null; error: null }> {
-    const { data } = await this.run();
-    return { data: data[0] ?? null, error: null };
+  async maybeSingle(): Promise<{ data: ClaimRow | null; error: { message?: string } | null }> {
+    const { data, error } = await this.run();
+    return { data: data[0] ?? null, error };
   }
 
   // Thenable, so `await query` runs it — the shape supabase-js has.
@@ -72,10 +72,16 @@ class Query {
     // The yield that makes this a concurrency test rather than a sequence of function calls.
     await Promise.resolve();
     this.store.operations.push(this.op);
+    this.store.calls.push({ op: this.op, filters: this.filters.map(([c, v]) => [c, v] as [string, unknown]) });
 
     if (this.store.tableMissing) {
       return { data: [], error: { code: "42P01", message: 'relation "intake_claims" does not exist' } };
     }
+    // Injected infrastructure failures, one per operation — the cases where the guarantee cannot
+    // be established and the financial read must therefore not happen.
+    if (this.op === "insert" && this.store.insertError) return { data: [], error: this.store.insertError };
+    if (this.op === "select" && this.store.selectError) return { data: [], error: this.store.selectError };
+    if (this.op === "update" && this.store.updateError) return { data: [], error: this.store.updateError };
 
     const matches = () =>
       this.store.rows.filter((row) =>
@@ -84,18 +90,21 @@ class Query {
 
     switch (this.op) {
       case "insert": {
-        const row = this.payload as unknown as Pick<ClaimRow, "user_id" | "claim_key">;
+        const row = this.payload as unknown as Pick<ClaimRow, "user_id" | "claim_key" | "created_at">;
         const clash = this.store.rows.some(
           (r) => r.user_id === row.user_id && r.claim_key === row.claim_key,
         );
         // The whole point: a second insert of the same (user_id, claim_key) is refused by the
         // database, not by anything this code remembers.
         if (clash) return { data: [], error: { code: "23505", message: "duplicate key value" } };
+        // created_at is written by the caller, not defaulted — that stamp is its ownership token.
+        assert.ok(typeof row.created_at === "string" && row.created_at.length > 0,
+          "the claim must write its own stamp, or it cannot prove ownership when releasing");
         const created: ClaimRow = {
-          id: `claim-${this.store.rows.length + 1}`,
+          id: `claim-${this.store.nextId++}`,
           user_id: row.user_id,
           claim_key: row.claim_key,
-          created_at: this.store.insertStamp,
+          created_at: row.created_at,
         };
         this.store.rows.push(created);
         return { data: [created], error: null };
@@ -120,8 +129,16 @@ class FakeClaims {
   rows: ClaimRow[] = [];
   tableMissing = false;
   operations: Op[] = [];
-  /** What an inserted row's created_at becomes — "the clock the database stamps with". */
-  insertStamp = new Date("2026-09-17T10:00:00Z").toISOString();
+  calls: Array<{ op: Op; filters: Array<[string, unknown]> }> = [];
+  nextId = 1;
+  insertError: { code?: string; message?: string } | null = null;
+  selectError: { code?: string; message?: string } | null = null;
+  updateError: { code?: string; message?: string } | null = null;
+
+  /** The eq() filters each call of this kind was issued with — how the release is inspected. */
+  filtersFor(op: Op): Array<Array<[string, unknown]>> {
+    return this.calls.filter((c) => c.op === op).map((c) => c.filters);
+  }
 
   from(table: string) {
     assert.equal(table, "intake_claims", "the claim must not reach any other table");
@@ -255,27 +272,126 @@ test("[EB-RACE] the claim is per account, never per owner", async () => {
 
 // ── Failure direction ─────────────────────────────────────────────────────────────────────────
 
-test("[EB-RACE] a missing intake_claims table does not stop the bank feed", async () => {
+test("[EB-RACE] a missing intake_claims table refuses the sync — it does not proceed unprotected", async () => {
   const store = new FakeClaims();
   store.tableMissing = true;
 
   const result = await claimAccountSync(USER, ACCOUNT, NOW, store);
   assert.equal(
     result.claimed,
-    true,
-    "a backstop that refuses to sync when IT is broken is a silent stop for every owner",
+    false,
+    "without the table a second worker cannot be kept out, so the financial read must not happen",
   );
-  await result.release(); // must not throw
+  assert.equal(result.outcome, "unavailable", "and it is our infrastructure, not a busy account");
+  await result.release(); // must not throw, and must touch nothing
 });
 
-test("[EB-RACE] a claim store that throws does not stop the bank feed either", async () => {
+test("[EB-RACE] a claim store that throws refuses the sync too", async () => {
   const exploding = {
     from() {
       throw new Error("connection reset");
     },
   };
   const result = await claimAccountSync(USER, ACCOUNT, NOW, exploding);
-  assert.equal(result.claimed, true);
+  assert.equal(result.claimed, false, "an unexplained failure may not become permission to write money");
+  assert.equal(result.outcome, "unavailable");
+});
+
+test("[EB-RACE] an unexpected insert error refuses the sync", async () => {
+  const store = new FakeClaims();
+  store.insertError = { code: "42501", message: "permission denied for table intake_claims" };
+
+  const result = await claimAccountSync(USER, ACCOUNT, NOW, store);
+  assert.equal(result.claimed, false);
+  assert.equal(result.outcome, "unavailable");
+});
+
+test("[EB-RACE] a holder we cannot read refuses the sync", async () => {
+  const store = new FakeClaims();
+  await claimAccountSync(USER, ACCOUNT, NOW, store); // somebody holds it
+  store.selectError = { message: "statement timeout" };
+
+  const result = await claimAccountSync(USER, ACCOUNT, NOW, store);
+  assert.equal(result.claimed, false);
+  assert.equal(
+    result.outcome,
+    "unavailable",
+    "not knowing whether the holder is alive is not the same as knowing it is",
+  );
+});
+
+test("[EB-RACE] a failed stale takeover refuses the sync", async () => {
+  const store = new FakeClaims();
+  store.rows.push({
+    id: "claim-dead",
+    user_id: USER,
+    claim_key: ebSyncClaimKey(ACCOUNT),
+    created_at: new Date(NOW.getTime() - (EB_SYNC_CLAIM_TTL_MS + 60_000)).toISOString(),
+  });
+  store.updateError = { message: "deadlock detected" };
+
+  const result = await claimAccountSync(USER, ACCOUNT, NOW, store);
+  assert.equal(
+    result.claimed,
+    false,
+    "a takeover we could not complete is not a takeover, whatever the row now says",
+  );
+  assert.equal(result.outcome, "unavailable");
+});
+
+test("[EB-RACE] an unreadable stamp on the holding claim refuses the sync", async () => {
+  const store = new FakeClaims();
+  store.rows.push({
+    id: "claim-corrupt",
+    user_id: USER,
+    claim_key: ebSyncClaimKey(ACCOUNT),
+    created_at: "not a timestamp",
+  });
+
+  const result = await claimAccountSync(USER, ACCOUNT, NOW, store);
+  assert.equal(result.claimed, false, "stale-or-fresh may not be guessed from a corrupt value");
+  assert.equal(result.outcome, "unavailable");
+});
+
+// ── Ownership: release may only ever delete OUR version ───────────────────────────────────────
+
+test("[EB-RACE] a late release must not delete the successor's claim", async () => {
+  // A owns version 1 → version 1 goes stale → B takes over and owns version 2 → A releases late.
+  // A delete keyed on (user_id, claim_key) alone would remove B's LIVE claim here, and a third
+  // worker would then walk straight in beside B. The stamp is the version, so A's delete matches
+  // nothing.
+  const store = new FakeClaims();
+
+  const a = await claimAccountSync(USER, ACCOUNT, NOW, store);
+  assert.equal(a.claimed, true);
+  const versionOne = store.rows[0].created_at;
+
+  const later = new Date(NOW.getTime() + EB_SYNC_CLAIM_TTL_MS + 60_000);
+  const b = await claimAccountSync(USER, ACCOUNT, later, store);
+  assert.equal(b.claimed, true, "a dead worker's claim must be takeable");
+  const versionTwo = store.rows[0].created_at;
+  assert.notEqual(versionTwo, versionOne, "the takeover must produce a new version");
+
+  await a.release();
+
+  assert.equal(store.rows.length, 1, "A released a version it no longer owned and took B's claim");
+  assert.equal(store.rows[0].created_at, versionTwo, "B must still hold version 2");
+
+  // And the rightful owner can still give it back.
+  await b.release();
+  assert.equal(store.rows.length, 0, "B's own release must work");
+});
+
+test("[EB-RACE] the release deletes on the stamp, not on the account alone", async () => {
+  const store = new FakeClaims();
+  const held = await claimAccountSync(USER, ACCOUNT, NOW, store);
+  await held.release();
+  const deletes = store.filtersFor("delete");
+  assert.ok(deletes.length > 0, "release issued no delete at all");
+  assert.ok(
+    deletes[0].some(([column]) => column === "created_at"),
+    "the delete does not name the version it acquired, so it can remove a successor's claim",
+  );
 });
 
 // ── The number that must stay derived ─────────────────────────────────────────────────────────

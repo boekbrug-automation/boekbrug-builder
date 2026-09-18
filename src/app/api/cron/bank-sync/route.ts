@@ -108,7 +108,7 @@ export async function GET(req: NextRequest) {
   // result, because this run answers a scheduler and nobody reads its response body: without them
   // the only daily evidence that the feed works is "inserted", which reads the same whether the
   // bank sent nothing or we dropped everything it sent.
-  let pages = 0, fetched = 0, booked = 0, pending = 0, skipped = 0, unreadable = 0, busy = 0;
+  let pages = 0, fetched = 0, booked = 0, pending = 0, skipped = 0, unreadable = 0, busy = 0, claimUnavailable = 0;
 
   // [CRON-FAIRNESS] Rotate the start each run so a fixed tail never permanently starves when the
   // list cannot finish within maxDuration. Keyed off the epoch DAY, which advances once per
@@ -163,6 +163,7 @@ export async function GET(req: NextRequest) {
           skipped += a.skipped;
           unreadable += a.fetched - a.booked - a.pending;
           if (a.skippedBusy) busy += 1;
+          if (a.skippedClaimUnavailable) claimUnavailable += 1;
         }
         if (result.error) failed++;
         else synced++;
@@ -185,7 +186,7 @@ export async function GET(req: NextRequest) {
 
   const result = {
     ok: failed === 0, users: userIds.length, synced, failed, inserted, autoBooked, expiring, truncated,
-    pages, fetched, booked, pending, skipped, unreadable, busy,
+    pages, fetched, booked, pending, skipped, unreadable, busy, claimUnavailable,
   };
   await finishCronRun(createPipelineClient(), cronRunId, { ok: failed === 0, result });
 

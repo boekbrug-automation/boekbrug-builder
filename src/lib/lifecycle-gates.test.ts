@@ -36250,8 +36250,14 @@ test("[EB-RACE] the account claim wraps the whole read-dedup-insert sequence", (
 
   assert.match(guard, /claimAccountSync\(connection\.userId, account\.id, now\)/,
     "the claim is not taken per (owner, account) — a claim on anything else is not this lock");
-  assert.match(guard, /if \(!claim\.claimed\)[\s\S]{0,120}skippedBusy: true/,
-    "a worker that did not get the claim must stand down, and say so as skippedBusy");
+  assert.match(guard, /if \(claim\.outcome === "busy"\) return \{ \.\.\.base, skippedBusy: true \}/,
+    "a worker that lost the race to a LIVE holder must stand down, and say so as skippedBusy");
+  assert.match(guard, /skippedClaimUnavailable: true/,
+    "a claim we could not establish must be its own outcome — collapsed into skippedBusy, a dead claim table looks exactly like a healthy busy account");
+  // And nothing is written on the way out: last_synced_at / last_synced_through may not move for a
+  // read that never happened, or the next run would think this account had been done.
+  assert.doesNotMatch(guard, /recordAccountSync/,
+    "syncOneAccount records a sync outside the critical section — a refusal would look like a successful read");
   assert.match(guard, /try \{[\s\S]{0,200}readAndStoreAccount\(args, base\)[\s\S]{0,200}finally \{[\s\S]{0,120}claim\.release\(\)/,
     "the critical section is not inside a try whose finally releases the claim — one throw and the account is locked out until the TTL");
 
@@ -36266,10 +36272,59 @@ test("[EB-RACE] the account claim wraps the whole read-dedup-insert sequence", (
   const verdict = sync.indexOf("const anyRead");
   assert.ok(verdict > -1, "[EB-RACE] the connection-level verdict was renamed");
   const tail = sync.slice(to, verdict + 200);
-  assert.match(tail, /!a\.error && !a\.skippedTooSoon && !a\.skippedForeignCurrency && !a\.skippedBusy/,
-    "a stand-down counts as a clean read, so a dead connection can be marked linked by an account nobody looked at");
-  assert.match(tail, /const anyRead = result\.accounts\.some\(\(a\) => !a\.skippedTooSoon && !a\.skippedBusy\)/,
-    "a run that only stood down records a connection sync it never performed");
+  for (const skip of ["skippedBusy", "skippedClaimUnavailable"]) {
+    assert.ok(
+      new RegExp(`!a\\.error[\\s\\S]{0,160}!a\\.${skip}`).test(tail),
+      `${skip} counts as a clean read, so a dead connection can be marked linked by an account nobody looked at`,
+    );
+    assert.ok(
+      new RegExp(`const anyRead[\\s\\S]{0,200}!a\\.${skip}`).test(tail),
+      `a run that only skipped with ${skip} records a connection sync it never performed`,
+    );
+  }
+});
+
+// ── [EB-RACE] The guard fails CLOSED ──────────────────────────────────────────────────────────
+//
+// The first version of enablebanking-claim.ts failed OPEN — a missing table, an unreadable error
+// or a throw returned "you may run" — on the argument that a broken backstop must not stop every
+// owner's bank feed. That argument is wrong here: it lets the one mechanism against silent
+// financial multiplication vanish while the financial write proceeds anyway, exactly when we know
+// least about what else is broken.
+//
+// A delayed sync is recoverable (the next run is due immediately and SYNC_OVERLAP_DAYS covers the
+// gap). A doubled quarter is a wrong tax return. So permission is granted in exactly two places —
+// we inserted the claim, or we won the compare-and-set on a dead one — and this gate counts them,
+// because a fourth branch returning "held" is a one-line change that no behavioural test for the
+// other branches would notice.
+test("[EB-RACE] the claim grants permission in exactly two places, and refuses everywhere else", () => {
+  const claim = code("src/lib/enablebanking-claim.ts");
+
+  const grants = claim.match(/claimed: true/g) ?? [];
+  assert.equal(grants.length, 2,
+    "permission to run the financial read is granted somewhere other than the insert and the won takeover");
+
+  // Each refusal says WHICH kind it is. "Someone else is working" and "our own machinery is
+  // broken" must never arrive as the same value.
+  assert.ok((claim.match(/refused\("unavailable"\)/g) ?? []).length >= 5,
+    "the infrastructure-failure branches no longer refuse — check 42P01, insert error, holder read, takeover, throw");
+  assert.match(claim, /refused\("busy"\)/,
+    "a live holder must be reported as busy, not as broken");
+
+  // The release proves ownership. Deleting on (user_id, claim_key) alone identifies the ACCOUNT
+  // LOCK, not this worker's version of it — so a late release by a taken-over worker would remove
+  // its successor's LIVE claim and let a third worker in beside it.
+  const releaseFrom = claim.indexOf("const releaseFor");
+  const releaseTo = claim.indexOf("const stamp =");
+  assert.ok(releaseFrom > -1 && releaseTo > releaseFrom, "[EB-RACE] the release helper was renamed");
+  const release = claim.slice(releaseFrom, releaseTo);
+  assert.match(release, /\.delete\(\)[\s\S]{0,200}\.eq\("created_at", stamp\)/,
+    "the release does not name the version it acquired");
+
+  // The stamp is written by us, not defaulted — otherwise the token would have to be read back,
+  // and a failed read-back leaves a claim nobody can release.
+  assert.match(claim, /\.insert\(\{ user_id: userId, claim_key: key, created_at: stamp \}\)/,
+    "the claim leaves created_at to the column default, so it does not know its own version");
 });
 
 // ── [EB-TELLING] The numbers that make a silent feed visible ──────────────────────────────────

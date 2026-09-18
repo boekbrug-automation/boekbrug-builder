@@ -104,11 +104,43 @@ silent loss, which is worse than the duplication it was preventing. So every fee
 That removed the feed's race backstop along with its false identity, so the feed got an explicit
 one: **`[EB-RACE]`, an account-scoped claim** in `enablebanking-claim.ts`, taken in `syncOneAccount`
 and held across read → dedup → insert. It is a claim in the existing `intake_claims` table keyed
-`ebsync:<account row id>`, with a stale-takeover so a crashed worker cannot wedge an account, and it
-fails *open* — a broken claim table must not stop an owner's bank feed. Two sync attempts on the
+`ebsync:<account row id>`, with a stale takeover (a compare-and-set, so two workers finding the same
+dead claim cannot both take it) so a crashed worker cannot wedge an account. Two sync attempts on the
 same account therefore run one after the other, and the second finds the first one's rows already
 stored. See that file's header for why `last_synced_at`, an advisory lock and an in-memory mutex are
 all wrong for this.
+
+**It fails CLOSED, and that is a deliberate reversal.** The first version failed open — a missing
+table, an unreadable error or a throw returned "you may run" — on the argument that a broken
+backstop must not stop every owner's bank feed. That argument is wrong here. Failing open lets the
+one mechanism against silent financial multiplication vanish *while the financial write proceeds
+anyway*, exactly when we know least about what else is broken. The two outcomes are not comparable:
+
+| | what happens |
+|---|---|
+| fail **closed** | this account is not read this run. `last_synced_at` and `last_synced_through` do not move, so the next run is due immediately, and the 7-day `SYNC_OVERLAP_DAYS` window means nothing is lost. A delay. |
+| fail **open** | the same money may be imported twice — into omzet, kosten, the btw-aangifte and the quarter package an accountant signs. Silent, and expensive to find afterwards. |
+
+So every branch that cannot ESTABLISH the guarantee refuses: missing table, insert error,
+unreadable holder, failed takeover, corrupt stamp, throw. Each is logged loudly, because a refusal
+nobody can see is its own silent stop. The owner sees a calm Dutch line saying we will try again —
+**not** an error state and **not** a prompt to reconnect the bank, because this is our
+infrastructure and there is nothing he can fix.
+
+The refusals are two values, never one boolean: `skippedBusy` (another worker holds it — the
+mechanism *working*) and `skippedClaimUnavailable` (the mechanism is broken). Collapsed into one,
+a dead claim table would look exactly like a healthy busy account on every screen, in every counter
+and in every log line.
+
+**The release proves ownership.** A delete on `(user_id, claim_key)` alone identifies the account
+lock, not this worker's version of it: if our claim went stale and a successor took it over, our
+late release would delete the *successor's live* claim and let a third worker in beside it. So the
+claim writes its own `created_at` explicitly at insert — that stamp is the version token — and the
+release deletes only the row still carrying it.
+
+**Deployment order, not a degradation path.** Because there is no open failure mode, `intake_claims`
+and `uq_intake_claims_user_key` must be proven live **before** Enable Banking credentials are
+enabled. We control that order; there is nothing to arrange for a half-applied schema.
 
 ### Still open: the CROSS-door race — `[FINANCIAL-TRUTH-AUDIT]`
 
@@ -360,7 +392,9 @@ money leaves no trace to notice. The client follows the key to the end and refus
    an insert would hit `42P10`, so the code falls back to a plain insert — money still lands, but
    the race backstop is not there for the UPLOAD doors. The CONTROLE block checks for both. The
    feed door does not depend on either half: it writes `external_id` NULL by design and is
-   serialized by `[EB-RACE]`, which needs `supabase/migrations/intake_claims.sql` instead.
+   serialized by `[EB-RACE]`, which needs `supabase/migrations/intake_claims.sql` instead — and
+   that one is a **precondition, not a nice-to-have**: without it every Enable Banking sync
+   refuses, by design. Run its CONTROLE block before setting the credentials in step 3.
 6. Confirm `CRON_SECRET` is set — without it the daily feed refuses to run (fail-closed) and says so
    loudly in the log.
 7. `vercel.json` already schedules `/api/cron/bank-sync` at 05:00 UTC daily.

@@ -122,6 +122,19 @@ export interface AccountSyncResult {
    * Without it, an account we never looked at would mark an expired connection healthy.
    */
   skippedBusy: boolean;
+  /**
+   * [EB-RACE] True when we could not ESTABLISH the one-worker guarantee, and therefore refused to
+   * read or store anything.
+   *
+   * Separate from `skippedBusy` on purpose. "Another worker has it" is the mechanism working;
+   * "the mechanism is broken" is not, and one boolean covering both would make a dead claim table
+   * look exactly like a busy account — on every screen, in every counter and in every log line.
+   *
+   * Separate from `error` too: a failure of OUR infrastructure must not put the owner's
+   * connection into an error or expired state, because there is nothing he can fix by
+   * reconnecting his bank. It carries a calm Dutch warning instead, and the next run retries.
+   */
+  skippedClaimUnavailable: boolean;
 }
 
 export interface ConnectionSyncResult {
@@ -315,6 +328,7 @@ async function syncOneAccount(args: SyncOneArgs): Promise<AccountSyncResult> {
     skippedTooSoon: false,
     skippedForeignCurrency: false,
     skippedBusy: false,
+    skippedClaimUnavailable: false,
   };
 
   if (!force && !isAccountDue(account.lastSyncedAt, now)) {
@@ -346,7 +360,19 @@ async function syncOneAccount(args: SyncOneArgs): Promise<AccountSyncResult> {
   // taken here and given back in the finally — see enablebanking-claim.ts for why not last_synced_at.
   const claim = await claimAccountSync(connection.userId, account.id, now);
   if (!claim.claimed) {
-    return { ...base, skippedBusy: true };
+    if (claim.outcome === "busy") return { ...base, skippedBusy: true };
+    // We could not establish the guarantee. Refuse the financial read rather than perform it
+    // unprotected: a delayed sync is recoverable, a doubled quarter is a wrong tax return. Nothing
+    // is written — last_synced_at and last_synced_through stay where they were, so the next run is
+    // due immediately and the 7-day overlap window means nothing is lost.
+    return {
+      ...base,
+      skippedClaimUnavailable: true,
+      warnings: [
+        "We konden deze rekening nu niet veilig ophalen. Dat ligt aan ons, niet aan je bank — " +
+        "je hoeft niets opnieuw te koppelen. De volgende ronde pikt hem vanzelf op.",
+      ],
+    };
   }
   try {
     return await readAndStoreAccount(args, base);
@@ -500,7 +526,12 @@ export async function syncBankConnection(args: {
     });
   } else if (
     result.accounts.some(
-      (a) => !a.error && !a.skippedTooSoon && !a.skippedForeignCurrency && !a.skippedBusy,
+      (a) =>
+        !a.error &&
+        !a.skippedTooSoon &&
+        !a.skippedForeignCurrency &&
+        !a.skippedBusy &&
+        !a.skippedClaimUnavailable,
     )
   ) {
     // At least one account read cleanly — the connection is alive again whatever it said before.
@@ -527,7 +558,9 @@ export async function syncBankConnection(args: {
     }
   }
 
-  const anyRead = result.accounts.some((a) => !a.skippedTooSoon && !a.skippedBusy);
+  const anyRead = result.accounts.some(
+    (a) => !a.skippedTooSoon && !a.skippedBusy && !a.skippedClaimUnavailable,
+  );
   if (anyRead) await recordConnectionSync(connection.id, result.error);
 
   return result;

@@ -95,8 +95,10 @@ export async function POST(req: NextRequest) {
     skipped: 0,
     /** Payments booked against an invoice as a direct result. */
     autoBooked: 0,
-    /** [EB-RACE] Accounts another worker was already syncing. */
+    /** [EB-RACE] Accounts another worker was already syncing. The mechanism working. */
     busy: 0,
+    /** [EB-RACE] Accounts we refused to read because the guarantee could not be established. */
+    claimUnavailable: 0,
     /** Accounts inside the 20-hour bank-budget guard. */
     tooSoon: 0,
   };
@@ -116,6 +118,7 @@ export async function POST(req: NextRequest) {
       counters.inserted += account.inserted;
       counters.skipped += account.skipped;
       if (account.skippedBusy) counters.busy += 1;
+      if (account.skippedClaimUnavailable) counters.claimUnavailable += 1;
       if (account.skippedTooSoon) counters.tooSoon += 1;
     }
     results.push({

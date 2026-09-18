@@ -27,6 +27,12 @@
 -- /api/intake, which deletes by age without reading the key: every TTL in this table must stay
 -- well under that hour, and enablebanking-claim.test.ts asserts it rather than trusting this note.
 --
+-- One difference that matters for ROLLOUT: the intake door degrades when this table is missing
+-- (42P01 -> proceed as before), because its worst case is a duplicate a human then sees in the
+-- queue. The Enable Banking sync does NOT degrade — it REFUSES, because its worst case is the same
+-- money imported twice into a btw-aangifte, silently. So this migration is a precondition of
+-- enabling Enable Banking credentials, not something that can follow them.
+--
 -- [DEPLOY-SAFE] Code ships before this is applied by hand. The route treats a missing table
 -- (42P01) as "no backstop yet" and proceeds exactly as today — the feature switches on when this
 -- runs, with no second deploy.
