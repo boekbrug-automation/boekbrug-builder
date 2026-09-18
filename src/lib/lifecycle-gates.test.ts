@@ -2495,14 +2495,25 @@ test("[E-FACTUUR-XML] ONE reader books a Peppol invoice, and BOTH doors reach it
     "Outlook checks the content, not just the extension",
   );
   // …and the upload/camera door stops filing it as unreadable.
-  const intake = code("src/app/api/intake/route.ts");
+  //
+  // [ONTVANGEN] The rule moved but did not change. It used to be written inline in the route;
+  // it now lives in intake-derived.ts, because the background pass has to reach the SAME verdict
+  // from the stored object and two copies of "is this a Peppol invoice" would drift silently.
+  // So this gate asserts the rule where it lives AND that the door still calls it — a shared
+  // module nobody wires up is the [BON-BETAALWIJZE] failure: built, typed, and switched off.
+  const derived = code("src/lib/intake-derived.ts");
   assert.match(
-    intake, /const isEInvoice = looksLikeInvoiceXmlBytes\(buffer\)/,
-    "the upload door must recognise a Peppol invoice by its CONTENT",
+    derived, /const isEInvoice = looksLikeInvoiceXmlBytes\(buffer\)/,
+    "a Peppol invoice must be recognised by its CONTENT",
   );
   assert.match(
-    intake, /effectiveType\.startsWith\("image\/"\) \|\|\s*\n\s*isEInvoice \|\|/,
-    "…and send it to the reader instead of the unreadable bin",
+    derived, /effectiveType\.startsWith\("image\/"\) \|\|\s*\n\s*isEInvoice \|\|/,
+    "…and sent to the reader instead of the unreadable bin",
+  );
+  const intake = code("src/app/api/intake/route.ts");
+  assert.match(
+    intake, /const \{ isEInvoice, effectiveType, okForAi \} = describeBytes\(buffer, file\.name, file\.type\)/,
+    "the upload door must ASK that shared rule, not carry its own copy or none at all",
   );
 
   // One definition of the media type, shared. A fabricated marker would be written to Storage and
