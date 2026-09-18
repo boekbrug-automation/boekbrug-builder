@@ -128,3 +128,127 @@ export async function updateClassification(
     return { kind: "failed", error: e instanceof Error ? e.message : String(e) }
   }
 }
+
+// ── [ONTVANGEN] LINKAGE — the third concern, and the one that is repairable ───────────────────
+//
+// `documents.invoice_id` is neither identity nor classification. It is the REVERSE of
+// `invoices.document_id`, and the two are not equally important:
+//
+//   invoices.document_id   the evidence link. The closing package resolves an invoice's PDF
+//                          through it. It is written in the same statement that creates the
+//                          invoice, so it exists exactly when the financial identity exists.
+//
+//   documents.invoice_id   a convenience, written afterwards, in a second statement.
+//
+// Production proves they can disagree: one live invoice points at a document whose invoice_id is
+// null (measured 18 September — see docs/ONTVANGEN_IDEMPOTENTIE.md). Whatever produced it, the
+// consequence is fixed:
+//
+//   `documents.invoice_id IS NULL` DOES NOT MEAN "no invoice exists".
+//
+// A retry that concluded otherwise would mint a second invoice for a document that already has
+// one. So a missing reverse link is a REPAIR, and repair may never re-enter invoice creation.
+
+export type LinkOutcome =
+  | { kind: "linked" }
+  /** Already pointing at this invoice. Nothing to do, and not an error. */
+  | { kind: "already_linked" }
+  /** The pair does not hold together for this owner. Never repaired, never guessed at. */
+  | { kind: "refused"; why: "document" | "invoice" | "not_evidence" }
+  | { kind: "failed"; error: string | null }
+
+/**
+ * Repair `documents.invoice_id`, having proved the pair belongs together and to this owner.
+ *
+ * Four facts are established server-side before a byte is written, and none of them is taken from
+ * the caller's word:
+ *
+ *     document.id       = documentId      document.user_id     = ownerId
+ *     invoice.id        = invoiceId       invoice.receiver_id  = ownerId
+ *     invoice.document_id = documentId
+ *
+ * The last is the one that makes this safe to call from a recovery path. It refuses to write a
+ * link the FORWARD direction does not already assert — so this function can only ever finish a
+ * relationship the invoice itself already claims, never invent one. Pointing a document at an
+ * invoice that does not name it back would fabricate evidence for a bill, which is the shape of
+ * mistake an accountant finds and nobody can explain.
+ *
+ * RLS is off on both tables, so the owner predicates in these statements are the whole boundary.
+ */
+export async function linkDocumentToInvoice(
+  documentId: string,
+  ownerId: string,
+  invoiceId: string,
+  pipeline: Pipeline = createPipelineClient(),
+): Promise<LinkOutcome> {
+  try {
+    const { data: doc, error: docErr } = await pipeline
+      .from("documents")
+      .select("id, invoice_id")
+      .eq("id", documentId)
+      .eq("user_id", ownerId)
+      .maybeSingle()
+    if (docErr) return { kind: "failed", error: docErr.message ?? null }
+    if (!doc) return { kind: "refused", why: "document" }
+    if (doc.invoice_id === invoiceId) return { kind: "already_linked" }
+
+    const { data: inv, error: invErr } = await pipeline
+      .from("invoices")
+      .select("id, document_id")
+      .eq("id", invoiceId)
+      .eq("receiver_id", ownerId)
+      .maybeSingle()
+    if (invErr) return { kind: "failed", error: invErr.message ?? null }
+    if (!inv) return { kind: "refused", why: "invoice" }
+    // The forward link must already say this document is its evidence. Without this check the
+    // repair path could attach any document to any of the owner's invoices.
+    if (inv.document_id !== documentId) return { kind: "refused", why: "not_evidence" }
+
+    const { data: written, error: wErr } = await pipeline
+      .from("documents")
+      .update({ invoice_id: invoiceId })
+      .eq("id", documentId)
+      .eq("user_id", ownerId)
+      .select("id")
+    if (wErr) return { kind: "failed", error: wErr.message ?? null }
+    if (!(written ?? []).length) return { kind: "refused", why: "document" }
+    return { kind: "linked" }
+  } catch (e) {
+    return { kind: "failed", error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * Has this document already produced financial identity?
+ *
+ * The cheap recovery path, asked BEFORE the reader runs. It is not a replacement for the database
+ * boundary — a unique index on invoices(document_id) is what actually prevents the second insert —
+ * but it is what stops a retry paying for an AI read it does not need, and what lets a crashed run
+ * resume instead of starting again.
+ *
+ * Deliberately keyed on the FORWARD link and scoped to the owner. Asking `documents.invoice_id`
+ * instead would answer "no invoice" for the row production already has.
+ */
+export async function findInvoiceForDocument(
+  documentId: string,
+  ownerId: string,
+  pipeline: Pipeline = createPipelineClient(),
+): Promise<{ kind: "found"; invoiceId: string; status: string | null } | { kind: "none" } | { kind: "failed" }> {
+  try {
+    const { data, error } = await pipeline
+      .from("invoices")
+      .select("id, status")
+      .eq("document_id", documentId)
+      .eq("receiver_id", ownerId)
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      console.error("[ONTVANGEN] could not look for an existing invoice", { documentId, error: error.message })
+      return { kind: "failed" }
+    }
+    return data?.id ? { kind: "found", invoiceId: data.id, status: data.status ?? null } : { kind: "none" }
+  } catch (e) {
+    console.error("[ONTVANGEN] the existing-invoice lookup threw", { documentId, error: e instanceof Error ? e.message : String(e) })
+    return { kind: "failed" }
+  }
+}

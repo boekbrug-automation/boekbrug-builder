@@ -140,6 +140,19 @@ CREATE TABLE public.profiles (
   role text
 );
 
+-- [ONTVANGEN] The stored file. A production base table (it predates the migrations in this repo,
+-- like invoices), stubbed to what the receive-first contracts actually touch: who owns it, which
+-- invoice it is evidence for, the state it waits in, and the per-document allowance marker that
+-- ontvangen_fair_use_per_document.sql adds a column to. Everything else about a document — the
+-- storage path, the size, the hash — is identity that no SQL contract here reasons about.
+CREATE TABLE public.documents (
+  id                       uuid PRIMARY KEY,
+  user_id                  uuid,
+  invoice_id               uuid,
+  ai_doc_type              text,
+  ai_processed             boolean DEFAULT false
+);
+
 -- [UREN] The customer card. A production base table (not created by any migration in this repo —
 -- it predates them, like invoices), stubbed here to the two columns a foreign key needs: uren
 -- point at a client, and the FK is what makes "for whom" a relation instead of a typed-in name.

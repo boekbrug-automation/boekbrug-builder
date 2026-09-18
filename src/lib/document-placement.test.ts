@@ -184,3 +184,110 @@ test("[ONTVANGEN] the bestanden road leaves the year alone rather than writing n
   assert.ok(!("year" in (p.lastUpdate?.patch ?? {})), "an absent year must not be sent as null")
   assert.equal(p.rows[0].year, 2026)
 })
+
+// ── [ONTVANGEN] LINKAGE — repairable, owner-scoped, and never a reason to mint ────────────────
+
+import { linkDocumentToInvoice, findInvoiceForDocument } from "./document-placement"
+
+/** A fake that holds both tables, because linkage is the one operation that spans them. */
+class FakePair {
+  documents: Row[] = []
+  invoices: Row[] = []
+  selectError: { message: string } | null = null
+  updates: Array<{ patch: Row; filters: Array<[string, unknown]> }> = []
+
+  from(table: string) {
+    const rows = () => (table === "documents" ? this.documents : this.invoices)
+    const build = (filters: Array<[string, unknown]>) => ({
+      eq: (c: string, v: unknown) => build([...filters, [c, v]]),
+      limit: () => build(filters),
+      maybeSingle: async () => {
+        if (this.selectError) return { data: null, error: this.selectError }
+        const hit = rows().find((r) => filters.every(([c, v]) => r[c] === v))
+        return { data: hit ?? null, error: null }
+      },
+    })
+    return {
+      select: () => build([]),
+      update: (patch: Row) => {
+        const filters: Array<[string, unknown]> = []
+        const b = {
+          eq: (c: string, v: unknown) => { filters.push([c, v]); return b },
+          select: async () => {
+            this.updates.push({ patch, filters })
+            const hit = rows().filter((r) => filters.every(([c, v]) => r[c] === v))
+            for (const r of hit) Object.assign(r, patch)
+            return { data: hit.map((r) => ({ id: r.id })), error: null }
+          },
+        }
+        return b
+      },
+    }
+  }
+}
+
+const pair = () => {
+  const p = new FakePair()
+  p.documents = [{ id: "doc-1", user_id: USER, invoice_id: null }]
+  p.invoices = [{ id: "inv-1", receiver_id: USER, document_id: "doc-1", status: "received" }]
+  return p
+}
+type Pipe = Parameters<typeof linkDocumentToInvoice>[3]
+const asPipe = (p: FakePair) => p as unknown as Pipe
+
+test("[ONTVANGEN] a missing reverse link is repaired once the pair proves itself", async () => {
+  const p = pair()
+  assert.deepEqual(await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(p)), { kind: "linked" })
+  assert.equal(p.documents[0].invoice_id, "inv-1")
+  // Idempotent: repairing a repaired link is not an error and writes nothing new.
+  const before = p.updates.length
+  assert.deepEqual(await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(p)), { kind: "already_linked" })
+  assert.equal(p.updates.length, before)
+})
+
+test("[ONTVANGEN] linkage refuses a pair the FORWARD link does not already assert", async () => {
+  // Without this check the repair path could attach any document to any of the owner's invoices —
+  // fabricating evidence for a bill, which is the mistake an accountant finds and nobody can
+  // explain. The invoice must already name this document as its evidence.
+  const p = pair()
+  p.invoices.push({ id: "inv-2", receiver_id: USER, document_id: "doc-99", status: "received" })
+  assert.deepEqual(
+    await linkDocumentToInvoice("doc-1", USER, "inv-2", asPipe(p)),
+    { kind: "refused", why: "not_evidence" },
+  )
+  assert.equal(p.documents[0].invoice_id, null, "…and nothing was written")
+})
+
+test("[ONTVANGEN] linkage proves BOTH sides belong to this owner", async () => {
+  // RLS is off on both tables, so these predicates are the whole boundary.
+  const strangersDoc = pair()
+  strangersDoc.documents[0].user_id = OTHER
+  assert.deepEqual(await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(strangersDoc)), { kind: "refused", why: "document" })
+
+  const strangersInvoice = pair()
+  strangersInvoice.invoices[0].receiver_id = OTHER
+  assert.deepEqual(await linkDocumentToInvoice("doc-1", USER, "inv-1", asPipe(strangersInvoice)), { kind: "refused", why: "invoice" })
+  assert.equal(strangersInvoice.documents[0].invoice_id, null)
+})
+
+test("[ONTVANGEN] 'has this document already produced an invoice?' is asked of the FORWARD link", async () => {
+  // The production row that proves it: an invoice pointing at a document whose invoice_id is null.
+  // Asking documents.invoice_id would answer "no invoice" and a retry would mint a second one.
+  const p = pair()
+  assert.equal(p.documents[0].invoice_id, null, "precondition: the reverse link is missing")
+  assert.deepEqual(
+    await findInvoiceForDocument("doc-1", USER, asPipe(p)),
+    { kind: "found", invoiceId: "inv-1", status: "received" },
+  )
+})
+
+test("[ONTVANGEN] the resume lookup is owner-scoped and honest about not knowing", async () => {
+  const strangers = pair()
+  strangers.invoices[0].receiver_id = OTHER
+  assert.deepEqual(await findInvoiceForDocument("doc-1", USER, asPipe(strangers)), { kind: "none" })
+
+  const broken = pair()
+  broken.selectError = { message: "statement timeout" }
+  assert.deepEqual(await findInvoiceForDocument("doc-1", USER, asPipe(broken)), { kind: "failed" },
+    "a read that failed must not be reported as 'no invoice exists' — that is how a second one gets made")
+})
