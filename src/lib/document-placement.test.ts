@@ -3,6 +3,10 @@
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
+// [OBSERVABILITY] The constant, never the string. A literal here would stay green through a
+// rename while the code it claims to test had moved on — which is the drift skipped-import.ts
+// exists to prevent, and the gate scans test files for exactly that reason.
+import { DOC_TYPE_WACHT_OP_LEZEN } from "./skipped-import"
 import {
   insertClassifiedDocument,
   updateClassification,
@@ -118,7 +122,7 @@ test("[ONTVANGEN] any other insert failure is reported as one", async () => {
 
 test("[ONTVANGEN] the later reading writes what the document IS, and nothing about where it lives", async () => {
   const p = new FakePipeline()
-  p.rows = [{ id: "doc-1", ...IDENTITY, doc_type: "overig", ai_doc_type: "wacht_op_lezen", ai_processed: false }]
+  p.rows = [{ id: "doc-1", ...IDENTITY, doc_type: "overig", ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN, ai_processed: false }]
 
   const r = await updateClassification("doc-1", USER, AS_INVOICE, p)
   assert.equal(r.kind, "placed")
