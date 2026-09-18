@@ -48,9 +48,8 @@ import { DOC_TYPE_UNSUPPORTED } from "@/lib/skipped-import"
 // [SHEET-INTAKE] Route an uploaded kassa Z-report / grootboek export into the EXISTING
 // turnover + ledger pipelines instead of filing it as an opaque document.
 import { sheetBytesToMatrix } from "@/lib/xlsx-adapter"
-import { looksLikeSpreadsheetBinary, sniffReadableMime } from "@/lib/detect-file"
+import { looksLikeSpreadsheetBinary } from "@/lib/detect-file"
 // [E-FACTUUR-XML] Een Peppol-factuur die met de hand wordt geüpload — zelfde lezer als de mail.
-import { looksLikeInvoiceXmlBytes, E_INVOICE_XML_MIME } from "@/lib/e-invoice"
 import { planSpreadsheetIngest, ledgerKindLabel } from "@/lib/spreadsheet-ingest"
 import { looksLikeDailySalesReport, parseDailySalesReport } from "@/lib/daily-sales-report"
 import { bookTurnoverRows, bookLedgerRows } from "@/lib/turnover-book"
@@ -59,7 +58,7 @@ import { escapeLikeValue } from "@/lib/sanitize"
 // [MULTI-INVOICE] "Eén PDF = één factuur" stond onder elke uploadknop en werd nergens
 // gecontroleerd. Een gescande stapel levert één factuur op; de rest verdwijnt spoorloos.
 // [PDF-TEXT] Shared with the e-mail door, so both run the same text-layer checks.
-import { readPdfTextLayer } from "@/lib/pdf-text"
+import { describeBytes, readPdfLayer } from "@/lib/intake-derived"
 // [GEGROND] The stored verdict on whether the total is printed on the document.
 // [INTAKE-IMG-PDF] Convert an uploaded image (jpg/png) to a one-page PDF at
 // ingest, so every invoice lives as a PDF from day one (opens uniformly, can be
@@ -262,15 +261,11 @@ async function runIntake(req: NextRequest) {
   // no longer is: verifyInvoiceFromPdf reads one exactly, with no model and no API call. Leaving
   // this door alone would have meant the e-mail sync could book a Peppol invoice and the upload
   // button — the one an owner reaches for when a supplier portal hands them the file — could not.
-  const isEInvoice = looksLikeInvoiceXmlBytes(buffer)
-  const effectiveType = isEInvoice ? E_INVOICE_XML_MIME : (sniffReadableMime(buffer) ?? file.type)
-
   // ── Type guard for the AI path: pdf/image go to the extractor, and so does an e-invoice ──────
-  const okForAi =
-    effectiveType === "application/pdf" ||
-    effectiveType.startsWith("image/") ||
-    isEInvoice ||
-    file.name.toLowerCase().endsWith(".pdf")
+  // [ONTVANGEN] One derivation, shared with the background pass — see intake-derived.ts. Written
+  // twice, the live read and the later read would drift, and the drift would be invisible: both
+  // halves keep answering, just not the same answer, and a file booked differently never fails.
+  const { isEInvoice, effectiveType, okForAi } = describeBytes(buffer, file.name, file.type)
 
   // [INTAKE-KEEP-ALL] Never hard-reject a plausible document. A file the extractor can't read —
   // a Word/Excel document, a .csv that isn't a bank export — must NOT be lost: store it in
@@ -416,12 +411,12 @@ async function runIntake(req: NextRequest) {
   // it, and so does the "is this really one invoice?" check further down. Extracting it twice
   // would parse every uploaded PDF twice for no gain.
   // [ONE-INVOICE-UNVERIFIED] Het paginacijfer komt uit diezelfde ene keer openen mee.
-  let pdfText: string | null = null
-  let pdfPages = 0
-  if (effectiveType === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-    const read = await readPdfTextLayer(buffer)
-    pdfText = read.text
-    pdfPages = read.pages
+  // [ONTVANGEN] Same shared derivation; the daily-sales branch stays HERE because it answers the
+  // request and stops, which is the door's business and not a description of the file.
+  const { pdfText, pdfPages, isPdf } = await readPdfLayer(buffer, file.name, effectiveType)
+  // `isPdf`, not `pdfText !== null`: a scanned PDF with no text layer answers null and the
+  // daily-sales check still has to see it, exactly as it did before this was shared.
+  if (isPdf) {
     const dailyResp = await handleDailySalesPdf(pdfText, buffer, file, user.id, supabase, req, source)
     if (dailyResp) return dailyResp
   }
