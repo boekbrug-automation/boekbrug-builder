@@ -146,18 +146,40 @@ test("[ONTVANGEN] the owner's intent is written in the SAME insert that makes it
   assert.equal(row.intake_paid_date, "2026-09-18");
 });
 
-test("[ONTVANGEN] intent columns not applied yet → the FILE is still kept", async () => {
-  // Code ships before the hand-applied migration runs. Losing the owner's bytes over a missing
-  // column would be far worse than losing the choice of payment method — but the loss is real, so
-  // it is loud rather than silent.
+test("[ONTVANGEN] intent supplied but not persistable → the whole handoff fails", async () => {
+  // The tempting version of this branch keeps the file and drops the intent: "at least we have
+  // the bytes". That is the one degradation this contract cannot allow.
+  //
+  // "Ontvangen — je kunt verder" means we hold everything the owner just handed over. If they
+  // said "betaald met pin op 18 september", that decides whether the bon settles through the bank
+  // or the kas — financial behaviour, not a preference — and once the tab is closed it exists
+  // nowhere else. Remembering the bytes while forgetting the intent is the worst of the three
+  // outcomes: the owner is told it is safe, the document is processed later without what they
+  // said about it, and nothing reports a loss. A refusal costs one upload they can repeat.
   const sb = new FakeSupabase();
   pipeRef = new FakePipeline();
   pipeRef.unknownColumn = true;
 
-  const out = await call(sb, { intakePaidMethod: "bank" });
-  assert.equal(out.kind, "created", "a missing column threw away the file the owner just handed over");
+  const out = await call(sb, { intakePaidMethod: "bank", intakePaidDate: "2026-09-18" });
+  assert.equal(out.kind, "failed",
+    "the owner's payment intent could not be stored and we said Ontvangen anyway");
+  assert.equal(out.kind === "failed" && out.reason, "intent",
+    "the reason must name what was lost — this is not a storage or a row failure");
+  assert.deepEqual(sb.removed, [sb.uploaded[0].path],
+    "a refused handoff left its bytes in the bucket");
+  assert.equal(pipeRef.inserted.length, 0, "a row exists for a handoff we refused");
+});
+
+test("[ONTVANGEN] no intent supplied → a missing column cannot break anything", async () => {
+  // The historical callers keep a file after a reader outage and supply no intent at all, so the
+  // strict rule above never reaches them: no intent, no intent columns, nothing to fail on.
+  const sb = new FakeSupabase();
+  pipeRef = new FakePipeline();
+  pipeRef.unknownColumn = true;
+
+  const out = await call(sb);
+  assert.equal(out.kind, "created", "a caller that asked for nothing extra was refused");
   assert.equal(pipeRef.inserted.length, 1);
-  assert.equal("intake_paid_method" in pipeRef.inserted[0], false, "the retry still carried the unknown column");
 });
 
 test("[ONTVANGEN] the historical signature keeps its meaning", async () => {

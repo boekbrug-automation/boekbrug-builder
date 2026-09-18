@@ -66,7 +66,26 @@ begin
 end $$;
 
 comment on column public.documents.duplicate_candidate_invoice_id is
-  '[ONTVANGEN] De factuur die dit document volgens de lezer dubbel zou zijn. Alleen de KANDIDAAT — niets is besloten tot de eigenaar antwoordt.';
+  '[ONTVANGEN] De factuur die dit document volgens de lezer dubbel zou zijn. Alleen de KANDIDAAT — niets is besloten tot de eigenaar antwoordt. LET OP: de foreign key bewijst BESTAAN, niet EIGENDOM — zie de notitie hieronder.';
+
+-- ── [ONTVANGEN] De foreign key bewijst bestaan, niet eigendom ────────────────────────────────
+--
+-- references invoices(id) zegt dat die factuur ERGENS bestaat. Het zegt niets over van WIE hij is,
+-- en RLS staat uit op de geldlijn (zie [RLS-UIT]). Een kandidaat-uuid dat van een client komt is
+-- dus precies zo veel waard als de uuid die iemand zelf verzint.
+--
+-- De deur die dit straks schrijft en de deur die "hou de bestaande" / "toch toevoegen" afhandelt,
+-- moeten allebei ZELF vaststellen, server-side, uit de ingelogde eigenaar en het opgeslagen
+-- document:
+--
+--     document.user_id            = de ingelogde eigenaar
+--     kandidaatfactuur.receiver_id = diezelfde eigenaar
+--
+-- Nooit uit het verzoek. Een besluit over een factuur van iemand anders is niet alleen een lek —
+-- "hou de bestaande" gooit dan een bestand weg op gezag van een vreemde.
+--
+-- Er komt een regressie op zodra die deur er is; dit staat hier omdat het schema er eerder is dan
+-- de deur, en een invariant die alleen in een hoofd zit, is er niet.
 comment on column public.documents.duplicate_decision is
   '[ONTVANGEN] Het antwoord van de eigenaar: keep_existing (dit bestand is overbodig, de bytes gaan weg) of add_anyway (toch boeken, dit is een andere factuur). Null = de vraag staat nog open.';
 
@@ -87,6 +106,16 @@ create index if not exists idx_documents_wachtend
 -- een verzoek-eigenschap tot duurzame staat promoveren, en dat is precies de verwarring die dit
 -- hele stuk werk opruimt.
 
+-- ── ROLLOUT: DIT IS EEN VOORWAARDE, GEEN VERBETERING ────────────────────────────────────────
+--
+-- Zonder deze kolommen WEIGERT de nieuwe ontvangstweg de overdracht: hij rolt de bytes terug en
+-- zegt géén "Ontvangen". Dat is met opzet — de belofte is dat wij alles hebben wat de eigenaar
+-- zojuist afgaf, en de helft onthouden is erger dan netjes nee zeggen.
+--
+-- Dus dezelfde regel als [EB-RACE] bij intake_claims: eerst bewijzen dat het schema live staat,
+-- dan pas receive-first aanzetten. Productie draait nog op de oude synchrone weg, dus er is geen
+-- enkele reden om een half-schema-venster te accepteren.
+--
 -- ── CONTROLE ──
 -- Staan de vier kolommen en hun twee sloten er? Alles 't is goed.
 --   select

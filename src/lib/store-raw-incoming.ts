@@ -30,6 +30,10 @@
 //                             failed. A caller that must decide whether to say "Ontvangen" needs
 //                             that distinction, and `string | null` cannot carry it.
 //
+// The strict rule belongs to receiveRawIncoming() alone. The historical callers never supply
+// intent — they are keeping a file after a reader outage — so their semantics are untouched by
+// it: no intent, no intent columns, nothing to fail on.
+//
 // The third value is the one that matters most. A returned id can mean "your file is now stored"
 // or "we already had these exact bytes", and those are different facts: the first is new work to
 // process, the second must NOT start a second processor run or reset an already-processed
@@ -57,7 +61,7 @@ import { releaseTrashedHash } from "@/lib/trashed-dedup"
 export type ReceiveOutcome =
   | { kind: "created"; documentId: string; contentHash: string }
   | { kind: "existing"; documentId: string; contentHash: string }
-  | { kind: "failed"; reason: "storage" | "row" | "unexpected" }
+  | { kind: "failed"; reason: "storage" | "row" | "intent" | "unexpected" }
 
 export interface ReceiveOpts {
   /** [BEWAAR-EERST] false only where a reader genuinely did not run. */
@@ -171,14 +175,29 @@ export async function receiveRawIncoming(
     const docs = pipelineDoc.from("documents") as any
     let { data: doc, error: docErr } = await docs.insert({ ...baseRow, ...intent }).select("id").single()
     if (docErr && (docErr as { code?: string }).code === "42703" && wantsIntent) {
-      // The columns are not there yet. The FILE can still be kept — losing the bytes over a
-      // missing column would be the worse failure by far — but the owner's own choice of how they
-      // paid is then not stored anywhere, and that is not a thing to notice later from a figure.
+      // ── [ONTVANGEN] The columns are not there, so this handoff FAILS. ──────────────────────
+      //
+      // The first draft retried without them: keep the file, drop the intent, answer "created".
+      // That is the one degradation this contract cannot allow, and the reason is the promise
+      // itself. "Ontvangen — je kunt verder" means we have everything the owner just handed over.
+      // If they chose "betaald met pin op 18 september", that choice decides whether the bon
+      // settles through the bank or the kas — it is financial behaviour, not a preference — and
+      // after the tab closes it exists nowhere else.
+      //
+      // Remembering the bytes while forgetting the intent is the worst of the three outcomes: the
+      // owner is told everything is safe, the document is processed later WITHOUT what they said
+      // about it, and nothing anywhere reports a loss. A refusal costs one upload they can repeat;
+      // a silent half-memory costs a booking nobody knows is wrong.
+      //
+      // So it is a precondition, not a degradation: ontvangen_intake_intent.sql must be proven
+      // live BEFORE receive-first is enabled — the same rule [EB-RACE] follows for intake_claims.
+      // We control that order, so there is no half-schema window to survive.
       console.error(
-        "[ONTVANGEN] intake intent columns are absent — the file is kept, the owner's paid_method/paid_date are NOT. Apply ontvangen_intake_intent.sql.",
+        "[ONTVANGEN] intake intent columns are absent — REFUSING the handoff and rolling the bytes back. Apply ontvangen_intake_intent.sql before enabling receive-first.",
         { userId, file: file.name },
       );
-      ({ data: doc, error: docErr } = await docs.insert(baseRow).select("id").single())
+      await supabase.storage.from("documents").remove([storagePath]).catch(() => {})
+      return { kind: "failed", reason: "intent" }
     }
     if (docErr || !doc) {
       console.error("[STORE-RAW] documents insert failed — the file is NOT kept", { userId, file: file.name, error: docErr?.message })
