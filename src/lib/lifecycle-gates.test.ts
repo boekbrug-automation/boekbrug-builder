@@ -37256,10 +37256,30 @@ test("[ONTVANGEN-BESLUIT] the client sends a choice, and the server reads the ca
     "[ONTVANGEN-BESLUIT] the body must be narrowed to the two values the column accepts")
   // The id may not come from the browser: a request body is a CLAIM about which invoice this
   // duplicates, and accepting it would let one owner point a decision at another owner's row.
-  assert.doesNotMatch(door, /candidateInvoiceId|candidate_invoice_id/,
+  //
+  // The door DOES name the candidate once — in the audit row, from what the decision handed back
+  // (the row is deleted by then, so it can come from nowhere else). So this is not "the word must
+  // be absent" but the narrower, real rule: the only candidate the door may touch is the one the
+  // server read. Anything reached through the request body is the claim this refuses.
+  const bodyRead = door.slice(door.indexOf("await req.json()"), door.indexOf("applyDuplicateDecision("))
+  assert.doesNotMatch(bodyRead, /candidate/i,
     "[ONTVANGEN-BESLUIT] the candidate is being taken from the request")
+  for (const claim of [/req\.json\(\)\)?\??\.\w*[Cc]andidate/, /body\.\w*[Cc]andidate/]) {
+    assert.doesNotMatch(door, claim, "[ONTVANGEN-BESLUIT] the candidate is being taken from the request")
+  }
+  assert.match(door, /candidateInvoiceId: outcome\.candidateInvoiceId/,
+    "[ONTVANGEN-BESLUIT] which invoice the owner kept must be recorded — after keep_existing it is " +
+    "unreadable everywhere else, so an audit row that omits it can never be repaired")
   assert.match(lib, /duplicate_candidate_invoice_id/,
     "[ONTVANGEN-BESLUIT] …and must be read from the row this app wrote")
+
+  // Both successful outcomes carry it out. Only `discarded` strictly has to — the row is gone —
+  // but an outcome type where one arm carries the id and the other does not is one a caller reads
+  // as "there was no candidate" on the arm that simply never bothered.
+  for (const arm of [/kind: "resumed"[^}]*candidateInvoiceId/, /kind: "discarded"[^}]*candidateInvoiceId/]) {
+    assert.match(lib, arm,
+      "[ONTVANGEN-BESLUIT] both successful answers must name the invoice they were answered against")
+  }
 
   // Both sides proved, in the statements. The FK proves the invoice EXISTS; only this proves whose.
   assert.match(lib, /\.eq\("id", args\.documentId\)\s*\n\s*\.eq\("user_id", args\.ownerId\)/,
@@ -37295,8 +37315,34 @@ test("[ONTVANGEN-BESLUIT] the question is shown where it is a question, not wher
   // "Overgeslagen bij import" is for files we could NOT read, and it offers a second read. Here
   // the read succeeded, and a second one buys the same answer for the same money.
   const panel = codeFile("src/components/intake/DuplicateQuestions.tsx")
-  assert.match(panel, /if \(!questions \|\| questions\.length === 0\) return null/,
+  assert.match(panel, /questions\.length === 0\) return null/,
     "[ONTVANGEN-BESLUIT] nothing to ask is nothing on screen")
+
+  // [VRAAG-BLIJFT] …but a read that did not come back is not "nothing to ask". The panel used to
+  // return null on !res.ok, and an absent panel says exactly what an empty one says.
+  assert.match(panel, /setState\(\{ kind: "unknown" \}\)[\s\S]{0,400}setState\(\{ kind: "unknown" \}\)/,
+    "[VRAAG-BLIJFT] both ways a load can fail — a bad status and a throw — must reach 'unknown'")
+  assert.doesNotMatch(panel, /if \(!res\.ok\) return(?!\w)/,
+    "[VRAAG-BLIJFT] a failed read is being turned into silence again")
+  assert.match(panel, /state\.kind === "unknown"[\s\S]{0,600}questionsUnknownText\(t\)/,
+    "[VRAAG-BLIJFT] the unknown state must SAY so; a state nothing renders is the old bug with a name")
+  assert.match(panel, /candidatesUnavailable &&[\s\S]{0,200}candidatesUnavailableText\(t\)/,
+    "[VRAAG-BLIJFT] a question with an unreadable candidate must say what is missing beside it")
+
+  // And the enrichment must not be able to take the list down with it. fetchAllRowsForIds throws
+  // by design; the route may only reach it through the helper that contains that throw.
+  const vragen = codeFile("src/app/api/documents/duplicate-questions/route.ts")
+  const containedAt = vragen.indexOf("lookUpCandidates(")
+  assert.ok(containedAt > -1, "[VRAAG-BLIJFT] the contained lookup is gone from the route")
+  // Every CALL of the thrower, not its import — which is why the `<` or `(` is part of the match.
+  // An `indexOf` on the bare name finds the import line and passes for the wrong reason.
+  const callSites = [...vragen.matchAll(/fetchAllRowsForIds\s*[<(]/g)].map((m) => m.index ?? -1)
+  assert.equal(callSites.length, 1, "[VRAAG-BLIJFT] exactly one lookup, and it is the contained one")
+  assert.ok(callSites[0] > containedAt,
+    "[VRAAG-BLIJFT] the throwing lookup must sit INSIDE lookUpCandidates — uncaught, it is a 500, " +
+    "and a 500 here erases every open question the owner has")
+  assert.match(vragen, /candidatesUnavailable: found\.unavailable/,
+    "[VRAAG-BLIJFT] the screen must be told the lookup failed, or it cannot tell the owner")
   assert.ok(!panel.includes("Lees opnieuw"),
     "[ONTVANGEN-BESLUIT] a second read is not an answer to this question")
   // A component holds no language of its own.

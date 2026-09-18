@@ -40,10 +40,23 @@ export function isDuplicateDecision(value: unknown): value is DuplicateDecision 
 }
 
 export type DecisionOutcome =
-  /** `add_anyway`: the same stored document is back in the queue, with the override on its row. */
-  | { kind: "resumed"; documentId: string }
-  /** `keep_existing`: the redundant copy is gone, and the invoice it duplicated is untouched. */
-  | { kind: "discarded"; documentId: string; storageRemoved: boolean }
+  /**
+   * `add_anyway`: the same stored document is back in the queue, with the override on its row.
+   *
+   * `candidateInvoiceId` is the invoice the owner was actually answering ABOUT, read from the row
+   * this app wrote — never from the request. It is carried out so the caller can record it; see
+   * the note on `discarded` for why the caller cannot go and look it up afterwards.
+   */
+  | { kind: "resumed"; documentId: string; candidateInvoiceId: string | null }
+  /**
+   * `keep_existing`: the redundant copy is gone, and the invoice it duplicated is untouched.
+   *
+   * The document row no longer exists by the time this returns, so `duplicate_candidate_invoice_id`
+   * is no longer readable anywhere. If the audit trail is to say WHICH invoice the owner chose to
+   * keep — the only part of this decision that still has consequences tomorrow — the id has to
+   * travel out of the function that last held it.
+   */
+  | { kind: "discarded"; documentId: string; storageRemoved: boolean; candidateInvoiceId: string | null }
   /**
    * Nothing was written, and the reason is one the owner may be shown.
    *
@@ -144,7 +157,7 @@ export async function applyDuplicateDecision(args: {
         .select("id")
       if (error) return { kind: "failed", error: error.message ?? null }
       if (!(data ?? []).length) return { kind: "refused", why: "not_asked" }
-      return { kind: "resumed", documentId: args.documentId }
+      return { kind: "resumed", documentId: args.documentId, candidateInvoiceId: candidateId }
     }
 
     // ── 3b. keep_existing: this really is a second copy ─────────────────────────────────────
@@ -175,7 +188,7 @@ export async function applyDuplicateDecision(args: {
         documentId: args.documentId, path,
       })
     }
-    return { kind: "discarded", documentId: args.documentId, storageRemoved }
+    return { kind: "discarded", documentId: args.documentId, storageRemoved, candidateInvoiceId: candidateId }
   } catch (e) {
     return { kind: "failed", error: e instanceof Error ? e.message : String(e) }
   }

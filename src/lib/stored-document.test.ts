@@ -417,3 +417,216 @@ test("[ONTVANGEN] a failed wake-up is reported and never claimed as success", as
   u.updateError = { message: "statement timeout" }
   assert.deepEqual(await wakePausedDocumentsForPlanChange({ userId: USER, now: SEPT, deps: updateDeps(u) }), { woken: 0 })
 })
+
+// ── [ONTVANGEN-BESLUIT] Asking the owner a question, and asking it about THEIR invoice ──────────
+//
+// Three things are pinned below, and two of them are about money:
+//
+//   1. the candidate is proved to be this owner's BEFORE it is written onto their document. The
+//      reader finds candidates through an owner-scoped query today, so no live path can point this
+//      at a stranger's invoice — which is exactly why the proof has to be here rather than there:
+//      the invariant must survive the next caller, not only the current one.
+//   2. an unprovable candidate asks NOTHING. Not a question with the candidate quietly dropped:
+//      "deze factuur lijkt al te bestaan" beside an invoice the owner cannot see is a question they
+//      can only answer wrongly, and one of the two answers deletes their file.
+//   3. the transition rings the bell exactly once. The CAS is the authority — a second pass that
+//      reads the same state writes nothing and therefore says nothing.
+
+import { holdForDuplicateDecision, duplicateQuestionEventKey } from "./stored-document"
+
+const INV = "44444444-4444-4444-4444-444444444444"
+
+/** Records what was asked of `invoices` and what was written to `documents`, separately. */
+class FakeHoldClient {
+  /** The invoice rows that exist, by id, with their owner. */
+  invoices: Array<{ id: string; receiver_id: string }> = []
+  invoiceError: { message: string } | null = null
+  invoiceLookups: Array<Array<[string, unknown]>> = []
+  docs: Row[] = []
+  updateError: { message: string } | null = null
+  updates: Array<{ patch: Row; filters: Array<[string, unknown]> }> = []
+
+  from = (table: string) => {
+    if (table === "invoices") {
+      const filters: Array<[string, unknown]> = []
+      const q = {
+        select: () => q,
+        eq: (c: string, v: unknown) => { filters.push([c, v]); return q },
+        maybeSingle: async () => {
+          this.invoiceLookups.push(filters)
+          if (this.invoiceError) return { data: null, error: this.invoiceError }
+          const hit = this.invoices.find((i) =>
+            filters.every(([c, v]) => (i as unknown as Row)[c] === v))
+          return { data: hit ? { id: hit.id } : null, error: null }
+        },
+      }
+      return q
+    }
+    return {
+      update: (patch: Row) => {
+        const filters: Array<[string, unknown]> = []
+        const builder = {
+          eq: (c: string, v: unknown) => { filters.push([c, v]); return builder },
+          select: async () => {
+            this.updates.push({ patch, filters })
+            if (this.updateError) return { data: null, error: this.updateError }
+            const hit = this.docs.filter((r) => filters.every(([c, v]) => r[c] === v))
+            for (const r of hit) Object.assign(r, patch)
+            return { data: hit.map((r) => ({ id: r.id })), error: null }
+          },
+        }
+        return builder
+      },
+    }
+  }
+}
+
+/** A notification writer that records, and can be told to fail. */
+function recordingNotify(result: { ok: boolean; error: string | null } = { ok: true, error: null }) {
+  const sent: Array<Record<string, unknown>> = []
+  const notify = (async (opts: Record<string, unknown>) => { sent.push(opts); return result }) as never
+  return { sent, notify }
+}
+
+function holdClientWithWaitingDoc(): FakeHoldClient {
+  const c = new FakeHoldClient()
+  c.docs = [{ id: "doc-1", user_id: USER, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  return c
+}
+
+test("[ONTVANGEN-BESLUIT] the candidate is proved to be this owner's before it is written down", async () => {
+  const c = holdClientWithWaitingDoc()
+  c.invoices = [{ id: INV, receiver_id: USER }]
+  const { sent, notify } = recordingNotify()
+
+  const held = await holdForDuplicateDecision({
+    documentId: "doc-1", userId: USER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: INV, pipeline: c, notify,
+  })
+  assert.equal(held.kind, "held")
+
+  // The proof is a filter on the STATEMENT, not a comparison after the fact: a lookup without
+  // receiver_id would return a stranger's invoice and this test would pass on the returned row.
+  assert.equal(c.invoiceLookups.length, 1, "the candidate was looked up exactly once")
+  assert.ok(c.invoiceLookups[0].some(([col, v]) => col === "id" && v === INV))
+  assert.ok(
+    c.invoiceLookups[0].some(([col, v]) => col === "receiver_id" && v === USER),
+    "without receiver_id in the statement, the FK is the only thing checked — and it is not ownership",
+  )
+  assert.equal(c.docs[0].duplicate_candidate_invoice_id, INV)
+  assert.equal(c.docs[0].ai_doc_type, DOC_TYPE_WACHT_OP_BESLUIT)
+  assert.equal(c.docs[0].ai_processed, true, "the read DID run; the reader-quality panel must not count it as a failure")
+  assert.equal(sent.length, 1)
+})
+
+test("[ONTVANGEN-BESLUIT] a candidate belonging to somebody else asks nothing at all", async () => {
+  const c = holdClientWithWaitingDoc()
+  c.invoices = [{ id: INV, receiver_id: OTHER }]   // the FK would be satisfied; ownership is not
+  const { sent, notify } = recordingNotify()
+
+  const held = await holdForDuplicateDecision({
+    documentId: "doc-1", userId: USER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: INV, pipeline: c, notify,
+  })
+  assert.equal(held.kind, "failed")
+
+  // Nothing was written: not the state, and above all not the candidate. A question pointing at
+  // another administration must not exist on the row for a later pass to find and act on.
+  assert.equal(c.updates.length, 0, "the hold must not be attempted once the candidate is unprovable")
+  assert.equal(c.docs[0].ai_doc_type, DOC_TYPE_WACHT_OP_LEZEN)
+  assert.equal(c.docs[0].duplicate_candidate_invoice_id, undefined)
+  assert.equal(sent.length, 0, "and the owner is not asked about an invoice they cannot see")
+})
+
+test("[ONTVANGEN-BESLUIT] a candidate we could not verify is refused, not assumed", async () => {
+  // A statement timeout is not evidence that the invoice is theirs, and it is not evidence that it
+  // is not. Failing closed costs one more pass; failing open writes a question about somebody
+  // else's money onto this owner's document.
+  const c = holdClientWithWaitingDoc()
+  c.invoiceError = { message: "statement timeout" }
+  const { sent, notify } = recordingNotify()
+
+  const held = await holdForDuplicateDecision({
+    documentId: "doc-1", userId: USER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: INV, pipeline: c, notify,
+  })
+  assert.equal(held.kind, "failed")
+  assert.equal(c.updates.length, 0)
+  assert.equal(sent.length, 0)
+})
+
+test("[ONTVANGEN-BESLUIT] a reader that named no candidate still asks its question", async () => {
+  // Most useful questions name one. Some do not — and the owner is still being asked about THEIR
+  // document, so there is simply nothing to prove ownership of.
+  const c = holdClientWithWaitingDoc()
+  const { sent, notify } = recordingNotify()
+
+  const held = await holdForDuplicateDecision({
+    documentId: "doc-1", userId: USER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: null, pipeline: c, notify,
+  })
+  assert.equal(held.kind, "held")
+  assert.equal(c.invoiceLookups.length, 0, "nothing to look up")
+  assert.equal(c.docs[0].ai_doc_type, DOC_TYPE_WACHT_OP_BESLUIT)
+  assert.equal(sent.length, 1)
+})
+
+test("[ONTVANGEN-BESLUIT] the hold cannot be written onto somebody else's document", async () => {
+  const c = holdClientWithWaitingDoc()
+  c.invoices = [{ id: INV, receiver_id: OTHER }]
+  const { sent, notify } = recordingNotify()
+
+  const held = await holdForDuplicateDecision({
+    documentId: "doc-1", userId: OTHER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: INV, pipeline: c, notify,
+  })
+  // The candidate IS this caller's; the document is not. Both sides are filtered, so the CAS hits
+  // no row and the owner of doc-1 is never told a question they did not get.
+  assert.equal(held.kind, "failed")
+  assert.equal(c.docs[0].ai_doc_type, DOC_TYPE_WACHT_OP_LEZEN)
+  assert.equal(sent.length, 0)
+})
+
+test("[ONTVANGEN-MELDING] the transition tells the owner — once, however many passes run", async () => {
+  const c = holdClientWithWaitingDoc()
+  c.invoices = [{ id: INV, receiver_id: USER }]
+  const { sent, notify } = recordingNotify()
+  const call = () => holdForDuplicateDecision({
+    documentId: "doc-1", userId: USER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: INV, pipeline: c, notify,
+  })
+
+  assert.equal((await call()).kind, "held")
+  // Three more passes read a row that is already in wacht_op_besluit. The CAS refuses each one, so
+  // no second bell is even attempted — the authority for "a new question" is the write, never a
+  // comparison in code that two concurrent workers could both make.
+  for (let i = 0; i < 3; i++) assert.equal((await call()).kind, "failed")
+  assert.equal(sent.length, 1, "at most one owner-facing question notification per document")
+
+  const bel = sent[0]
+  assert.equal(bel.title, "1 vraag voor jou")
+  assert.equal(bel.body, "Deze factuur lijkt al te bestaan.")
+  assert.equal(bel.link, "/dashboard/incoming")
+  assert.equal(bel.userId, USER)
+  assert.equal(
+    bel.eventKey, duplicateQuestionEventKey("doc-1"),
+    "the key is what stops a crash between the bell and the end of the run from asking twice",
+  )
+})
+
+test("[ONTVANGEN-MELDING] a bell that could not be rung does not undo the question", async () => {
+  // Undoing the hold would put the document back in the queue to be READ again — paying for an
+  // answer we already have — to avoid a missing line in a list. The question is durable and is
+  // already on the screen; the bell is how someone not looking at that screen finds out.
+  const c = holdClientWithWaitingDoc()
+  c.invoices = [{ id: INV, receiver_id: USER }]
+  const { sent, notify } = recordingNotify({ ok: false, error: "notifications unreachable" })
+
+  const held = await holdForDuplicateDecision({
+    documentId: "doc-1", userId: USER, expectedAiDocType: DOC_TYPE_WACHT_OP_LEZEN,
+    candidateInvoiceId: INV, pipeline: c, notify,
+  })
+  assert.equal(held.kind, "held", "financial state is never gated on a notification")
+  assert.equal(c.docs[0].ai_doc_type, DOC_TYPE_WACHT_OP_BESLUIT)
+  assert.equal(sent.length, 1)
+})

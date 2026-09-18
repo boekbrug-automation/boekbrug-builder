@@ -13493,6 +13493,19 @@ export const MESSAGES = {
     ar: 'تعذّر تسجيل اختيارك. حاول مرة أخرى بعد قليل.',
     en: 'Your choice could not be saved. Please try again shortly.',
   },
+  // [VRAAG-BLIJFT] Een mislukte lezing is NIET "geen vragen". Als dit paneel weg is omdat we het
+  // niet konden ophalen, zou de eigenaar denken dat er niets op hem wacht — en nooit terugkijken.
+  'ink.vraag.nietGeladen': {
+    nl: 'We konden je openstaande vragen nu niet laden. Probeer het zo opnieuw.',
+    ar: 'تعذّر تحميل أسئلتك المفتوحة الآن. حاول مرة أخرى بعد قليل.',
+    en: 'We could not load your open questions right now. Please try again shortly.',
+  },
+  // De vraag staat er wél; alleen het nummer en de leverancier van de bestaande factuur ontbreken.
+  'ink.vraag.geenDetails': {
+    nl: 'De gegevens van de bestaande factuur konden we er nu niet bij laden.',
+    ar: 'تعذّر تحميل بيانات الفاتورة الموجودة معها الآن.',
+    en: 'We could not load the details of the existing invoice alongside it right now.',
+  },
   'log.document.received': { nl: 'Bestand ontvangen', en: 'File received', ar: 'استُلم ملف' },
   'log.document.duplicate_decided': { nl: 'Dubbele factuur beantwoord', en: 'Duplicate question answered', ar: 'تمت الإجابة عن سؤال التكرار' },
   'log.document.duplicate_blocked': { nl: 'Dubbel bestand geweigerd', en: 'Duplicate file refused', ar: 'رُفض ملف مكرر' },

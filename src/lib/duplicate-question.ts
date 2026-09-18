@@ -10,6 +10,19 @@
 
 import type { Translator } from "@/lib/i18n/t"
 
+/**
+ * What the panel was handed, as a state rather than a list.
+ *
+ * `unknown` exists because the alternative is a lie. A failed read used to leave the panel absent,
+ * and an absent panel says exactly what an empty one says: nothing is waiting for you. The owner
+ * then never looks again. Three states, and the screen says which one it is in.
+ */
+export type QuestionsState =
+  | { kind: "loading" }
+  /** The read failed. NOT zero questions — we do not know how many there are. */
+  | { kind: "unknown" }
+  | { kind: "loaded"; questions: DuplicateQuestion[]; candidatesUnavailable: boolean }
+
 /** One open question, as the API hands it over. */
 export interface DuplicateQuestion {
   documentId: string
@@ -27,6 +40,22 @@ export interface QuestionCopy {
   candidateLink: { href: string; label: string } | null
   busyLabel: string
   failureText: string
+}
+
+/** The calm sentence shown instead of the list when the read itself did not come back. */
+export function questionsUnknownText(t: T): string {
+  return t("ink.vraag.nietGeladen")
+}
+
+/**
+ * Shown once above the questions when the candidate lookup failed.
+ *
+ * Without it, a question whose invoice could not be read looks identical to one the reader never
+ * found an invoice for — and the owner would answer a "keep the existing one" they were never
+ * shown. The question still stands; this says what is missing from beside it.
+ */
+export function candidatesUnavailableText(t: T): string {
+  return t("ink.vraag.geenDetails")
 }
 
 // The app's own translator type, not a loose function shape: the [TAAL] gates check that every

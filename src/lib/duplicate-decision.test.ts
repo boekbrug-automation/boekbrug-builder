@@ -110,7 +110,7 @@ test("[ONTVANGEN-BESLUIT] add_anyway puts the SAME document back in the queue, w
   const r = await applyDuplicateDecision({
     documentId: DOCUMENT, ownerId: OWNER, decision: "add_anyway", deps: w.deps(),
   })
-  assert.deepEqual(r, { kind: "resumed", documentId: DOCUMENT })
+  assert.deepEqual(r, { kind: "resumed", documentId: DOCUMENT, candidateInvoiceId: CANDIDATE })
   assert.equal(w.documents.length, 1, "the same document, not a second one")
   assert.equal(w.documents[0].duplicate_decision, "add_anyway", "the override is durable…")
   assert.equal(w.documents[0].ai_doc_type, DOC_TYPE_WACHT_OP_LEZEN, "…and the state lets a pass pick it up")
@@ -139,7 +139,7 @@ test("[ONTVANGEN-BESLUIT] keep_existing removes the redundant copy and leaves th
   const r = await applyDuplicateDecision({
     documentId: DOCUMENT, ownerId: OWNER, decision: "keep_existing", deps: w.deps(),
   })
-  assert.deepEqual(r, { kind: "discarded", documentId: DOCUMENT, storageRemoved: true })
+  assert.deepEqual(r, { kind: "discarded", documentId: DOCUMENT, storageRemoved: true, candidateInvoiceId: CANDIDATE })
   assert.equal(w.documents.length, 0, "the second copy is gone…")
   assert.deepEqual(w.removed, [PATH], "…object and all, so the storage allowance comes back")
   assert.equal(w.invoices.length, 1, "and the invoice the owner is KEEPING is untouched")
@@ -252,4 +252,57 @@ test("[ONTVANGEN-BESLUIT] a worker that moved the document first wins over a lat
   })
   assert.deepEqual(r, { kind: "refused", why: "not_asked" })
   assert.equal(w.documents.length, 1, "a booked document is not deleted by a stale tap")
+})
+
+// ── [ONTVANGEN-BESLUIT] What the audit trail can still say afterwards ──────────────────────────
+//
+// WHICH invoice the owner chose to keep is the part of this decision that still has consequences
+// next year: the file is gone, the invoice stands, and the only record of why is the audit row.
+//
+// On `keep_existing` that id is unrecoverable the instant the document row is deleted — there is
+// nowhere left to read `duplicate_candidate_invoice_id` from. So it has to travel OUT of the
+// function that last held it, and it is the id the SERVER read; the request never carried one.
+
+test("[ONTVANGEN-BESLUIT] the kept invoice is still nameable after the document is gone", async () => {
+  const w = asking()
+  const r = await applyDuplicateDecision({
+    documentId: DOCUMENT, ownerId: OWNER, decision: "keep_existing", deps: w.deps(),
+  })
+  assert.equal(w.documents.length, 0, "there is nothing left to look the candidate up from")
+  assert.equal(r.kind, "discarded")
+  assert.equal(
+    r.kind === "discarded" ? r.candidateInvoiceId : "missing", CANDIDATE,
+    "without this the audit row can only say 'a duplicate was discarded' — never which one was kept",
+  )
+})
+
+test("[ONTVANGEN-BESLUIT] add_anyway names the invoice it was answered against too", async () => {
+  const w = asking()
+  const r = await applyDuplicateDecision({
+    documentId: DOCUMENT, ownerId: OWNER, decision: "add_anyway", deps: w.deps(),
+  })
+  assert.equal(r.kind === "resumed" ? r.candidateInvoiceId : "missing", CANDIDATE)
+})
+
+test("[ONTVANGEN-BESLUIT] a question with no candidate records no candidate, never a guess", async () => {
+  const w = asking({ duplicate_candidate_invoice_id: null })
+  const r = await applyDuplicateDecision({
+    documentId: DOCUMENT, ownerId: OWNER, decision: "keep_existing", deps: w.deps(),
+  })
+  assert.equal(r.kind === "discarded" ? r.candidateInvoiceId : "missing", null)
+})
+
+test("[ONTVANGEN-BESLUIT] the recorded candidate is the one on the row, not one a caller could name", async () => {
+  // The client sends a decision and nothing else. If a request could name the candidate, this
+  // number would be the caller's claim rather than the server's reading — and the audit trail
+  // would be recording what somebody said instead of what happened.
+  const w = asking({ duplicate_candidate_invoice_id: CANDIDATE })
+  const r = await applyDuplicateDecision({
+    documentId: DOCUMENT, ownerId: OWNER, decision: "keep_existing", deps: w.deps(),
+  })
+  assert.equal(r.kind === "discarded" ? r.candidateInvoiceId : "missing", CANDIDATE)
+  assert.equal(
+    applyDuplicateDecision.length, 1,
+    "one argument object; a candidateInvoiceId parameter is the shape this refuses to have",
+  )
 })

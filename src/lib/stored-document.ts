@@ -40,6 +40,7 @@ import {
 } from "@/lib/skipped-import"
 import { pauseIsOver, pauseForFairUse, pauseColumns } from "@/lib/fair-use-pause"
 import type { FairUseKey } from "@/lib/fair-use"
+import { createNotification } from "@/lib/notifications"
 
 /** Why the processor was woken. A fresh handoff and a later sweep may pick up different states. */
 export type ProcessMode = "fresh_intake" | "retry_skipped"
@@ -402,6 +403,17 @@ export function autoFinishedEventKey(documentId: string): string {
   return `intake:auto-finished:${documentId}`;
 }
 
+/**
+ * [ONTVANGEN-MELDING] The durable name of "this document started waiting on you".
+ *
+ * One per document, for the same reason the finished-bell has one: the run that rings it can die
+ * between the bell and its own end, and the owner must not be asked the same question twice from
+ * two different lines in the list.
+ */
+export function duplicateQuestionEventKey(documentId: string): string {
+  return `intake:duplicate-question:${documentId}`;
+}
+
 // ── [ONTVANGEN] Moving a document into the owner's hands ──────────────────────────────────────
 
 export type HoldWrite =
@@ -431,9 +443,43 @@ export async function holdForDuplicateDecision(args: {
   candidateInvoiceId: string | null
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pipeline?: any
+  /** Injected in tests; production rings the app's one notification writer. */
+  notify?: typeof createNotification
 }): Promise<HoldWrite> {
   const client = args.pipeline ?? createPipelineClient()
+  const notify = args.notify ?? createNotification
   try {
+    // ── The candidate must be THIS owner's, proved here and not assumed ──────────────────────
+    //
+    // duplicate_candidate_invoice_id references invoices(id), and a foreign key proves the row
+    // EXISTS — never whose it is. Today's caller finds the candidate through an owner-scoped
+    // query, so there is no path that could point this at a stranger's invoice; the invariant is
+    // kept anyway, because "the writer proves it too" is what stops the next caller from being the
+    // one that does not.
+    //
+    // Unprovable means the question is not asked at all: a document held against an invoice we
+    // cannot show the owner is a question they can only answer wrongly.
+    if (args.candidateInvoiceId) {
+      const { data: candidate, error: invErr } = await client
+        .from("invoices")
+        .select("id")
+        .eq("id", args.candidateInvoiceId)
+        .eq("receiver_id", args.userId)
+        .maybeSingle()
+      if (invErr) {
+        console.error("[ONTVANGEN-BESLUIT] could not verify the duplicate candidate — not asking", {
+          documentId: args.documentId, error: invErr.message,
+        })
+        return { kind: "failed" }
+      }
+      if (!candidate) {
+        console.error("[ONTVANGEN-BESLUIT] the duplicate candidate is not this owner's — refusing to ask", {
+          documentId: args.documentId,
+        })
+        return { kind: "failed" }
+      }
+    }
+
     const { data, error } = await client
       .from("documents")
       .update({
@@ -453,7 +499,35 @@ export async function holdForDuplicateDecision(args: {
       })
       return { kind: "failed" }
     }
-    return (data ?? []).length ? { kind: "held" } : { kind: "failed" }
+    if (!(data ?? []).length) return { kind: "failed" }
+
+    // ── The owner is told, ONCE, and by the transition ──────────────────────────────────────────
+    //
+    // Here rather than at the caller, because the authority for "there is a new question" is the
+    // statement above: it moved the state, or it did not. A notification written from anywhere that
+    // merely OBSERVES `wacht_op_besluit` would fire again on every pass that reads the row.
+    //
+    // And it is the last thing this function does, deliberately. The question is already durable
+    // and already on the screen; the bell is how an owner who is not looking at that screen finds
+    // out. A bell that could not be written must therefore not undo the hold — that would put the
+    // document back in the queue to be READ again, paying for an answer we already have, to avoid
+    // a missing line in a list. Logged, so it is findable, and nothing more.
+    await notify({
+      userId: args.userId,
+      title: "1 vraag voor jou",
+      body: "Deze factuur lijkt al te bestaan.",
+      type: "status",
+      link: "/dashboard/incoming",
+      eventKey: duplicateQuestionEventKey(args.documentId),
+    }).then((bel) => {
+      if (!bel.ok) {
+        console.error("[ONTVANGEN-MELDING] the question stands, but the owner was not told", {
+          documentId: args.documentId, error: bel.error,
+        })
+      }
+    }).catch(() => { /* createNotification does not throw; this is belt and braces */ })
+
+    return { kind: "held" }
   } catch (e) {
     console.error("[ONTVANGEN] the duplicate hold threw", {
       documentId: args.documentId, error: e instanceof Error ? e.message : String(e),

@@ -236,6 +236,7 @@ export async function processStoredDocument(args: {
       const held = await holdForDuplicateDecision({
         documentId, userId: ownerId, expectedAiDocType: doc.waitingState,
         candidateInvoiceId: verdict.candidateInvoiceId, pipeline,
+        notify: args.deps?.notify,
       })
       if (held.kind === "failed") {
         // The state did not move, so the drain will see this document again — and pay again. Say

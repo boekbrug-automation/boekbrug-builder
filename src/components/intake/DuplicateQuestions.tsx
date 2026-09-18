@@ -22,24 +22,34 @@ import Link from "next/link";
 import { useLocale } from "@/lib/i18n/use-locale";
 import { translator } from "@/lib/i18n/t";
 import {
-  questionCopy, questionsHeading,
-  type DuplicateQuestion,
+  questionCopy, questionsHeading, questionsUnknownText, candidatesUnavailableText,
+  type QuestionsState,
 } from "@/lib/duplicate-question";
 
 export default function DuplicateQuestions() {
   const t = translator(useLocale());
-  const [questions, setQuestions] = useState<DuplicateQuestion[] | null>(null);
+  const [state, setState] = useState<QuestionsState>({ kind: "loading" });
   const [busy, setBusy] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
 
+  // [VRAAG-BLIJFT] A failed read is `unknown`, never an empty list. The two look the same on a
+  // screen that renders nothing, and they mean opposite things: "nothing waits for you" versus
+  // "we could not find out". The first is the one that makes an owner stop looking.
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/documents/duplicate-questions");
-      if (!res.ok) return;                 // a failed read leaves the panel absent, never wrong
+      if (!res.ok) {
+        setState({ kind: "unknown" });
+        return;
+      }
       const data = await res.json();
-      setQuestions(Array.isArray(data.questions) ? data.questions : []);
+      setState({
+        kind: "loaded",
+        questions: Array.isArray(data.questions) ? data.questions : [],
+        candidatesUnavailable: data.candidatesUnavailable === true,
+      });
     } catch {
-      /* the panel simply does not appear; the question is durable and will be here next time */
+      setState({ kind: "unknown" });
     }
   }, []);
 
@@ -64,7 +74,11 @@ export default function DuplicateQuestions() {
       }
       // Answered. Drop it from the list rather than re-reading: the document has left this state,
       // and the next load will agree.
-      setQuestions((prev) => (prev ?? []).filter((q) => q.documentId !== documentId));
+      setState((prev) =>
+        prev.kind === "loaded"
+          ? { ...prev, questions: prev.questions.filter((q) => q.documentId !== documentId) }
+          : prev,
+      );
     } catch {
       setFailed(documentId);
     } finally {
@@ -72,7 +86,27 @@ export default function DuplicateQuestions() {
     }
   }
 
-  if (!questions || questions.length === 0) return null;
+  // Nothing is drawn while the answer is still on its way: a panel that flashes "we could not load
+  // your questions" for 300ms on every page view is worse than one that appears when it knows.
+  if (state.kind === "loading") return null;
+
+  if (state.kind === "unknown") {
+    const text = questionsUnknownText(t);
+    return (
+      <section
+        aria-label={text}
+        style={{
+          background: "#fff", border: "1px solid #e8eaed", borderRadius: 16,
+          padding: 16, marginBottom: 16, fontSize: 13, color: "#5f6368",
+        }}
+      >
+        {text}
+      </section>
+    );
+  }
+
+  const { questions, candidatesUnavailable } = state;
+  if (questions.length === 0) return null;
 
   return (
     <section
@@ -85,6 +119,12 @@ export default function DuplicateQuestions() {
       <div style={{ fontWeight: 700, fontSize: 15, color: "#202124", marginBottom: 10 }}>
         {questionsHeading(t, questions.length)}
       </div>
+
+      {candidatesUnavailable && (
+        <div style={{ fontSize: 13, color: "#5f6368", marginBottom: 4 }}>
+          {candidatesUnavailableText(t)}
+        </div>
+      )}
 
       {questions.map((q) => {
         const copy = questionCopy(t, q);

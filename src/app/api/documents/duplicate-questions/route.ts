@@ -8,7 +8,10 @@ import { NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { DOC_TYPE_WACHT_OP_BESLUIT } from "@/lib/skipped-import";
 import { fetchAllRowsForIds } from "@/lib/supabase-paginate";
-import type { DuplicateQuestion } from "@/lib/duplicate-question";
+import {
+  candidateIdsOf, lookUpCandidates, buildQuestions,
+  type QuestionRow, type CandidateRow,
+} from "@/lib/duplicate-questions-read";
 
 export const dynamic = "force-dynamic";
 
@@ -47,52 +50,39 @@ export async function GET() {
     );
   }
 
-  const rows = (data ?? []) as Array<{
-    id: string; file_name: string | null; duplicate_candidate_invoice_id: string | null
-  }>;
-  const candidateIds = [...new Set(rows.map((r) => r.duplicate_candidate_invoice_id).filter(Boolean))] as string[];
+  const rows = (data ?? []) as QuestionRow[];
+  const candidateIds = candidateIdsOf(rows);
 
   // The candidate's own number and supplier, read in one go and scoped to this owner — the FK
   // proves the invoice exists, never whose it is.
-  const byId = new Map<string, { invoice_number: string | null; client_name: string | null }>();
-  if (candidateIds.length) {
-    // [IN-CHUNK] Chunked, even though MAX_QUESTIONS bounds this at 25 today: an unchunked .in()
-    // on a growing table dies past a few hundred ids with a 414 that supabase-js reports as an
-    // ordinary error, so the caller reads a failed call as "no rows" — here, as "no candidate",
-    // which would quietly strip the link out of every question.
-    const invoices = await fetchAllRowsForIds<
-      { id: string; invoice_number: string | null; client_name: string | null }, string
-    >(candidateIds, (chunk, from, to) =>
+  //
+  // [VRAAG-BLIJFT] The lookup may fail without taking the questions with it; that decision lives in
+  // duplicate-questions-read.ts, where it can be run rather than read.
+  //
+  // [IN-CHUNK] Chunked, even though MAX_QUESTIONS bounds this at 25 today: an unchunked .in() on a
+  // growing table dies past a few hundred ids with a 414 that supabase-js reports as an ordinary
+  // error, so a caller that only destructures `data` reads a failed call as "no rows".
+  const found = await lookUpCandidates(
+    candidateIds,
+    (ids) => fetchAllRowsForIds<CandidateRow, string>(ids, (chunk, from, to) =>
       supabase
         .from("invoices")
         .select("id, invoice_number, client_name")
         .eq("receiver_id", user.id)
         .in("id", chunk)
-        .range(from, to));
-    for (const inv of invoices) {
-      byId.set(inv.id, {
-        invoice_number: inv.invoice_number ?? null,
-        client_name: inv.client_name ?? null,
+        .range(from, to)),
+    (message) => {
+      // Named, because this is invisible from the screen: such a question looks exactly like one
+      // whose reader never found a candidate at all.
+      console.error("[ONTVANGEN-BESLUIT] could not load the candidate invoices — showing the questions without them", {
+        count: candidateIds.length, error: message,
       });
-    }
-  }
+    },
+  );
 
-  const questions: DuplicateQuestion[] = rows.map((r) => {
-    const found = r.duplicate_candidate_invoice_id ? byId.get(r.duplicate_candidate_invoice_id) : undefined;
-    return {
-      documentId: r.id,
-      fileName: r.file_name ?? "document",
-      // No candidate, or one this owner cannot see: the question stands either way — it is about
-      // THEIR document — and the panel simply has no invoice to link to.
-      candidate: found && r.duplicate_candidate_invoice_id
-        ? {
-            invoiceId: r.duplicate_candidate_invoice_id,
-            invoiceNumber: found.invoice_number,
-            vendor: found.client_name,
-          }
-        : null,
-    };
-  });
+  const questions = buildQuestions(rows, found);
 
-  return NextResponse.json({ questions, open: questions.length });
+  // `candidatesUnavailable` lets the screen say WHY a question has no invoice beside it, instead of
+  // implying the reader never found one. It never suppresses a question.
+  return NextResponse.json({ questions, open: questions.length, candidatesUnavailable: found.unavailable });
 }

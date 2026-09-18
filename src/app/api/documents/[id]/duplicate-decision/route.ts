@@ -70,12 +70,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ error: message }, { status: outcome.why === "not_asked" ? 409 : 404 });
   }
 
+  // Which invoice the owner chose over this file is the part of this decision that still matters
+  // next year — and on `keep_existing` the row holding it has just been deleted, so it can only be
+  // recorded from what the decision handed back. It is the id the SERVER read; the request never
+  // carried one.
   await logAuditAction({
     userId: user.id,
     action: "document.duplicate_decided",
     entityType: "document",
     entityId: id,
-    newValue: { decision, outcome: outcome.kind },
+    newValue: { decision, outcome: outcome.kind, candidateInvoiceId: outcome.candidateInvoiceId },
     ipAddress: getClientIP(req),
   }).catch(() => {});
 
