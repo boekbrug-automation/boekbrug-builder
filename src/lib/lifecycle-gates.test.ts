@@ -36222,6 +36222,49 @@ test("[EB-TESTER] the Sandbox gate is wired into every door that reaches a bank"
     "isEnableBankingConfigured learned about users — the callback has none to give it");
 });
 
+// ── [EB-TESTER] The rollout has THREE variables, and health knows all three ───────────────────
+//
+// Two keys say a bank link EXISTS; a list says who may reach it. The list was missing from the
+// [DEPLOY-HEALTH] contract, and that gap has the exact shape this project keeps finding: nothing
+// breaks loudly. With credentials set and no list, canUseEnableBanking() refuses everyone and the
+// bank card is absent — which on screen is indistinguishable from a card correctly hidden from a
+// non-tester. A green health report over a door that is shut for everybody, including the owner.
+//
+// Conditional, like the Stripe webhook secret beside it: an empty list is only a SILENT fault once
+// the credentials are actually there. Alarming before that is the false alarm that teaches people
+// to ignore alarms.
+test("[EB-TESTER] the health contract covers all three rollout variables, conditionally", () => {
+  const health = code("src/lib/deploy-health.ts");
+
+  for (const key of ["ENABLEBANKING_APPLICATION_ID", "ENABLEBANKING_PRIVATE_KEY", "ENABLEBANKING_TESTERS"]) {
+    assert.ok(health.includes(`key: "${key}"`), `[DEPLOY-HEALTH] does not know ${key}`);
+  }
+
+  // The tester list is declared STIL, and downgraded only when the two credentials are absent.
+  // Declared 'optioneel' instead, it could never raise the verdict at all.
+  const from = health.indexOf('key: "ENABLEBANKING_TESTERS"');
+  const to = health.indexOf("export interface EnvResult");
+  assert.ok(from > -1 && to > from, "[EB-TESTER] the contract entry or EnvResult was renamed");
+  assert.match(health.slice(from, to), /severity: "stil"/,
+    "the tester list is not declared as a silent fault, so a shut door can never reach the verdict");
+
+  assert.match(
+    health,
+    /hasValue\(env\["ENABLEBANKING_APPLICATION_ID"\]\) && hasValue\(env\["ENABLEBANKING_PRIVATE_KEY"\]\)/,
+    "the condition is not both credentials — one key alone must not make the list urgent",
+  );
+  assert.match(
+    health,
+    /c\.key === "ENABLEBANKING_TESTERS" && !bankkoppelingAan[\s\S]{0,120}severity = "optioneel"/,
+    "an absent bank link still alarms about its tester list",
+  );
+
+  // And the report never carries a value — the tester list is UUIDs of real people.
+  const route = code("src/app/api/health/route.ts");
+  assert.match(route, /missingEnv\(env\)\.map\(\(m\) => \(\{ key: m\.key, ernst: m\.severity, gevolg: m\.gevolg \}\)\)/,
+    "the health route serializes something other than name/severity/consequence — a health report that leaks keys is itself the leak");
+});
+
 // ── [EB-RACE] One worker at a time per linked account ─────────────────────────────────────────
 //
 // [EB-IDENTITEIT] took entry_reference away as the feed's identity, because that id is the bank's
