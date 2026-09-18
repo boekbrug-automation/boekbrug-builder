@@ -29,6 +29,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { wakePausedDocumentsForPlanChange } from "@/lib/stored-document";
+// [MEERVOUD] Ook een serverlog telt: "document(s)" is geen afkorting die iemand leest, het is een
+// mislukte samenvoeging. De gate scant elk .ts-bestand en heeft gelijk — er is één teller voor.
+import { telWoord } from "@/lib/nl-plural";
 import type Stripe from "stripe";
 import {
   getStripe,
@@ -241,7 +244,7 @@ async function handleEvent(event: Stripe.Event): Promise<void> {
   // that is already waiting, and moving its date would make it ask sooner and be refused sooner.
   if (plan === "plus") {
     const { woken } = await wakePausedDocumentsForPlanChange({ userId: profileId });
-    if (woken > 0) console.log(`[ONTVANGEN] ${woken} paused document(s) woken for profile ${profileId}`);
+    if (woken > 0) console.log(`[ONTVANGEN] ${telWoord(woken, "gepauzeerd document", "gepauzeerde documenten")} gewekt voor profiel ${profileId}`);
   }
 
   console.log(`[BILLING] ${event.type} → profile ${profileId} is ${status}/${plan}`);

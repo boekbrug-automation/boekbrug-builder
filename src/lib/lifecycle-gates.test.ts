@@ -36616,7 +36616,14 @@ test("[ONTVANGEN-LIMIET] the notification is exactly-once because the write says
   const store = codeFile("src/lib/stored-document.ts");
   const fn = store.indexOf("export async function pauseDocumentForFairUse");
   assert.ok(fn > 0, "[ONTVANGEN-LIMIET] pauseDocumentForFairUse moved — re-point this gate");
-  const body = store.slice(fn);
+  // [LIFECYCLE-VENSTER] Bounded on the NEXT declaration, not left running to the end of the file.
+  // It was unbounded for one commit, and adding wakePausedDocumentsForPlanChange below it — which
+  // is correctly tenant-scoped too — pushed the owner-filter count from 2 to 3 and turned this
+  // gate red over code it was never measuring. AGENTS.md names exactly this: cut on real code, and
+  // assert the marker was found, or the window quietly measures something larger than it claims.
+  const fnEnd = store.indexOf("export async function wakePausedDocumentsForPlanChange", fn);
+  assert.ok(fnEnd > fn, "[ONTVANGEN-LIMIET] the end marker moved — re-point this gate, do not widen it");
+  const body = store.slice(fn, fnEnd);
 
   // Two passes that both read "not paused yet" before either writes would both send the notice.
   // The database settles it instead — same shape as the [EB-RACE] claim.
