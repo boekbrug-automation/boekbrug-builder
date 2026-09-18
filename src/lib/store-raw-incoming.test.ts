@@ -26,14 +26,33 @@ class FakeSupabase {
   uploaded: Array<{ path: string; bytes: number }> = [];
   removed: string[] = [];
   existing: { id: string; trashed?: boolean } | null = null;
+  /**
+   * Rows this account already has, keyed by content_hash — the shape the real UNIQUE index has.
+   *
+   * The blunt `existing` above answers every lookup the same way, which is fine for the tests that
+   * only care WHAT happens on a hit. It is not enough for the wrap tests: those turn on WHICH hash
+   * is looked up, and a fake that ignores the filter would report a duplicate even when the code
+   * searched for something else entirely.
+   */
+  existingByHash: Record<string, { id: string; trashed?: boolean }> = {};
+  /** Every content_hash the code actually searched for. */
+  lookedUp: string[] = [];
   uploadError: { message: string } | null = null;
 
   from() {
-    return {
-      select: () => ({
-        eq: () => ({ eq: () => ({ limit: () => ({ maybeSingle: async () => ({ data: this.existing }) }) }) }),
-      }),
+    const eq = (column: string, value: unknown) => {
+      if (column === "content_hash") this.lookedUp.push(String(value));
+      return {
+        eq,
+        limit: () => ({
+          maybeSingle: async () => {
+            const hash = this.lookedUp.at(-1) ?? "";
+            return { data: this.existing ?? this.existingByHash[hash] ?? null };
+          },
+        }),
+      };
     };
+    return { select: () => ({ eq }) };
   }
   storage = {
     from: () => ({
@@ -195,3 +214,78 @@ test("[ONTVANGEN] the historical signature keeps its meaning", async () => {
   assert.equal(await storeRawIncoming(BYTES, FILE, USER, asClient(stuk), "could_not_read", "upload", { deps: deps() }), null);
 });
 
+
+// ── [ONTVANGEN] The duplicate gate must survive the image → PDF wrap ──────────────────────────
+//
+// Receive-first stores the CONVERTED file (a photographed bon becomes a PDF at the door instead of
+// after the reader). The measured fact below is why the conversion may not also decide the hash.
+
+test("[ONTVANGEN] the image→PDF wrap is not byte-stable — measured, not assumed", async () => {
+  const { maybeImageToPdf } = await import("./image-to-pdf")
+  // A minimal valid 1×1 PNG.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  )
+  const first = await maybeImageToPdf(png, "image/png", "bon.png")
+  await new Promise((r) => setTimeout(r, 1100)) // cross a whole second: pdf-lib stamps to the second
+  const second = await maybeImageToPdf(png, "image/png", "bon.png")
+
+  assert.equal(first.fileName, "bon.pdf", "precondition: the wrap really happened")
+  assert.notDeepEqual(
+    first.buffer, second.buffer,
+    "pdf-lib no longer stamps a timestamp — if the wrap became byte-stable this test should be " +
+      "replaced, but the rule below (hash what arrived) still holds for every other conversion",
+  )
+})
+
+test("[ONTVANGEN] the hash is taken from the bytes that arrived, never from the copy we keep", async () => {
+  const sb = new FakeSupabase()
+  const converted = Buffer.from("%PDF-1.7 wrapped once")
+  const r = await receiveRawIncoming(BYTES, FILE, USER, asClient(sb), "wacht_op_lezen", "camera", {
+    deps: deps(),
+    storeInstead: { buffer: converted, fileName: "bon.pdf", fileType: "application/pdf" },
+  })
+  assert.equal(r.kind, "created")
+
+  // The row describes the object that is really in storage…
+  const row = pipeRef.inserted.at(-1)!
+  assert.equal(row.file_name, "bon.pdf")
+  assert.equal(row.file_type, "application/pdf")
+  assert.equal(row.file_size, converted.length)
+  assert.equal(sb.uploaded.at(-1)!.bytes, converted.length, "and the converted bytes are what was uploaded")
+
+  // …while the hash still identifies what the owner handed over.
+  const { computeContentHash } = await import("./content-hash")
+  assert.equal(row.content_hash, computeContentHash(BYTES))
+  assert.notEqual(row.content_hash, computeContentHash(converted))
+})
+
+test("[ONTVANGEN] the same photo, wrapped twice, is still recognised as one file", async () => {
+  // The money test. Two wraps of one photo differ byte for byte (see above), so a hash taken from
+  // the stored copy would be unique every time — and the bon the owner photographed twice would
+  // become two documents, two invoices, two costs and two voorbelasting claims, with nothing
+  // failing and nothing logged.
+  const sb = new FakeSupabase()
+  const first = await receiveRawIncoming(BYTES, FILE, USER, asClient(sb), "wacht_op_lezen", "camera", {
+    deps: deps(),
+    storeInstead: { buffer: Buffer.from("%PDF wrap A"), fileName: "bon.pdf", fileType: "application/pdf" },
+  })
+  assert.equal(first.kind, "created")
+  if (first.kind !== "created") return
+
+  // The gate now knows THAT hash — the one the first receive reported, keyed the way the UNIQUE
+  // index keys it. Nothing here tells the fake "answer duplicate to the next question", so the
+  // second call only finds it if the code looked the same hash up.
+  sb.existingByHash[first.contentHash] = { id: first.documentId }
+  const uploadsBefore = sb.uploaded.length
+  const rowsBefore = pipeRef.inserted.length
+
+  const second = await receiveRawIncoming(BYTES, FILE, USER, asClient(sb), "wacht_op_lezen", "camera", {
+    deps: deps(),
+    storeInstead: { buffer: Buffer.from("%PDF wrap B — different bytes, same photo"), fileName: "bon.pdf", fileType: "application/pdf" },
+  })
+  assert.equal(second.kind, "existing", "a second wrap of the same photo must not become a second document")
+  assert.equal(sb.uploaded.length, uploadsBefore, "…nothing stored")
+  assert.equal(pipeRef.inserted.length, rowsBefore, "…and no second row to read and book")
+})

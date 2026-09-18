@@ -122,6 +122,27 @@ export async function receiveRawIncoming(
     /** [ONTVANGEN] Owner intent, ISO yyyy-mm-dd. */
     intakePaidDate?: string | null
     /**
+     * [ONTVANGEN] The bytes to KEEP, when they are not the bytes that arrived.
+     *
+     * A photographed receipt is wrapped into a PDF before it is stored, so that every invoice
+     * lives as a PDF from day one. The wrap is lossless — the original JPEG is embedded, never
+     * re-compressed — but it is NOT byte-stable: pdf-lib stamps CreationDate and ModificationDate,
+     * so wrapping the same photo twice a second apart produces two different files.
+     *
+     * That measured fact is why this parameter exists instead of a caller simply handing the
+     * converted buffer in as `buffer`. The content hash is the duplicate gate: it is what stops
+     * the same bon, photographed twice or double-tapped through the upload button, becoming two
+     * documents, two invoices, two costs and two voorbelasting claims. Hashing a wrapped copy
+     * would make every photo's hash unique by construction and switch that gate off silently —
+     * nothing would fail, nothing would log, and the books would simply start double-counting.
+     *
+     * So the hash is ALWAYS taken from the bytes as they arrived, and only the stored object is
+     * the converted one. The e-mail door hashes its attachment as it arrived for the same reason,
+     * which is what keeps a bon that came by mail and the same bon photographed recognisable as
+     * one file.
+     */
+    storeInstead?: { buffer: Buffer; fileName: string; fileType: string }
+    /**
      * A seam, exactly like EnableBankingClientOptions.fetchImpl and the EB claim's claimStore:
      * the receive CONTRACT — bytes and row both durable, or no Ontvangen — is behaviour that
      * cannot be read off the source, and it is the promise the whole of #129 rests on. Production
@@ -134,7 +155,12 @@ export async function receiveRawIncoming(
     }
   } = {},
 ): Promise<ReceiveOutcome> {
+  // The identity of what the owner handed over — never of what we chose to keep it in.
   const hash = computeContentHash(buffer)
+  // What actually goes to storage and onto the row. Identical to the arriving bytes unless the
+  // caller converted them first (see storeInstead).
+  const kept = opts.storeInstead ?? { buffer, fileName: file.name, fileType: file.type }
+  const keptType = kept.fileType || "application/octet-stream"
   try {
     const { data: existing } = await supabase
       .from("documents").select("id, trashed").eq("user_id", userId).eq("content_hash", hash).limit(1).maybeSingle()
@@ -144,10 +170,10 @@ export async function receiveRawIncoming(
     // best-effort opslag, de boeking zelf is de money-truth.
     if (existing?.id && existing.trashed !== true) return { kind: "existing", documentId: existing.id, contentHash: hash }
     if (existing?.id) await releaseTrashedHash(supabase, userId, existing.id)
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_")
+    const safeName = kept.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
     const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
     const { error: upErr } = await supabase.storage
-      .from("documents").upload(storagePath, buffer, { contentType: file.type || "application/octet-stream", upsert: false })
+      .from("documents").upload(storagePath, kept.buffer, { contentType: keptType, upsert: false })
     if (upErr) {
       console.error("[STORE-RAW] storage upload failed — the file is NOT kept", { userId, file: file.name, error: upErr.message })
       return { kind: "failed", reason: "storage" }
@@ -157,8 +183,10 @@ export async function receiveRawIncoming(
       : await ensureImportedFolder(userId, "pipeline")
     const pipelineDoc = opts.deps?.pipeline ?? createPipelineClient()
     const baseRow = {
-      user_id: userId, file_name: file.name, file_url: storagePath,
-      file_size: buffer.length, file_type: file.type || "application/octet-stream",
+      // [NAAM-BIJ-BINNENKOMST] The name, size and type as STORED — a photo filed as a PDF is
+      // findable under the name it actually has in Bestanden, not the one the camera gave it.
+      user_id: userId, file_name: kept.fileName, file_url: storagePath,
+      file_size: kept.buffer.length, file_type: keptType,
       doc_type: "overig", folder_id: folderId, source,
       ai_processed: opts.aiProcessed ?? true, ai_doc_type: aiDocType, content_hash: hash,
     }
