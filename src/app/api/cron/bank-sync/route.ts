@@ -104,6 +104,11 @@ export async function GET(req: NextRequest) {
   const userIds = [...new Set((rows ?? []).map((r) => r.user_id).filter((x): x is string => !!x))];
 
   let synced = 0, failed = 0, inserted = 0, autoBooked = 0, expiring = 0, truncated = 0;
+  // [EB-TELLING] The same numbers the manual door returns as JSON. They ride in the heartbeat
+  // result, because this run answers a scheduler and nobody reads its response body: without them
+  // the only daily evidence that the feed works is "inserted", which reads the same whether the
+  // bank sent nothing or we dropped everything it sent.
+  let pages = 0, fetched = 0, booked = 0, pending = 0, skipped = 0, unreadable = 0, busy = 0, claimUnavailable = 0;
 
   // [CRON-FAIRNESS] Rotate the start each run so a fixed tail never permanently starves when the
   // list cannot finish within maxDuration. Keyed off the epoch DAY, which advances once per
@@ -150,6 +155,16 @@ export async function GET(req: NextRequest) {
         const result = await syncBankConnection({ connection, pipeline });
         inserted += result.inserted;
         autoBooked += result.autoBooked;
+        for (const a of result.accounts) {
+          pages += a.pages;
+          fetched += a.fetched;
+          booked += a.booked;
+          pending += a.pending;
+          skipped += a.skipped;
+          unreadable += a.fetched - a.booked - a.pending;
+          if (a.skippedBusy) busy += 1;
+          if (a.skippedClaimUnavailable) claimUnavailable += 1;
+        }
         if (result.error) failed++;
         else synced++;
       }
@@ -169,7 +184,10 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const result = { ok: failed === 0, users: userIds.length, synced, failed, inserted, autoBooked, expiring, truncated };
+  const result = {
+    ok: failed === 0, users: userIds.length, synced, failed, inserted, autoBooked, expiring, truncated,
+    pages, fetched, booked, pending, skipped, unreadable, busy, claimUnavailable,
+  };
   await finishCronRun(createPipelineClient(), cronRunId, { ok: failed === 0, result });
 
   return NextResponse.json(result);

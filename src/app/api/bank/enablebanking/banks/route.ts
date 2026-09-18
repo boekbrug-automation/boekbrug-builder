@@ -18,6 +18,7 @@ import {
   dutchEnableBankingError,
   EnableBankingError,
   isEnableBankingConfigured,
+  canUseEnableBanking,
 } from "@/lib/enablebanking-client";
 
 export const dynamic = "force-dynamic";
@@ -36,7 +37,11 @@ export async function GET(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  if (!isEnableBankingConfigured()) {
+  // [EB-TESTER] Two questions, asked in order: are the credentials there, and may THIS account
+  // reach a bank with them. A refusal answers exactly like an unconfigured install — same shape,
+  // same words — so an account outside the list learns nothing about a programme it is not in,
+  // and BankConnectPanel hides itself for the same reason it always did.
+  if (!isEnableBankingConfigured() || !canUseEnableBanking(user.id)) {
     return NextResponse.json({ configured: false, banks: [] });
   }
 

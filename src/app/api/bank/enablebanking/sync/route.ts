@@ -2,7 +2,7 @@
 // [ENABLEBANKING] The owner's "ververs" button, and the first pull after connecting.
 //
 // POST /api/bank/enablebanking/sync  { connectionId? }
-//   → { inserted, autoBooked, connections: [...], warnings: [...] }
+//   → { inserted, autoBooked, connections: [...], warnings: [...], counters: {...} }
 //
 // Without a connectionId every live connection of this owner is synced — which is what the
 // /dashboard/bank page calls right after a successful callback.
@@ -17,7 +17,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
-import { isEnableBankingConfigured, dutchEnableBankingError } from "@/lib/enablebanking-client";
+import {
+  isEnableBankingConfigured,
+  canUseEnableBanking,
+  dutchEnableBankingError,
+} from "@/lib/enablebanking-client";
 import { getBankConnection, listBankConnections } from "@/lib/enablebanking-connection";
 import { syncBankConnection } from "@/lib/enablebanking-sync";
 
@@ -33,7 +37,8 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Niet ingelogd" }, { status: 401 });
 
-  if (!isEnableBankingConfigured()) {
+  // [EB-TESTER] No bank traffic on behalf of an account outside the list.
+  if (!isEnableBankingConfigured() || !canUseEnableBanking(user.id)) {
     return NextResponse.json({ error: dutchEnableBankingError("NOT_CONFIGURED") }, { status: 503 });
   }
 
@@ -69,12 +74,53 @@ export async function POST(req: NextRequest) {
   let inserted = 0;
   let autoBooked = 0;
   const warnings: string[] = [];
+  // [EB-TELLING] What this run actually did, end to end. The panel shows "inserted"; this is for
+  // the person proving the door works — Sandbox, and any later "the bank says 30 and we stored 12".
+  // Every number is counted where it happens, never derived from another one, so two of them
+  // disagreeing is itself the finding.
+  const counters = {
+    /** Pages the bank served. 0 with nothing fetched; more than 1 means pagination was followed. */
+    pages: 0,
+    /** Lines the feed handed over, every status. */
+    fetched: 0,
+    /** Booked lines accepted by the mapper. */
+    booked: 0,
+    /** Not yet committed by the bank, deliberately not imported. */
+    pending: 0,
+    /** Lines the mapper could not read — each one is a warning, and money missing from the books. */
+    unreadable: 0,
+    /** Rows written. */
+    inserted: 0,
+    /** Recognised as already stored — normally the intentional window overlap. */
+    skipped: 0,
+    /** Payments booked against an invoice as a direct result. */
+    autoBooked: 0,
+    /** [EB-RACE] Accounts another worker was already syncing. The mechanism working. */
+    busy: 0,
+    /** [EB-RACE] Accounts we refused to read because the guarantee could not be established. */
+    claimUnavailable: 0,
+    /** Accounts inside the 20-hour bank-budget guard. */
+    tooSoon: 0,
+  };
 
   for (const connection of connections) {
     const result = await syncBankConnection({ connection, pipeline });
     inserted += result.inserted;
     autoBooked += result.autoBooked;
-    for (const account of result.accounts) warnings.push(...account.warnings);
+    counters.autoBooked += result.autoBooked;
+    for (const account of result.accounts) {
+      warnings.push(...account.warnings);
+      counters.pages += account.pages;
+      counters.fetched += account.fetched;
+      counters.booked += account.booked;
+      counters.pending += account.pending;
+      counters.unreadable += account.fetched - account.booked - account.pending;
+      counters.inserted += account.inserted;
+      counters.skipped += account.skipped;
+      if (account.skippedBusy) counters.busy += 1;
+      if (account.skippedClaimUnavailable) counters.claimUnavailable += 1;
+      if (account.skippedTooSoon) counters.tooSoon += 1;
+    }
     results.push({
       connectionId: result.connectionId,
       institutionName: result.institutionName,
@@ -94,5 +140,6 @@ export async function POST(req: NextRequest) {
     // Every line the bank sent that we could not read. Surfaced exactly like an upload's
     // parseWarnings: a dropped transaction is money missing from the owner's books.
     warnings,
+    counters,
   });
 }

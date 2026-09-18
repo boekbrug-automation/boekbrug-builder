@@ -10,7 +10,7 @@
 
 import { NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
-import { isEnableBankingConfigured } from "@/lib/enablebanking-client";
+import { isEnableBankingConfigured, canUseEnableBanking } from "@/lib/enablebanking-client";
 import { listBankConnections } from "@/lib/enablebanking-connection";
 import { isAccountDue } from "@/lib/enablebanking-sync";
 
@@ -41,7 +41,10 @@ export async function GET() {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const configured = isEnableBankingConfigured();
+  // [EB-TESTER] The panel renders on this answer alone, so the gate belongs here too — otherwise
+  // "Koppel je bank" appears for everyone and only fails one click later, on a screen the owner
+  // did not ask to see.
+  const configured = isEnableBankingConfigured() && canUseEnableBanking(user.id);
   if (!configured) {
     // An unconfigured server hides the card entirely rather than showing a dead button.
     return NextResponse.json({ configured: false, connections: [] });

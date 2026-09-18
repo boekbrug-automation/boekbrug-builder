@@ -299,5 +299,15 @@ test("the feed has no end-to-end id, and guessing one from entry_reference is no
   })!;
 
   assert.equal(feed.reference, null, "entry_reference must not become a payment reference");
-  assert.equal(feed.transactionId, "TK10000001", "but it is still kept for debugging");
+  // [EB-IDENTITEIT] This line used to read `assert.equal(feed.transactionId, "TK10000001")` —
+  // "but it is still kept for debugging". The paragraph above had the argument exactly right and
+  // then handed the value to the one field that is not a debugging field: bank-import.ts copies
+  // transactionId into external_id, which is half of UNIQUE (user_id, source, external_id), which
+  // the sync upserts with ignoreDuplicates. So the id this very test calls unreliable had the
+  // power to delete the second of two real transactions, silently and permanently.
+  //
+  // Nothing about parity changes: `reference` was null before and is null now, and the six rows
+  // where the doors deliberately differ still differ for the reason written above. What is gone
+  // is the identity, and src/lib/enablebanking-identity.test.ts fails if it comes back.
+  assert.equal(feed.transactionId, null, "the feed handed out a source identity it cannot stand behind");
 });

@@ -36178,3 +36178,176 @@ test("[KIES-TERMIJN] the period is chosen at the button, and no published word c
   assert.ok(av.includes("**Je wordt nooit onaangekondigd gefactureerd.**"),
     "[KIES-TERMIJN] and the sentence a reader remembers survives the rewrite");
 });
+
+// ── [EB-TESTER] Every owner-facing Enable Banking door asks the authorization question ────────
+//
+// The helper existing is not the same as the helper being called. Before this gate the panel's
+// only condition was `configured`, so the moment two credentials landed in the environment every
+// logged-in owner saw "Koppel je bank" and could start a real consent against whatever
+// application those credentials named — during a Sandbox proof, a Sandbox application.
+//
+// The callback is listed here too, and it is the one that must NOT grow a session check: its
+// boundary is the high-entropy `state` → our stored row → the owner ON that row. What it asks is
+// whether THAT account is allowed, never who is browsing, so the flow still completes when the
+// bank returns the owner in a different browser or on a phone.
+//
+// Disconnect is deliberately absent. Unlinking is the safety valve: a list that shrinks must
+// never trap an owner with a live bank connection he can no longer revoke.
+test("[EB-TESTER] the Sandbox gate is wired into every door that reaches a bank", () => {
+  for (const route of ["banks", "connect", "status", "sync", "callback"]) {
+    const bron = code(`src/app/api/bank/enablebanking/${route}/route.ts`);
+    assert.match(bron, /canUseEnableBanking\(/,
+      `/${route} does not ask whether this account may use the bank link`);
+  }
+
+  // The callback asks about the connection it found, not about a request parameter or a session.
+  const callback = code("src/app/api/bank/enablebanking/callback/route.ts");
+  assert.match(callback, /canUseEnableBanking\(connection\.userId\)/,
+    "the callback derives its owner from something other than the stored connection");
+  assert.doesNotMatch(callback, /auth\.getUser\(\)/,
+    "the callback grew a browser-session requirement — the bank may return the owner anywhere");
+
+  // Unlinking stays reachable.
+  assert.doesNotMatch(code("src/app/api/bank/enablebanking/disconnect/route.ts"), /canUseEnableBanking\(/,
+    "disconnect is gated — an owner outside the list can no longer revoke a live bank connection");
+
+  // And the two questions stay two functions.
+  const client = code("src/lib/enablebanking-client.ts");
+  const configured = client.slice(
+    client.indexOf("export function isEnableBankingConfigured"),
+    client.indexOf("export function enableBankingTesters"),
+  );
+  assert.ok(configured.length > 40, "[EB-TESTER] the window over isEnableBankingConfigured found nothing");
+  assert.doesNotMatch(configured, /TESTERS|userId/,
+    "isEnableBankingConfigured learned about users — the callback has none to give it");
+});
+
+// ── [EB-RACE] One worker at a time per linked account ─────────────────────────────────────────
+//
+// [EB-IDENTITEIT] took entry_reference away as the feed's identity, because that id is the bank's
+// ENTRY id and was deleting real second transactions. It was also, by accident, the thing that made
+// UNIQUE (user_id, source, external_id) catch a racing second insert — and PostgreSQL does not
+// constrain NULLs, so removing it left the feed's read-dedup-insert sequence open at both ends.
+// Fixing silent loss must not create silent multiplication.
+//
+// What the claim DOES is proved behaviourally in enablebanking-claim.test.ts. This gate proves the
+// wiring, which no behavioural test without a database can see: that the claim wraps the critical
+// section, that nothing reaches that section around it, and that an account we stood down on is
+// never counted as an account we read.
+test("[EB-RACE] the account claim wraps the whole read-dedup-insert sequence", () => {
+  const sync = code("src/lib/enablebanking-sync.ts");
+
+  assert.match(sync, /import \{ claimAccountSync \} from "\.\/enablebanking-claim"/,
+    "the sync no longer takes the account claim at all");
+
+  // Cut on real code at both ends — a marker inside a comment is not in what code() returns, and a
+  // window ending at -1 runs to the end of the file and silently measures something else.
+  const from = sync.indexOf("async function syncOneAccount");
+  const to = sync.indexOf("async function readAndStoreAccount");
+  assert.ok(from > -1, "[EB-RACE] syncOneAccount was renamed; this gate no longer knows what it reads");
+  assert.ok(to > from, "[EB-RACE] readAndStoreAccount was renamed or moved above its caller");
+  const guard = sync.slice(from, to);
+
+  assert.match(guard, /claimAccountSync\(connection\.userId, account\.id, now\)/,
+    "the claim is not taken per (owner, account) — a claim on anything else is not this lock");
+  assert.match(guard, /if \(claim\.outcome === "busy"\) return \{ \.\.\.base, skippedBusy: true \}/,
+    "a worker that lost the race to a LIVE holder must stand down, and say so as skippedBusy");
+  assert.match(guard, /skippedClaimUnavailable: true/,
+    "a claim we could not establish must be its own outcome — collapsed into skippedBusy, a dead claim table looks exactly like a healthy busy account");
+  // And nothing is written on the way out: last_synced_at / last_synced_through may not move for a
+  // read that never happened, or the next run would think this account had been done.
+  assert.doesNotMatch(guard, /recordAccountSync/,
+    "syncOneAccount records a sync outside the critical section — a refusal would look like a successful read");
+  assert.match(guard, /try \{[\s\S]{0,200}readAndStoreAccount\(args, base\)[\s\S]{0,200}finally \{[\s\S]{0,120}claim\.release\(\)/,
+    "the critical section is not inside a try whose finally releases the claim — one throw and the account is locked out until the TTL");
+
+  // Exactly one caller. A second entry point into the critical section would bypass the claim while
+  // every test above still passed.
+  const calls = sync.match(/readAndStoreAccount\(/g) ?? [];
+  assert.equal(calls.length, 2,
+    "readAndStoreAccount is declared once and called once — a second caller would run unclaimed");
+
+  // Standing down is not reading. Without this, an account another worker was busy with would count
+  // as a clean read and quietly mark a connection with a dead consent as healthy.
+  const verdict = sync.indexOf("const anyRead");
+  assert.ok(verdict > -1, "[EB-RACE] the connection-level verdict was renamed");
+  const tail = sync.slice(to, verdict + 200);
+  for (const skip of ["skippedBusy", "skippedClaimUnavailable"]) {
+    assert.ok(
+      new RegExp(`!a\\.error[\\s\\S]{0,160}!a\\.${skip}`).test(tail),
+      `${skip} counts as a clean read, so a dead connection can be marked linked by an account nobody looked at`,
+    );
+    assert.ok(
+      new RegExp(`const anyRead[\\s\\S]{0,200}!a\\.${skip}`).test(tail),
+      `a run that only skipped with ${skip} records a connection sync it never performed`,
+    );
+  }
+});
+
+// ── [EB-RACE] The guard fails CLOSED ──────────────────────────────────────────────────────────
+//
+// The first version of enablebanking-claim.ts failed OPEN — a missing table, an unreadable error
+// or a throw returned "you may run" — on the argument that a broken backstop must not stop every
+// owner's bank feed. That argument is wrong here: it lets the one mechanism against silent
+// financial multiplication vanish while the financial write proceeds anyway, exactly when we know
+// least about what else is broken.
+//
+// A delayed sync is recoverable (the next run is due immediately and SYNC_OVERLAP_DAYS covers the
+// gap). A doubled quarter is a wrong tax return. So permission is granted in exactly two places —
+// we inserted the claim, or we won the compare-and-set on a dead one — and this gate counts them,
+// because a fourth branch returning "held" is a one-line change that no behavioural test for the
+// other branches would notice.
+test("[EB-RACE] the claim grants permission in exactly two places, and refuses everywhere else", () => {
+  const claim = code("src/lib/enablebanking-claim.ts");
+
+  const grants = claim.match(/claimed: true/g) ?? [];
+  assert.equal(grants.length, 2,
+    "permission to run the financial read is granted somewhere other than the insert and the won takeover");
+
+  // Each refusal says WHICH kind it is. "Someone else is working" and "our own machinery is
+  // broken" must never arrive as the same value.
+  assert.ok((claim.match(/refused\("unavailable"\)/g) ?? []).length >= 5,
+    "the infrastructure-failure branches no longer refuse — check 42P01, insert error, holder read, takeover, throw");
+  assert.match(claim, /refused\("busy"\)/,
+    "a live holder must be reported as busy, not as broken");
+
+  // The release proves ownership. Deleting on (user_id, claim_key) alone identifies the ACCOUNT
+  // LOCK, not this worker's version of it — so a late release by a taken-over worker would remove
+  // its successor's LIVE claim and let a third worker in beside it.
+  const releaseFrom = claim.indexOf("const releaseFor");
+  const releaseTo = claim.indexOf("const stamp =");
+  assert.ok(releaseFrom > -1 && releaseTo > releaseFrom, "[EB-RACE] the release helper was renamed");
+  const release = claim.slice(releaseFrom, releaseTo);
+  assert.match(release, /\.delete\(\)[\s\S]{0,200}\.eq\("created_at", stamp\)/,
+    "the release does not name the version it acquired");
+
+  // The stamp is written by us, not defaulted — otherwise the token would have to be read back,
+  // and a failed read-back leaves a claim nobody can release.
+  assert.match(claim, /\.insert\(\{ user_id: userId, claim_key: key, created_at: stamp \}\)/,
+    "the claim leaves created_at to the column default, so it does not know its own version");
+});
+
+// ── [EB-TELLING] The numbers that make a silent feed visible ──────────────────────────────────
+//
+// "inserted: 0" reads identically whether the bank sent nothing, sent one page of two, or sent
+// thirty lines we could not read. During the Sandbox proof that difference is the entire exercise,
+// and in production it is the difference between a quarter that is complete and one that is short
+// with nobody looking. Every number is counted where it happens; `unreadable` is the only derived
+// one, and it is derived the same way in both doors.
+test("[EB-TELLING] both sync doors report what the bank sent, not only what we stored", () => {
+  const sync = code("src/lib/enablebanking-sync.ts");
+  for (const field of ["pages", "fetched", "booked", "inserted", "skipped", "pending"]) {
+    assert.ok(sync.includes(`${field}:`), `[EB-TELLING] the account result stopped carrying ${field}`);
+  }
+  assert.match(sync, /onPage: \(n\) => \{/,
+    "the page count is no longer taken from where the pages turn — a one-page import of a two-page window is invisible again");
+
+  const manual = code("src/app/api/bank/enablebanking/sync/route.ts");
+  assert.match(manual, /counters,/, "the owner's sync door stopped returning its counters");
+  assert.match(manual, /unreadable \+= account\.fetched - account\.booked - account\.pending/,
+    "unreadable is no longer derived from the three counted numbers, so the three can drift apart unnoticed");
+
+  const cron = code("src/app/api/cron/bank-sync/route.ts");
+  assert.match(cron, /pages, fetched, booked, pending, skipped, unreadable, busy,/,
+    "the daily run stopped writing the counters into its heartbeat — nobody reads a cron's response body");
+});

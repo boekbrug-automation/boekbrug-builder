@@ -96,8 +96,11 @@ export interface ExistingTxKey {
  * between the two formats — ING does not name a payment the same way twice — so `source` is part
  * of the key and the fingerprint below remains the only thing that can bridge doors.
  *
- * Returns null when either half is missing, which is not an error: 147 of that quarter's 576 feed
- * rows carry no `entry_reference` at all. Those simply fall through to the fingerprint.
+ * Returns null when either half is missing, which is not an error, and on one door it is the rule
+ * rather than the exception: [EB-IDENTITEIT] the Enable Banking feed stores `external_id` NULL for
+ * every row, because the id it appeared to have was the bank's non-unique entry id and keying on it
+ * deleted real transactions. So every feed row falls through to the fingerprint, and that door's
+ * concurrency is held by `[EB-RACE]` instead of by the unique index.
  */
 export function sourceKey(
   source: string | null | undefined,

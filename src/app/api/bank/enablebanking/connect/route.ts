@@ -29,6 +29,7 @@ import {
   dutchEnableBankingError,
   EnableBankingError,
   isEnableBankingConfigured,
+  canUseEnableBanking,
 } from "@/lib/enablebanking-client";
 import { createBankConnection, newConnectionReference } from "@/lib/enablebanking-connection";
 
@@ -54,7 +55,8 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Niet ingelogd" }, { status: 401 });
 
-  if (!isEnableBankingConfigured()) {
+  // [EB-TESTER] The door that starts a real consent. Same answer as an unconfigured install.
+  if (!isEnableBankingConfigured() || !canUseEnableBanking(user.id)) {
     return NextResponse.json({ error: dutchEnableBankingError("NOT_CONFIGURED") }, { status: 503 });
   }
 
