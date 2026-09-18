@@ -27,6 +27,7 @@
 
 import { createPipelineClient } from "@/lib/supabase-pipeline"
 import { currentPeriod, limitForPlan } from "@/lib/fair-use-usage"
+import { fairUseRefusal, type FairUseGate } from "@/lib/fair-use-gate"
 import type { UsagePlan } from "@/lib/fair-use-usage"
 
 export type DocumentAllowance =
@@ -117,5 +118,58 @@ export async function releaseAiDocument(args: {
   } catch (e) {
     console.error("[ONTVANGEN] the per-document release threw", { documentId: args.documentId, error: e instanceof Error ? e.message : String(e) })
     return { released: false, period: null }
+  }
+}
+
+/**
+ * The same door as gateFairUseForRead, for a run that owns a DOCUMENT.
+ *
+ * One ternary at the call site, so the 1.200 lines that follow it do not have to know which of the
+ * two reservations they are inside. The shape is identical on purpose — `allowed`, the published
+ * 402 the interactive route hands back, and a `release` the failure paths already call.
+ *
+ * Three differences from the period gate, and each is the reason this exists:
+ *
+ *   · the reservation is DURABLE. A crash between the counter moving and the run ending cannot
+ *     charge the owner twice, because the mark lives on the document in the same transaction.
+ *   · `replayed` is allowed WITHOUT moving the counter — that is what makes a retry free.
+ *   · release() gives back the STORED period, not today's. A run that crosses midnight on the 1st
+ *     must return the document to the month it was taken from.
+ */
+export async function gateAiDocumentForRead(args: {
+  userId: string
+  documentId: string
+  plan: UsagePlan
+  /** false when the reader answers this file mechanically — an e-factuur costs no model call. */
+  costsAiCall: boolean
+  now?: Date
+  pipeline?: Pipeline
+}): Promise<FairUseGate> {
+  if (!args.costsAiCall) {
+    return { allowed: true, response: null, release: async () => {} }
+  }
+  const outcome = await reserveAiDocument(args)
+  if (outcome.kind === "refused") {
+    return fairUseRefusal("aiDocuments", outcome.used, args.plan)
+  }
+  // "unavailable" fails OPEN and leaves nothing to give back — see the header of this file and
+  // gateFairUse, which behaves the same way for the same reason.
+  if (outcome.kind === "unavailable") {
+    return { allowed: true, response: null, release: async () => {} }
+  }
+  // A replay must NOT release: the charge it is replaying belongs to the run that made it, and
+  // giving it back here would refund a document that was really read, on a path that did not pay.
+  if (outcome.kind === "replayed") {
+    return { allowed: true, response: null, release: async () => {} }
+  }
+  let released = false
+  return {
+    allowed: true,
+    response: null,
+    release: async () => {
+      if (released) return
+      released = true
+      await releaseAiDocument({ userId: args.userId, documentId: args.documentId, pipeline: args.pipeline })
+    },
   }
 }

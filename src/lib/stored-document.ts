@@ -48,6 +48,13 @@ export interface StoredDocument {
   storagePath: string
   fileName: string
   fileType: string
+  /**
+   * Where the handoff already filed it.
+   *
+   * Carried because a classification names where a document LIVES, and a background pass that had
+   * to invent a folder would move a file the owner may already have found in Bestanden.
+   */
+  folderId: string | null
   /** What the owner chose at upload time — see intake-intent.ts. */
   intent: IntakeIntent
   contentHash: string | null
@@ -71,7 +78,7 @@ export type StoredDocumentLoad =
 
 /** The columns the processor actually reads. Named once so the query and the type cannot drift. */
 const COLUMNS =
-  "id, user_id, file_url, file_name, file_type, ai_doc_type, content_hash, " +
+  "id, user_id, file_url, file_name, file_type, folder_id, ai_doc_type, content_hash, " +
   "intake_paid_method, intake_paid_date, duplicate_decision, duplicate_candidate_invoice_id, " +
   "intake_retry_after"
 
@@ -81,6 +88,7 @@ type Row = {
   file_url: string | null
   file_name: string | null
   file_type: string | null
+  folder_id?: string | null
   ai_doc_type: string | null
   content_hash: string | null
   intake_paid_method?: string | null
@@ -217,6 +225,7 @@ export async function loadStoredDocument(
       storagePath: row.file_url,
       fileName: row.file_name ?? "document",
       fileType: row.file_type ?? "application/octet-stream",
+      folderId: row.folder_id ?? null,
       intent: intentFromStoredDocument(row),
       contentHash: row.content_hash ?? null,
       waitingState: row.ai_doc_type ?? "",

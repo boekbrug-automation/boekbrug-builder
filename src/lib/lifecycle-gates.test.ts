@@ -6723,9 +6723,28 @@ test("[EERLIJK-GEBRUIK-UITLEG] the fair-use refusal opens a modal and quotes pub
 
   // And the server has to send the limit, or the modal can only state a count with nothing to
   // place it against.
+  // [ONTVANGEN] Two doors reach this refusal now — the period gate and the per-document
+  // reservation — so the body is built in ONE function and both of them hand it back. The
+  // assertion is therefore about that function, plus the count that there is only one of it: a
+  // second copy is a second wording on the screen where a paying decision is made.
+  const gateSrc = code("src/lib/fair-use-gate.ts");
   assert.match(
-    code("src/lib/fair-use-gate.ts"), /limit: plan === "plus" \? fairUseLimit\(params\.metric\)\.plus/,
+    gateSrc, /export function fairUseRefusal\(metric: FairUseKey, used: number, plan: UsagePlan\)/,
+    "the published refusal must have one owner",
+  );
+  assert.match(
+    gateSrc, /limit: plan === "plus" \? fairUseLimit\(metric\)\.plus/,
     "the 402 body must carry the limit beside the count",
+  );
+  // Exactly one aiDocuments refusal body. (The second /prijzen in this file is the STORAGE
+  // refusal, which is a different limit with different numbers and is not what this gate is about.)
+  assert.equal(
+    (gateSrc.match(/limit: plan === "plus" \? fairUseLimit\(metric\)/g) ?? []).length, 1,
+    "the refusal body exists twice — one of the two copies will drift",
+  );
+  assert.match(
+    code("src/lib/fair-use-document.ts"), /return fairUseRefusal\("aiDocuments", outcome\.used, args\.plan\)/,
+    "the per-document door must hand back the SAME published refusal, not one of its own",
   );
 });
 
@@ -32522,12 +32541,38 @@ test("[BEWAAR-EERST] a reader outage never costs the owner the file they just ha
   // own destination onwards. The 503 ABOVE it is the empty-handed answer and belongs there, so a
   // window that starts at `if (!keptId)` would contain the very thing it forbids — a gate that can
   // only ever fail. What must never carry an error status is THIS answer.
-  const antwoordStart = tak.indexOf("destination: \"document\"");
-  assert.ok(antwoordStart > 0, "the kept-file answer moved — this gate is measuring nothing");
-  assert.doesNotMatch(tak.slice(antwoordStart), /status: \d/,
-    "the kept-file answer returns an error status, so every client renders a failure over a success");
-  assert.equal(tak.split("status: 503").length - 1, 1,
-    "there is more than one 503 in this branch — the kept-file path may have grown one");
+  //
+  // [ONTVANGEN] There are TWO kept-file answers now: the request's, and the one a background pass
+  // gives when the file was already kept before the owner heard "Ontvangen". Both must read as a
+  // success, so the gate measures every one of them rather than the first it happens to find —
+  // which, when the stored branch was added above the old one, silently became a different answer.
+  const antwoorden = [...tak.matchAll(/destination: "document"/g)].map((m) => m.index ?? -1);
+  assert.equal(antwoorden.length, 2,
+    "the kept-file answers moved or multiplied — this gate is measuring something else");
+  for (const start of antwoorden) {
+    assert.ok(start > 0, "the kept-file answer moved — this gate is measuring nothing");
+    // Cut on real code at both ends ([UREN-EENMALIG]): the answer is its own object literal, and
+    // the close of the json() call that carries it is where it ends. A slice that ran on would
+    // swallow the 503 belonging to the empty-handed answer beside it — a gate that can only fail.
+    const einde = tak.indexOf("})", start);
+    assert.ok(einde > start, "the kept-file answer is not a json() call any more");
+    assert.doesNotMatch(tak.slice(start, einde), /status: \d/,
+      "the kept-file answer returns an error status, so every client renders a failure over a success");
+  }
+  // And the stored half keeps the file by NOT storing it again: the bytes were already written
+  // before the owner was told, so this branch only has to say what the document turned out to be.
+  assert.match(tak, /if \(stored\) \{[\s\S]{0,1200}updateClassification\(/,
+    "the stored outage branch must mark the existing row, never store a second copy of the file");
+  // [ONTVANGEN] Two 503s, and they are different refusals: the request's "we could not read it and
+  // could not keep it either", and the stored pass's "we could not even record that we failed".
+  // Both are the honest empty-handed answer for their own half; a THIRD would mean the kept-file
+  // path itself had grown one, which is what this count exists to catch.
+  assert.equal(tak.split("status: 503").length - 1, 2,
+    "there is an unexpected 503 in this branch — the kept-file path may have grown one");
+  assert.match(tak, /niet lezen én niet bewaren/,
+    "the request's empty-handed answer");
+  assert.match(tak, /niet worden gelezen, en dat kon nu ook niet worden vastgelegd/,
+    "the stored pass's empty-handed answer");
 
   // The quota is still returned: our outage may not cost the owner a document of their month.
   assert.match(tak, /await gate\.release\(\)/);
@@ -36747,3 +36792,83 @@ test("[ONTVANGEN-CLAIM] the document claim is a wrapper, not a second implementa
   assert.match(src, /STORED_DOCUMENT_CLAIM_TTL_MS\s*=\s*\(STORED_DOCUMENT_MAX_SECONDS \+ \d+\) \* 1000/,
     "the TTL must be derived from the run ceiling, never typed beside it");
 });
+
+// ── [ONTVANGEN-VOLGORDE] The order the crash matrix is allowed to assume ──────────────────────
+//
+// stored-document-processor.test.ts kills a run after each of nine steps and proves the retry
+// converges. It drives a SCRIPT of those nine steps rather than the door itself, because the door
+// needs a reader, a model, storage and a database to reach any of them.
+//
+// That script is only worth anything while it is the same sequence the door really performs. So the
+// order is read out of the door here, in one place, and the script is held to it — a step that
+// moves in intake-processor.ts turns this red rather than quietly making a green crash matrix
+// describe a program that no longer exists.
+
+test("[ONTVANGEN-VOLGORDE] the door writes in the order the crash matrix assumes", () => {
+  const door = code("src/app/api/intake/route.ts");   // DOOR_HALVES: route + intake-processor
+
+  // Cut on real code at both ends ([UREN-EENMALIG]): the sequence starts at the allowance and ends
+  // at the last write of a stored run. Both markers are asserted, because a slice whose bound is
+  // -1 measures the whole file and passes for the wrong reason.
+  const from = door.indexOf("gateAiDocumentForRead(")
+  const to = door.indexOf("the run finished but the final state did not write")
+  assert.ok(from > -1, "[ONTVANGEN-VOLGORDE] the per-document allowance was renamed")
+  assert.ok(to > from, "[ONTVANGEN-VOLGORDE] the final-state write was renamed or moved above its sequence")
+  const sequence = door.slice(from, to)
+
+  const order: Array<[string, RegExp]> = [
+    ["allowance", /gateAiDocumentForRead\(/],
+    ["reader", /verifyInvoiceFromPdf\(/],
+    ["invoice", /\.from\("invoices"\)\s*\.insert\(/],
+    ["reverse_link", /linkDocumentToInvoice\(/],
+    ["payment", /autoSettlementKey\(stored\.documentId\)/],
+    ["cash", /reconcileCashWithRetry\(/],
+    ["bank", /runBankAutoConfirm\(/],
+    ["notification", /autoFinishedEventKey\(stored\.documentId\)/],
+    ["final_state", /const finished = await updateClassification\(/],
+  ]
+
+  let previous = -1
+  for (const [name, pattern] of order) {
+    const at = sequence.search(pattern)
+    assert.ok(at > -1, `[ONTVANGEN-VOLGORDE] "${name}" is not in the stored sequence any more`)
+    assert.ok(
+      at > previous,
+      `[ONTVANGEN-VOLGORDE] "${name}" moved earlier than the step before it — the crash matrix is ` +
+        "now asserting about an order the door does not have",
+    )
+    previous = at
+  }
+
+  // And the script names the same nine steps, in the same order.
+  const matrix = codeFile("src/lib/stored-document-processor.test.ts")
+  const declared = matrix.slice(matrix.indexOf("const STEPS = ["), matrix.indexOf("] as const"))
+  assert.ok(declared.length > 20, "[ONTVANGEN-VOLGORDE] the crash matrix no longer declares its steps")
+  assert.deepEqual(
+    declared.match(/"([a-z_]+)"/g)?.map((q) => q.replace(/"/g, "")) ?? [],
+    order.map(([name]) => name),
+    "the crash matrix and the door disagree about which steps there are, or in which order",
+  )
+})
+
+test("[ONTVANGEN-VOLGORDE] nothing on the stored path removes the owner's file", () => {
+  // After "Ontvangen" the bytes are a promise. The old rollbacks deleted the documents row AND the
+  // object on any write failure — correct for a request the owner is still watching, and a silent
+  // loss once they have been told we have it. Every removal left in this half must be fenced.
+  //
+  // codeFile, not code(): the ROUTE half has removals of its own, on the e-factuur and
+  // unsupported-file branches, and those are a different door. processStoredDocument calls
+  // processIntakeDocument directly, so a stored document never reaches them — which is also why
+  // an e-factuur is not yet on the stored road at all. That is a gap to close deliberately, not
+  // something to hide by widening this gate until it matches.
+  const door = codeFile("src/lib/intake-processor.ts")
+  const removals = [...door.matchAll(/storage\.from\("documents"\)\s*\.remove\(/g)].map((m) => m.index ?? -1)
+  assert.equal(removals.length, 3, "[ONTVANGEN-VOLGORDE] a file removal was added or lost in this half")
+  for (const at of removals) {
+    const before = door.slice(Math.max(0, at - 1000), at)
+    assert.match(
+      before, /rollback: async \(\)|if \(stored\) \{[\s\S]*?return json/,
+      "a file removal on the stored path deletes bytes the owner was told we had",
+    )
+  }
+})

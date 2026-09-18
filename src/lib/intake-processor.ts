@@ -129,7 +129,14 @@ import { deriveDueDate } from "@/lib/safecore"
 // as email-integration.ts / audit.ts: derive the Json type, cast at write.
 import type { Database } from "@/types/database.types"
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit"
-import { gateFairUseForRead, gateStorage } from "@/lib/fair-use-gate";
+import { gateFairUseForRead, gateStorage, planForUser } from "@/lib/fair-use-gate";
+import { gateAiDocumentForRead } from "@/lib/fair-use-document";
+import {
+  updateClassification, findInvoiceForDocument, linkDocumentToInvoice,
+  type DocumentIdentity, type DocumentClassification,
+} from "@/lib/document-placement";
+import { autoSettlementKey } from "@/lib/settlement-key";
+import { autoFinishedEventKey } from "@/lib/stored-document";
 // [TZ] The owner's day, not the server's — see amsterdamToday().
 import { amsterdamToday } from "@/lib/format-nl";
 import { supplierBtwForInvoice } from "@/lib/vendor-identity"
@@ -186,6 +193,40 @@ function raw(response: Response): IntakeOutcome {
  * Deliberately the EXACT set of values the moved block used and nothing more — measured, not
  * guessed. A context that carries more than the block reads is how the boundary blurs again.
  */
+/**
+ * [ONTVANGEN] What a run owns when the file is ALREADY stored and the owner has already been told.
+ *
+ * Its presence changes seven things below, and every one of them is a write:
+ *
+ *   · the allowance is reserved against the DOCUMENT, so a crash cannot charge it twice;
+ *   · nothing is uploaded — the bytes are where the handoff put them;
+ *   · nothing is REMOVED on failure. The old rollback deleted the row and the object, and after
+ *     "Ontvangen" that is deleting a file the owner was told we had;
+ *   · the classification is a compare-and-set on the state this run loaded, not an insert;
+ *   · the invoice insert may lose to its own earlier self (23505) and adopts rather than fails;
+ *   · the settlement carries a key derived from the document, so a replay moves no money;
+ *   · the notification carries an event key, so a replay rings no second bell.
+ *
+ * Absent, every one of those reads exactly as it did before receive-first existed.
+ */
+export interface StoredRun {
+  documentId: string
+  /** The waiting state this run loaded. The only state its final classification may overwrite. */
+  expectedAiDocType: string
+  /** Where the bytes already are. Read-only here: this path uploads nothing and removes nothing. */
+  storagePath: string
+  /**
+   * The folder the handoff already filed it in.
+   *
+   * Carried because a classification names where a document lives, and a background pass that had
+   * to invent one would MOVE a file the owner may already have found. Every classification below
+   * that has no opinion about the folder passes this straight back.
+   */
+  folderId: string | null
+  /** The owner's plan, resolved once by the caller — the document allowance needs it. */
+  plan: Awaited<ReturnType<typeof planForUser>>
+}
+
 export interface IntakeProcessContext {
   /**
    * How this run was started. Replaces the NextRequest the block used to hold: the only thing it
@@ -214,12 +255,83 @@ export interface IntakeProcessContext {
   pdfText: string | null
   pdfPages: number
   contentHash: string
+  /** [ONTVANGEN] Present only on the background pass over an already-stored document. */
+  stored?: StoredRun
+}
+
+/**
+ * [ONTVANGEN] Say what this document IS — through whichever half of the row this run owns.
+ *
+ * The interactive door has just worked out identity AND classification, so it writes both in one
+ * insert, exactly as it always has, rollback included. The stored run finds the identity already
+ * written — by a handoff that told the owner "Ontvangen" — so it may only write the classification,
+ * and only onto the state it loaded.
+ *
+ * The three benign stops are the reason this is a function and not a ternary. Zero rows matched can
+ * mean the owner deleted the file, a successor finished the job, or another pass paused it on the
+ * limit — none of which is an error, and all of which must END this run rather than let it carry on
+ * to book an invoice for a document that has moved on.
+ */
+/** PostgreSQL's unique_violation. Here it can mean a byte-hash clash OR the document boundary. */
+const UNIQUE_VIOLATION = "23505"
+
+type ClassifyStep =
+  | { ok: true; documentId: string }
+  | { ok: false; outcome: IntakeOutcome }
+
+async function writeClassification(args: {
+  stored: StoredRun | undefined
+  userId: string
+  identity: DocumentIdentity
+  classification: DocumentClassification
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pipeline: any
+  /** The interactive door's answer to a lost byte-hash race. The stored path cannot reach it. */
+  onDuplicate: () => Promise<IntakeOutcome>
+  /** What the owner is told when the write itself failed. */
+  failure: string
+  /** Undo the file this run stored. Never called on the stored path — see [ONTVANGEN] below. */
+  rollback: () => Promise<void>
+}): Promise<ClassifyStep> {
+  if (!args.stored) {
+    const placed = await insertClassifiedDocument(args.identity, args.classification, args.pipeline)
+    if (placed.kind === "placed") return { ok: true, documentId: placed.documentId }
+    // [R1] Don't report success on a failed write. Roll back the stored file so it isn't orphaned
+    // in Storage (a leaked object with no row), and tell the owner to retry.
+    await args.rollback()
+    if (placed.kind === "duplicate") return { ok: false, outcome: await args.onDuplicate() }
+    return { ok: false, outcome: json({ error: args.failure }, { status: 500 }) }
+  }
+
+  const said = await updateClassification(
+    args.stored.documentId, args.userId, args.stored.expectedAiDocType, args.classification, args.pipeline,
+  )
+  switch (said.kind) {
+    case "placed":
+      return { ok: true, documentId: args.stored.documentId }
+    case "failed":
+      // [ONTVANGEN] Nothing is rolled back. After "Ontvangen" the file and the row are a promise we
+      // made, and deleting them because a LABEL would not write is the one failure the owner can
+      // neither see nor undo. The document simply stays where it is, still waiting, and the next
+      // pass tries again.
+      console.error("[ONTVANGEN] the final classification did not write", {
+        documentId: args.stored.documentId, error: said.error,
+      })
+      return { ok: false, outcome: json({ error: args.failure }, { status: 503 }) }
+    case "gone":
+      // The owner deleted it, or answered "hou de bestaande" on a duplicate, while we were reading.
+      return { ok: false, outcome: json({ ok: true, destination: "document", skipped: "gone" }) }
+    case "superseded":
+      return { ok: false, outcome: json({ ok: true, destination: "document", skipped: "superseded", state: said.aiDocType }) }
+    case "completed_elsewhere":
+      return { ok: false, outcome: json({ ok: true, destination: "document", skipped: "completed_elsewhere", state: said.aiDocType }) }
+  }
 }
 
 export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<IntakeOutcome> {
   const {
     run, supabase, user, file, buffer, source, force, intent,
-    effectiveType, isEInvoice, pdfText, pdfPages, contentHash
+    effectiveType, isEInvoice, pdfText, pdfPages, contentHash, stored
   } = ctx
 
   // ── Stage 2: AI verify + classify ───────────────────────────────────────────
@@ -234,9 +346,18 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
   // [E-FACTUUR-GRATIS] An e-invoice is read mechanically — no model, no cost — so it may not spend
   // a document from the month's allowance. Charging for it would make the owner pay for something
   // free AND push a real invoice, one that does need reading, out of the month.
-  const gate = await gateFairUseForRead({
-    client: supabase, userId: user.id, metric: "aiDocuments", costsAiCall: !isEInvoice,
-  });
+  // [ONTVANGEN] Same door, two reservations. The interactive run reserves against the PERIOD and
+  // gives back in its own catch; a stored run reserves against the DOCUMENT, because after
+  // receive-first the retry is ours and a crash between "counter +1" and the end of the run would
+  // otherwise cost the owner one document per attempt for our fault. Both answer the same shape,
+  // so the 1.200 lines below cannot tell which one they are inside.
+  const gate = stored
+    ? await gateAiDocumentForRead({
+        userId: user.id, documentId: stored.documentId, plan: stored.plan, costsAiCall: !isEInvoice,
+      })
+    : await gateFairUseForRead({
+        client: supabase, userId: user.id, metric: "aiDocuments", costsAiCall: !isEInvoice,
+      });
   if (!gate.allowed) {
     // [ONTVANGEN] Not raw(): the quota gate is the one refusal that outlives the request. See the
     // "paused" arm of IntakeOutcome, and fair-use-pause.ts for what the background caller does.
@@ -294,6 +415,41 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
     // on it. No new screen, no new state: the machinery for the second attempt was already built,
     // it was simply never handed anything from this door.
     console.error("[BEWAAR-EERST] intake AI read failed — keeping the file, asking nobody to upload it again", aiErr)
+
+    // [ONTVANGEN] On the stored path the file was kept BEFORE the owner was told "Ontvangen", so
+    // there is nothing to keep — only something to SAY. The row moves from the state this run
+    // loaded to could_not_read, as a compare-and-set: a reader outage must not overwrite a
+    // conclusion the owner or a successor reached while we were waiting on the model.
+    if (stored) {
+      // [FAIR-USE §3] Before the write, and unconditionally: the outage is ours.
+      await gate.release()
+      const marked = await updateClassification(
+        stored.documentId, user.id, stored.expectedAiDocType,
+        {
+          doc_type: "overig",
+          folder_id: stored.folderId,
+          // ai_processed:false, because it was not. A row that claims a read that never happened is
+          // the kind of small lie the reader-quality panel then reports as a successful read.
+          ai_processed: false,
+          ai_doc_type: DOC_TYPE_COULD_NOT_READ,
+        },
+      )
+      if (marked.kind === "failed") {
+        // The bytes and the row are both still there — only the LABEL did not land, so the drain
+        // will see the same waiting document again. Say so; never claim the read was handled.
+        console.error("[ONTVANGEN] could not mark the document as unreadable", {
+          documentId: stored.documentId, error: marked.error,
+        })
+        return json({ error: "Dit bestand kon niet worden gelezen, en dat kon nu ook niet worden vastgelegd." }, { status: 503 })
+      }
+      return json({
+        ok: true,
+        destination: "document",
+        documentId: stored.documentId,
+        message: "Automatisch inlezen lukt op dit moment niet. Je bestand is bewaard — je hoeft het niet opnieuw te uploaden. Je vindt het bij Inkomend onder \u201eOvergeslagen bij import\u201d, met een knop om het opnieuw te laten lezen.",
+      })
+    }
+
     // ai_processed:false, because it was not. A row that claims a read that never happened is the
     // kind of small lie the reader-quality panel then reports as a successful read.
     const keptId = await storeRawIncoming(buffer, file, user.id, supabase, DOC_TYPE_COULD_NOT_READ, source, { aiProcessed: false })
@@ -735,34 +891,47 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
   // storage als contentType en in documents.file_type. Gevolg: een PDF die bij het openen niet als
   // PDF wordt herkend en in plaats van te tonen wordt gedownload. Het onleesbare-pad hierboven deed
   // het al goed (`file.type || "application/octet-stream"`); dit pad liep achter.
-  const upload = await maybeImageToPdf(buffer, effectiveType, file.name)
+  // [ONTVANGEN] A stored run converts nothing. The handoff already decided what the bytes ARE and
+  // wrote them; re-wrapping them here would produce a second file that no row points at, and the
+  // conversion's own comment says it runs BEFORE storage — which, on this path, already happened.
+  const upload = stored
+    ? { buffer, fileName: file.name, fileType: effectiveType }
+    : await maybeImageToPdf(buffer, effectiveType, file.name)
   // Laatste vangnet: okForAi laat ook een bestand door dat alleen op `.pdf` eindigt zonder dat de
   // bytes te sniffen waren. Dan is effectiveType nog steeds "" en is een leeg type nooit beter dan
   // octet-stream — dezelfde keuze als het onleesbare-pad maakt.
   const uploadType = upload.fileType || "application/octet-stream"
 
   // ── Store the file in Storage (shared by all destinations) ──────────────────
-  // [OPSLAG-DEUR] Before a byte is written. The allowance is MEASURED from the documents this
-  // account still has, so the refusal and the meter on the owner's own screen quote the same
-  // megabytes. Fails open — see gateStorage.
-  const space = await gateStorage({ client: supabase, userId: user.id, bytes: upload.buffer.length })
-  if (!space.allowed) return raw(space.response!)
+  // [ONTVANGEN] …except on the stored path, where the object is the one the owner was told about.
+  // Uploading again would leave an orphan, and the storage allowance was already charged for these
+  // same bytes at the door — asking twice would refuse an owner for a file they only sent once.
+  let storagePath: string
+  if (stored) {
+    storagePath = stored.storagePath
+  } else {
+    // [OPSLAG-DEUR] Before a byte is written. The allowance is MEASURED from the documents this
+    // account still has, so the refusal and the meter on the owner's own screen quote the same
+    // megabytes. Fails open — see gateStorage.
+    const space = await gateStorage({ client: supabase, userId: user.id, bytes: upload.buffer.length })
+    if (!space.allowed) return raw(space.response!)
 
-  const safeName = upload.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
-  const storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`
-  const { error: uploadError } = await supabase.storage
-    .from("documents")
-    .upload(storagePath, upload.buffer, { contentType: uploadType, upsert: false })
-  // [R1] A swallowed storage failure was the silent-loss bug: the flow continued and
-  // wrote a documents/invoice row whose file_url points at a file that was NEVER stored,
-  // while telling the owner "opgeslagen" / "factuur herkend". The evidence is then gone
-  // but looks present, and the closing package can never find it. Fail loudly instead —
-  // the owner retries; a cheap AI re-run beats a phantom document that breaks the aangifte.
-  if (uploadError) {
-    return json(
-      { error: "Bestand kon niet worden opgeslagen — probeer het opnieuw." },
-      { status: 502 }
-    )
+    const safeName = upload.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
+    storagePath = `${user.id}/incoming/${Date.now()}-${safeName}`
+    const { error: uploadError } = await supabase.storage
+      .from("documents")
+      .upload(storagePath, upload.buffer, { contentType: uploadType, upsert: false })
+    // [R1] A swallowed storage failure was the silent-loss bug: the flow continued and
+    // wrote a documents/invoice row whose file_url points at a file that was NEVER stored,
+    // while telling the owner "opgeslagen" / "factuur herkend". The evidence is then gone
+    // but looks present, and the closing package can never find it. Fail loudly instead —
+    // the owner retries; a cheap AI re-run beats a phantom document that breaks the aangifte.
+    if (uploadError) {
+      return json(
+        { error: "Bestand kon niet worden opgeslagen — probeer het opnieuw." },
+        { status: 502 }
+      )
+    }
   }
   const pdfUrl = storagePath
 
@@ -782,8 +951,10 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
     // [ONTVANGEN] Identity and classification are two owners of one row — see document-placement.ts.
     // This door knows both at once, so it writes both at once; the background pass, which finds the
     // identity already written, may only ever write the half below.
-    const placedA = await insertClassifiedDocument(
-      {
+    const placedA = await writeClassification({
+      stored,
+      userId: user.id,
+      identity: {
         user_id: user.id,
         file_name: upload.fileName,
         file_url: storagePath,
@@ -792,7 +963,7 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
         content_hash: contentHash,
         source,
       },
-      {
+      classification: {
         doc_type: "overig",
         folder_id: folderId,
         // Only claim we processed it when we actually read it.
@@ -807,25 +978,17 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
         ai_doc_type: docTypeForStoredFile(couldNotRead, v.document_kind),
       },
       pipeline,
-    )
-    // [R1] Don't report success on a failed write. Roll back the stored file so it isn't
-    // orphaned in Storage (a leaked object with no row), and tell the owner to retry.
-    if (placedA.kind !== "placed") {
-      await supabase.storage.from("documents").remove([storagePath])
       // [23505] De drie zuster-inserts vertalen een verloren race al naar een nette 409 — dit was
       // de enige zonder. Een dubbelklik op uploaden kreeg hier een 500 "probeer opnieuw" over een
       // bestand dat er net wél in kwam, vermomd als opslagfout.
-      if (placedA.kind === "duplicate") {
-        return json(
-          { error: "Dit bestand staat al in je bestanden.", duplicate: true },
-          { status: 409 }
-        )
-      }
-      return json(
-        { error: "Opslaan in je bestanden is mislukt — probeer het opnieuw." },
-        { status: 500 }
-      )
-    }
+      onDuplicate: async () => json(
+        { error: "Dit bestand staat al in je bestanden.", duplicate: true },
+        { status: 409 },
+      ),
+      failure: "Opslaan in je bestanden is mislukt — probeer het opnieuw.",
+      rollback: async () => { await supabase.storage.from("documents").remove([storagePath]) },
+    })
+    if (!placedA.ok) return placedA.outcome
     const doc = { id: placedA.documentId }
     // [INTAKE-FEEDBACK] resolve the folder name so the client can show "where"
     // and deep-link to it (same breadcrumb helper as the duplicate path).
@@ -937,8 +1100,19 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
 
   // [ONTVANGEN] Same split as the bestanden road above: this door knows identity and
   // classification together, so it writes them together.
-  const placedB = await insertClassifiedDocument(
-    {
+  // [R1] The document row IS the evidence link for an incoming invoice (the closing package
+  // resolves the PDF via invoices.document_id → documents.file_url). If it fails to write, an
+  // invoice with document_id=null has unreachable evidence — so nothing is booked.
+  const placedB: ClassifyStep = stored
+    ? { ok: true, documentId: stored.documentId }
+    // [ONTVANGEN] On the stored path the classification is the LAST write of the run (see the
+    // tail): the row already exists, so the invoice does not need it first — and writing it here
+    // instead would make a crashed run's own retry stop at "completed elsewhere" BEFORE it could
+    // finish the settlement, the reconcile and the bell it still owes.
+    : await writeClassification({
+    stored: undefined,
+    userId: user.id,
+    identity: {
       user_id: user.id,
       file_name: upload.fileName,
       file_url: storagePath,
@@ -947,7 +1121,7 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
       content_hash: contentHash,
       source,
     },
-    {
+    classification: {
       doc_type: "factuur",
       folder_id: folderId,
       year: invoiceDate ? new Date(invoiceDate).getFullYear() : null,
@@ -955,18 +1129,11 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
       ai_doc_type: decision.destination === "receipt" ? "receipt" : "invoice",
     },
     pipeline,
-  )
-  // [R1] The document row IS the evidence link for an incoming invoice (the closing
-  // package resolves the PDF via invoices.document_id → documents.file_url). If it fails
-  // to write, an invoice with document_id=null has unreachable evidence. Stop and roll
-  // back the stored file rather than create a half-linked, evidence-less invoice.
-  if (placedB.kind !== "placed") {
-    await supabase.storage.from("documents").remove([storagePath])
     // [DEDUP-ATOMIC] A concurrent double-submit that raced past the byte-hash SELECT above trips the
     // (user_id, content_hash) UNIQUE index here (23505). Treat it like the SELECT-found duplicate —
     // the other request already stored the document + created its invoice, so returning a duplicate
     // (not a 500) stops a second invoice from being created and double-counting the cost.
-    if (placedB.kind === "duplicate") {
+    onDuplicate: async () => {
       const { data: dup } = await supabase
         .from("documents").select("id, folder_id").eq("user_id", user.id).eq("content_hash", contentHash).limit(1).maybeSingle()
       const folderPath = dup ? await buildFolderBreadcrumb(supabase, user.id, dup.folder_id ?? null) : []
@@ -975,12 +1142,11 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
         error: where, duplicate: true,
         existing: dup ? { id: dup.id, folder_id: dup.folder_id ?? null, folder_name: folderPath.length ? folderPath[folderPath.length - 1] : null } : undefined,
       }, { status: 409 })
-    }
-    return json(
-      { error: "Opslaan van de factuur is mislukt — probeer het opnieuw." },
-      { status: 500 }
-    )
-  }
+    },
+    failure: "Opslaan van de factuur is mislukt — probeer het opnieuw.",
+    rollback: async () => { await supabase.storage.from("documents").remove([storagePath]) },
+  })
+  if (!placedB.ok) return placedB.outcome
   const documentId = placedB.documentId
 
   // [SMART-INTAKE] Merge an intake suggestion into field_confidence (same jsonb
@@ -1317,29 +1483,63 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
     .select("id")
     .single()
 
+  // [ONTVANGEN] The invoice this run ends up working with — its own, or the one an earlier run of
+  // this same document already booked.
+  let booked: { id: string } | null = invoice ?? null
+
   if (dbError) {
-    // [R1] Roll back the document row + stored file we just created. Otherwise a
-    // documents row with no invoice is orphaned — and worse, its content_hash would
-    // make the byte-hash dedup BLOCK a re-upload (409), trapping the owner with a file
-    // they can neither re-add nor see as an invoice. Best-effort; then surface the error.
-    await pipeline.from("documents").delete().eq("id", documentId)
-    await supabase.storage.from("documents").remove([storagePath])
-    return json({ error: dbError.message }, { status: 500 })
+    // [ONTVANGEN] 23505 on uq_invoices_document_id: an EARLIER run of THIS document already
+    // created the invoice and then died. That is a replay, not a failure — but only if the
+    // document itself proves it, so the winner is looked up by (document, owner) rather than
+    // assumed from a status code. Any other 23505 is still a failure.
+    if ((dbError as { code?: string }).code === UNIQUE_VIOLATION) {
+      const existing = await findInvoiceForDocument(documentId, user.id, pipeline)
+      if (existing.kind === "found") booked = { id: existing.invoiceId }
+    }
+    if (!booked) {
+      if (stored) {
+        // [ONTVANGEN] Nothing is rolled back after "Ontvangen". The old arm deleted the documents
+        // row AND the object in storage, which on this path is deleting a file the owner was told
+        // we had — and the bytes are the one thing that cannot be re-derived. The document stays
+        // waiting; the next pass tries again against the same durable state.
+        console.error("[ONTVANGEN] the invoice insert failed — the document stays waiting, nothing removed", {
+          documentId, error: dbError.message,
+        })
+        return json({ error: dbError.message }, { status: 503 })
+      }
+      // [R1] Roll back the document row + stored file we just created. Otherwise a
+      // documents row with no invoice is orphaned — and worse, its content_hash would
+      // make the byte-hash dedup BLOCK a re-upload (409), trapping the owner with a file
+      // they can neither re-add nor see as an invoice. Best-effort; then surface the error.
+      await pipeline.from("documents").delete().eq("id", documentId)
+      await supabase.storage.from("documents").remove([storagePath])
+      return json({ error: dbError.message }, { status: 500 })
+    }
   }
 
-  if (invoice?.id) {
-    await pipeline.from("documents").update({ invoice_id: invoice.id }).eq("id", documentId)
+  if (booked?.id) {
+    // [ONTVANGEN] The REVERSE link, and it is repairable state rather than financial identity.
+    // Through the owner-scoped compare-and-set, which refuses rather than overwrites when the
+    // document is already the evidence of a different invoice. A failure here is never a reason to
+    // re-enter invoice creation: `documents.invoice_id IS NULL` does not mean "no invoice exists",
+    // and findInvoiceForDocument above is the authoritative lookup.
+    const linked = await linkDocumentToInvoice(documentId, user.id, booked.id, pipeline)
+    if (linked.kind === "refused" || linked.kind === "failed") {
+      console.error("[ONTVANGEN] the reverse link was not written — the invoice stands, the breadcrumb does not", {
+        documentId, invoiceId: booked.id, outcome: linked.kind,
+      })
+    }
   }
 
   // [AUTO-ADVANCE] Side-effects of a clean auto-verify — mirror the confirm route, best-effort:
   // audit the automatic booking (legal trail), settle any cash link + book a bank line that
   // already paid it, and tell the owner what the app did (so the double-check stays available).
-  if (autoAdv.advance && invoice?.id) {
+  if (autoAdv.advance && booked?.id) {
     await logAuditAction({
       userId: user.id,
       action: "invoice.auto_verified",
       entityType: "invoice",
-      entityId: invoice.id,
+      entityId: booked.id,
       oldValue: { status: "processing" },
       newValue: { status: "received", reason: autoAdv.reason, source: "intake_auto_advance", run_origin: runOriginOf(run) },
       ipAddress: auditIpOf(run),
@@ -1360,19 +1560,24 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
     if (willSettle && settlePlan.method && settlePlan.payDate) {
       const { error: settleErr } = await pipeline.rpc("apply_manual_payment", {
         p_user_id: user.id,
-        p_invoice_id: invoice.id,
+        p_invoice_id: booked.id,
         p_amount: null,                     // null = the whole remaining balance
         p_pay_date: settlePlan.payDate,
         p_method: settlePlan.method,
         p_payable_statuses: ["received"],   // it was just inserted as 'received'
-        p_client_key: randomUUID(),
+        // [ONTVANGEN] A key derived from the DOCUMENT, so a retry of a crashed run replays instead
+        // of paying twice: apply_manual_payment answers replayed=true on (client_key, user, invoice)
+        // and moves no money. A random key would make every retry a new, real instalment.
+        // The interactive door keeps a fresh key: it is one human tap, there is no retry to
+        // deduplicate, and a stable key there would make a deliberate second instalment impossible.
+        p_client_key: stored ? autoSettlementKey(stored.documentId) : randomUUID(),
       });
       if (settleErr) {
         // [NO-SILENT-EMPTY] Never swallowed. The invoice is correct either way, but an owner who
         // was told "automatisch afgehandeld" and finds it in "nog te betalen" needs the trail to
         // say which half ran.
         console.error("[BON-AUTO] receipt settlement failed — left as received (unpaid)", {
-          invoiceId: invoice.id, error: settleErr.message,
+          invoiceId: booked.id, error: settleErr.message,
         });
       } else {
         settled = true;
@@ -1380,7 +1585,7 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
           userId: user.id,
           action: "invoice.auto_paid",
           entityType: "invoice",
-          entityId: invoice.id,
+          entityId: booked.id,
           oldValue: { status: "received" },
           newValue: {
             status: "paid", method: settlePlan.method, payment_date: settlePlan.payDate,
@@ -1422,8 +1627,43 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
       // ([BRIDGE-NOTIF]). Without it this was the one bell in the app you could
       // tap for nothing: it announces a booking and then leaves the owner to find
       // the invoice by hand — on a surface the notification never names.
-      link: `/dashboard/incoming/manage?focus=${invoice.id}`,
+      link: `/dashboard/incoming/manage?focus=${booked.id}`,
+      // [ONTVANGEN-MELDING] A durable name for the EVENT, so a run that dies after telling the
+      // owner cannot tell them again. Only on the stored path: the interactive door answers a
+      // request that is still open, so there is no retry to deduplicate, and the column may not
+      // even exist yet on a database where receive-first is not enabled.
+      eventKey: stored ? autoFinishedEventKey(stored.documentId) : undefined,
     })
+  }
+
+  // [ONTVANGEN] The LAST write of a stored run: say what the document turned out to be, as a
+  // compare-and-set on the state this run loaded.
+  //
+  // Last on purpose. Everything above it — the invoice, the payment, the reconcile, the bell — is
+  // idempotent by its own durable key, so a crash anywhere in that sequence leaves a document still
+  // WAITING, and the next pass walks the same road and finds every step already done. Writing the
+  // final state earlier would end that: the retry would stop at "completed elsewhere" while the
+  // steps after the crash had never run.
+  if (stored) {
+    const finished = await updateClassification(
+      stored.documentId, user.id, stored.expectedAiDocType,
+      {
+        doc_type: "factuur",
+        folder_id: folderId,
+        year: invoiceDate ? new Date(invoiceDate).getFullYear() : null,
+        ai_processed: true,
+        ai_doc_type: decision.destination === "receipt" ? "receipt" : "invoice",
+      },
+      pipeline,
+    )
+    if (finished.kind === "failed") {
+      // The money is right and the document still says it is waiting. That is the SAFE shape of
+      // this failure — the next pass replays a road on which nothing can happen twice — but it is
+      // not silent: a document that keeps coming back is a thing to see in the logs.
+      console.error("[ONTVANGEN] the run finished but the final state did not write — it will be replayed", {
+        documentId: stored.documentId, invoiceId: booked?.id ?? null,
+      })
+    }
   }
 
   // [INTAKE-AUTO-FEEDBACK] Where the FILE itself was filed. The document path already
@@ -1436,7 +1676,7 @@ eInvoiceContradicts: eInvoiceContradictsRead(v.field_confidence),
   return json({
     ok: true,
     destination: decision.destination, // 'invoice' | 'receipt'
-    invoice_id: invoice?.id,
+    invoice_id: booked?.id,
     suggest_paid: decision.suggestPaid,
     auto_verified: autoAdv.advance,
     folder_id: folderId,
