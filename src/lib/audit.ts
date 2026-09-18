@@ -279,6 +279,10 @@ export type AuditAction =
   // owner told "Ontvangen". The row that proves WHEN we took responsibility for a file, which is a
   // different moment from when we managed to read it.
   | 'document.received'
+  // [ONTVANGEN-BESLUIT] The owner's answer to "deze factuur lijkt al te bestaan": keep the one
+  // that is booked, or add this one anyway. It decides whether a cost is counted once or twice,
+  // so it is a row in the trail and not only a column on the document.
+  | 'document.duplicate_decided'
   | 'document.duplicate_blocked'      // ← [BRIDGE-EXTRACT] byte-hash dedup: re-upload of identical file refused
   | 'document.deleted'
   | 'document.bulk_deleted'

@@ -71,6 +71,8 @@ class World {
   folderLookups: Array<string | null> = []
   /** The `source` the door was handed — read from the row, never from the caller. */
   doorSawSource: string | null = null
+  /** Whether the door was told it may pass the semantic duplicate block. */
+  doorSawForce: boolean | null = null
 
   table(name: string): Row[] {
     switch (name) {
@@ -212,10 +214,15 @@ type Step = (typeof STEPS)[number]
 
 function scriptedDoor(world: World, crashAfter: Step | null) {
   const stop = (done: Step) => { if (crashAfter === done) throw new Crash(`crashed after ${done}`) }
-  return async (ctx: { stored?: { documentId: string; expectedAiDocType: string; folderId: string | null }; source?: string }) => {
+  return async (ctx: {
+    stored?: { documentId: string; expectedAiDocType: string; folderId: string | null }
+    source?: string
+    force?: boolean
+  }) => {
     // [ONTVANGEN] What the door was told this document IS. Recorded so a test can prove it came
     // from the row and not from whoever started the run.
     if (ctx.source) world.doorSawSource = ctx.source
+    if (typeof ctx.force === "boolean") world.doorSawForce = ctx.force
     const stored = ctx.stored!
     const doc = world.documents.find((d) => d.id === stored.documentId)!
 
@@ -587,6 +594,27 @@ test("[ONTVANGEN-CUTOVER] the kick and the drain reach the same document — one
   assert.equal(t.payments, 1)
   assert.equal(t.bells, 1)
   assert.equal(world.readerCalls, 1, "and only one of them paid for the read")
+})
+
+test("[ONTVANGEN-BESLUIT] the owner's durable answer is what lets the pass past the block", async () => {
+  // Under the synchronous road "toch toevoegen" was force=true on a SECOND upload. After
+  // receive-first the answer is on the row, and it has to reach the door — otherwise the pass
+  // walks into the same semantic duplicate block and asks the same question again, forever.
+  const zonder = freshWorld()
+  await runOnce(zonder, null)
+  assert.equal(zonder.doorSawForce, false, "an unanswered document is never forced")
+
+  const met = freshWorld()
+  met.documents[0].duplicate_decision = "add_anyway"
+  await runOnce(met, null)
+  assert.equal(met.doorSawForce, true, "the owner's answer must travel with the run")
+
+  // And it is the ANSWER, not the state: a document the owner answered "keep_existing" for is
+  // gone by then, and one with no answer is not forced by having been asked.
+  const geweigerd = freshWorld()
+  geweigerd.documents[0].duplicate_decision = "keep_existing"
+  await runOnce(geweigerd, null)
+  assert.equal(geweigerd.doorSawForce, false)
 })
 
 // ── The two refusals that must not start any work ─────────────────────────────────────────────

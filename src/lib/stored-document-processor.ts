@@ -193,9 +193,19 @@ export async function processStoredDocument(args: {
       file: new File([new Uint8Array(doc.buffer)], doc.fileName, { type: doc.fileType }),
       buffer: doc.buffer,
       source,
-      // [INTAKE-FORCE] Never forced by a background pass. Forcing past a semantic duplicate is an
-      // owner's decision about their own money, and nobody is here to make it.
-      force: false,
+      // [INTAKE-FORCE] The owner's own answer, made durable.
+      //
+      // Forcing past a semantic duplicate is a decision about their money, and a background pass
+      // may not make it — but it may CARRY one that was already made. Under the synchronous road
+      // that answer arrived as `force=true` on a second upload; after receive-first the question is
+      // asked on the document (wacht_op_besluit) and answered on the document, so the same
+      // override comes off the row instead of off a request.
+      //
+      // It bypasses exactly ONE thing: the semantic duplicate block this owner already answered.
+      // The byte-hash gate, the health classifier and every other guard are untouched — and
+      // shouldAutoAdvanceInvoice still refuses to auto-book a forced duplicate, so the invoice
+      // lands in the verify queue for a human, which is where a knowingly-doubled bill belongs.
+      force: doc.duplicateDecision === "add_anyway",
       intent: doc.intent,
       effectiveType: facts.effectiveType,
       isEInvoice: facts.isEInvoice,

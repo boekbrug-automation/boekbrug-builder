@@ -36,9 +36,10 @@ import { storeRawIncoming, receiveRawIncoming } from "@/lib/store-raw-incoming"
 import { maybeImageToPdf } from "@/lib/image-to-pdf"
 import { DOC_TYPE_WACHT_OP_LEZEN } from "@/lib/skipped-import"
 import { kickStoredDocument } from "@/lib/intake-kick"
+import { receiveFirstEnabled } from "@/lib/ontvangen-flag"
 // [ONTVANGEN] The processing half — see that file's header for why it is its own module.
 import { readIntentFromForm } from "@/lib/intake-intent"
-import { INTAKE_SOURCES, type IntakeSource } from "@/lib/intake-processor"
+import { processIntakeDocument, INTAKE_SOURCES, type IntakeSource } from "@/lib/intake-processor"
 // [BEWAAR-EERST] The label the skipped panel counts, so a file we could not read yet gets its
 // "Lees opnieuw" button — see skipped-import.ts and [TWEEDE-KANS].
 import { buildFolderBreadcrumb } from "@/lib/documents"
@@ -270,10 +271,10 @@ async function runIntake(req: NextRequest) {
   // [ONTVANGEN] One derivation, shared with the background pass — see intake-derived.ts. Written
   // twice, the live read and the later read would drift, and the drift would be invisible: both
   // halves keep answering, just not the same answer, and a file booked differently never fails.
-  // `isEInvoice` is not read here any more: the reader road is now asynchronous, and the stored
-  // pass derives the same three facts from the same function (intake-derived.ts) off the bytes it
-  // reads back. What this door still needs is only whether the file may go down that road at all.
-  const { effectiveType, okForAi } = describeBytes(buffer, file.name, file.type)
+  // [ONTVANGEN] One derivation, shared with the background pass — see intake-derived.ts. Written
+  // twice, the live read and the later read would drift, and the drift would be invisible: both
+  // halves keep answering, just not the same answer, and a file booked differently never fails.
+  const { isEInvoice, effectiveType, okForAi } = describeBytes(buffer, file.name, file.type)
 
   // [INTAKE-KEEP-ALL] Never hard-reject a plausible document. A file the extractor can't read —
   // a Word/Excel document, a .csv that isn't a bank export — must NOT be lost: store it in
@@ -421,15 +422,45 @@ async function runIntake(req: NextRequest) {
   // [ONE-INVOICE-UNVERIFIED] Het paginacijfer komt uit diezelfde ene keer openen mee.
   // [ONTVANGEN] Same shared derivation; the daily-sales branch stays HERE because it answers the
   // request and stops, which is the door's business and not a description of the file.
-  // Same reason: the page count belongs to the read, and the read has moved. The text layer is
-  // still needed HERE, because the daily-sales check is a deterministic door that answers the
-  // request and stops — it is the door's business, not a description of the file.
-  const { pdfText, isPdf } = await readPdfLayer(buffer, file.name, effectiveType)
+  const { pdfText, pdfPages, isPdf } = await readPdfLayer(buffer, file.name, effectiveType)
   // `isPdf`, not `pdfText !== null`: a scanned PDF with no text layer answers null and the
   // daily-sales check still has to see it, exactly as it did before this was shared.
   if (isPdf) {
     const dailyResp = await handleDailySalesPdf(pdfText, buffer, file, user.id, supabase, req, source)
     if (dailyResp) return dailyResp
+  }
+
+  // ── [ONTVANGEN-VLAG] Which road does a human document take? ────────────────────────────────
+  //
+  // Receive-first needs five schema boundaries live before it can finish a single document, so it
+  // ships DARK and is switched on separately. Absent or misspelled, this is the road the app has
+  // always taken — see ontvangen-flag.ts for why the flag refuses to guess.
+  //
+  // The structured doors above are identical either way: the fork is only here, at the point where
+  // a photographed bon or a PDF invoice would meet the reader.
+  const intent = readIntentFromForm(formData)
+
+  if (!receiveFirstEnabled()) {
+    // ── The synchronous road, unchanged ──────────────────────────────────────────────────────
+    //
+    // Fair Use, the Claude call, the semantic duplicate gate, the invoice insert, the settlement,
+    // the reconcile and the bell all run here, before this request answers — exactly as they did
+    // before receive-first existed. Nothing on this path reads a new column, writes wacht_op_lezen
+    // or schedules a background pass, so it has no dependency on the unapplied migrations.
+    const outcome = await processIntakeDocument({
+      // This door runs inside the owner's own request, so the address is real.
+      run: { kind: "request", ip: getClientIP(req) },
+      intent,
+      supabase, user, file, buffer, source, force,
+      effectiveType, isEInvoice, pdfText, pdfPages, contentHash,
+    })
+    // A library-built Response (rate limit, Fair Use, storage) carries headers a client reads, so
+    // it is handed back whole rather than rebuilt from a body and a status.
+    // [ONTVANGEN] "paused" carries a domain fact AND the library-built 402. This door still has a
+    // client, so it hands back the answer it always did.
+    return outcome.kind === "response" || outcome.kind === "paused"
+      ? outcome.response
+      : NextResponse.json(outcome.body, { status: outcome.status })
   }
 
   // ── [ONTVANGEN] Receive first, process after ───────────────────────────────────────────────
@@ -466,7 +497,6 @@ async function runIntake(req: NextRequest) {
   const space = await gateStorage({ client: supabase, userId: user.id, bytes: upload.buffer.length })
   if (!space.allowed) return space.response!
 
-  const intent = readIntentFromForm(formData)
   const received = await receiveRawIncoming(
     buffer, file, user.id, supabase, DOC_TYPE_WACHT_OP_LEZEN, source,
     {

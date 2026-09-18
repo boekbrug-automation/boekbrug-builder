@@ -2510,13 +2510,13 @@ test("[E-FACTUUR-XML] ONE reader books a Peppol invoice, and BOTH doors reach it
     derived, /effectiveType\.startsWith\("image\/"\) \|\|\s*\n\s*isEInvoice \|\|/,
     "…and sent to the reader instead of the unreadable bin",
   );
-  // [ONTVANGEN] The upload door still ASKS the shared rule — it just no longer keeps the answer.
-  // After the cutover the reader runs in the background, and the stored pass derives the same
-  // three facts from the same module (deriveFileFacts composes describeBytes) off the bytes it
-  // reads back. What the door still needs is only whether the file may take that road at all.
+  // [ONTVANGEN] Both roads ask the SAME rule. The synchronous one passes the answer straight to
+  // the reader; the receive-first one re-derives it from the stored bytes through the same module
+  // (deriveFileFacts composes describeBytes). Written twice, the live read and the later read
+  // would drift, and the drift would be invisible.
   const intake = codeFile("src/app/api/intake/route.ts");
   assert.match(
-    intake, /const \{ effectiveType, okForAi \} = describeBytes\(buffer, file\.name, file\.type\)/,
+    intake, /const \{ isEInvoice, effectiveType, okForAi \} = describeBytes\(buffer, file\.name, file\.type\)/,
     "the upload door must ASK that shared rule, not carry its own copy or none at all",
   );
   assert.match(
@@ -32835,8 +32835,14 @@ test("[ONTVANGEN-PARITEIT] every financial effect survived the move, in the same
     "the route no longer makes the handoff durable");
   assert.match(route, /kickStoredDocument\(\{/,
     "the route no longer hands the work to the processor at all");
-  assert.ok(!route.includes("await processIntakeDocument("),
-    "[ONTVANGEN-PARITEIT] the reader is being awaited inside the request again — the cutover is undone");
+  // [ONTVANGEN-VLAG] The reader IS awaited inside the request — on the flag-off road, which is the
+  // road the app has always taken. What must never happen is awaiting it on the receive-first road,
+  // where the owner has already been told "Ontvangen" and gone.
+  const vork = route.indexOf("if (!receiveFirstEnabled())");
+  const lees = route.indexOf("await processIntakeDocument(");
+  const ontvang = route.indexOf("await receiveRawIncoming(");
+  assert.ok(vork > -1 && lees > vork && ontvang > lees,
+    "[ONTVANGEN-PARITEIT] the reader is being awaited outside the flag-off branch — the cutover is undone");
 
   // Step 1 is synchronous BY DESIGN. The moment this stops being true the cutover has happened,
   // and it may not happen by accident inside a refactor.
@@ -36691,9 +36697,15 @@ test("[ONTVANGEN-LIMIET] the quota refusal is a domain outcome, not an HTTP answ
   // the reader runs in the background, so the refusal arrives as a pause and a one-time notice
   // rather than as a 402 nobody is waiting for. The published numbers still have exactly one
   // owner (fairUseRefusal), and it is the BACKGROUND that now turns them into durable state.
+  // [ONTVANGEN-VLAG] The 402 is still rendered — by the synchronous road, which has a client
+  // waiting for it. On the receive-first road there is none, so the refusal arrives as a pause and
+  // a one-time notice instead; the published numbers have one owner either way (fairUseRefusal).
   const route = codeFile("src/app/api/intake/route.ts");
-  assert.ok(!route.includes('outcome.kind === "paused"'),
-    "[ONTVANGEN-LIMIET] the upload door is rendering a 402 again — there is no client waiting for it");
+  const vork = route.indexOf("if (!receiveFirstEnabled())");
+  const render402 = route.indexOf('outcome.kind === "paused"');
+  const ontvang = route.indexOf("await receiveRawIncoming(");
+  assert.ok(vork > -1 && render402 > vork && ontvang > render402,
+    "[ONTVANGEN-LIMIET] a 402 is being rendered on the receive-first road, where nobody is waiting for it");
   const background = codeFile("src/lib/stored-document-processor.ts");
   assert.match(background, /verdict\.kind === "pause_fair_use"/,
     "the background pass must ACT on the domain fact…");
@@ -37164,4 +37176,135 @@ test("[ONTVANGEN-DRAIN] the cron door is closed by default, and unscheduled on p
   const crons = readFileSync("vercel.json", "utf8")
   assert.doesNotMatch(crons, /intake-drain/,
     "[ONTVANGEN-DRAIN] the schedule was added before the schema boundaries were proven live")
+})
+
+// ── [ONTVANGEN-VLAG] Two roads, and the one that works today is the default ───────────────────
+//
+// Receive-first needs five schema boundaries live before it can finish a single document. Without
+// a flag, merge and migrate become one irreversible step. With it, the code ships dark and the
+// road changes when somebody decides it does — and going back is an environment variable rather
+// than a revert of code other work has since been built on.
+
+test("[ONTVANGEN-VLAG] the upload door keeps both roads, and defaults to the old one", () => {
+  const route = codeFile("src/app/api/intake/route.ts")
+
+  const fork = route.indexOf("if (!receiveFirstEnabled())")
+  const receive = route.indexOf("receiveRawIncoming(")
+  assert.ok(fork > -1, "[ONTVANGEN-VLAG] the fork is gone — the cutover is unconditional again")
+  assert.ok(receive > fork,
+    "[ONTVANGEN-VLAG] the durable handoff must sit BEHIND the flag, not in front of it")
+
+  // The OLD road is what the fork's own branch takes, and it is intact.
+  const oud = route.slice(fork, receive)
+  assert.match(oud, /await processIntakeDocument\(\{/,
+    "[ONTVANGEN-VLAG] with the flag off, the reader must still run inside the request")
+  assert.match(oud, /outcome\.kind === "response" \|\| outcome\.kind === "paused"/,
+    "[ONTVANGEN-VLAG] …and the old response contract must be handed back whole")
+  assert.match(oud, /return outcome\.kind/,
+    "[ONTVANGEN-VLAG] the old road must END the request; falling through runs BOTH roads")
+  // Nothing on the old road may touch the new columns, the new state or the background pass.
+  for (const nieuw of ["receiveRawIncoming(", "kickStoredDocument(", "DOC_TYPE_WACHT_OP_LEZEN"]) {
+    assert.ok(!oud.includes(nieuw),
+      `[ONTVANGEN-VLAG] the flag-off road reaches ${nieuw} — it would then depend on migrations ` +
+        "that are deliberately not applied")
+  }
+
+  // And the structured doors are before the fork, so they are identical either way.
+  for (const marker of ["handleBankStatement(", "handleSpreadsheet(", "handleUblInvoice(xmlText,", "handleDailySalesPdf("]) {
+    const at = route.indexOf(marker)
+    assert.ok(at > -1 && at < fork,
+      `[ONTVANGEN-VLAG] ${marker} must answer BEFORE the fork, or the flag changes a road it does not own`)
+  }
+})
+
+test("[ONTVANGEN-VLAG] the flag decides new receives ONLY — recovery is not switchable", () => {
+  // The point of a rollback: turn receive-first off and new uploads go back to the synchronous
+  // road, while every document whose owner was ALREADY told "Ontvangen" still gets finished.
+  // A drain that asked the flag would strand exactly those documents — the ones the promise was
+  // made about — which is the opposite of a safe rollback.
+  for (const path of [
+    "src/lib/intake-drain.ts",
+    "src/app/api/cron/intake-drain/route.ts",
+    "src/lib/stored-document-processor.ts",
+    "src/lib/intake-kick.ts",
+    "src/lib/duplicate-decision.ts",
+  ]) {
+    assert.ok(!codeFile(path).includes("receiveFirstEnabled"),
+      `[ONTVANGEN-VLAG] ${path} asks the flag — a document that was already received must be ` +
+        "finished whether or not new uploads still take that road")
+  }
+})
+
+test("[ONTVANGEN-VLAG] it is a server flag, and it refuses to guess", () => {
+  const flag = codeFile("src/lib/ontvangen-flag.ts")
+  assert.match(flag, /const ENABLED = "true"/)
+  assert.match(flag, /if \(raw === ENABLED\) return true/,
+    "[ONTVANGEN-VLAG] an exact match, or a flag set to \"1\" turns on a road the database cannot serve")
+  assert.doesNotMatch(flag, /toLowerCase|trim\(\)|!== "false"|Boolean\(/,
+    "[ONTVANGEN-VLAG] normalising the value is guessing, and guessing is how it turns itself on")
+  assert.ok(!flag.includes("NEXT_PUBLIC_"),
+    "[ONTVANGEN-VLAG] a client that could read this is a client that could be lied to about its own upload")
+})
+
+// ── [ONTVANGEN-BESLUIT] The question the reader cannot answer ─────────────────────────────────
+
+test("[ONTVANGEN-BESLUIT] the client sends a choice, and the server reads the candidate", () => {
+  const door = codeFile("src/app/api/documents/[id]/duplicate-decision/route.ts")
+  const lib = codeFile("src/lib/duplicate-decision.ts")
+
+  assert.match(door, /isDuplicateDecision\(decision\)/,
+    "[ONTVANGEN-BESLUIT] the body must be narrowed to the two values the column accepts")
+  // The id may not come from the browser: a request body is a CLAIM about which invoice this
+  // duplicates, and accepting it would let one owner point a decision at another owner's row.
+  assert.doesNotMatch(door, /candidateInvoiceId|candidate_invoice_id/,
+    "[ONTVANGEN-BESLUIT] the candidate is being taken from the request")
+  assert.match(lib, /duplicate_candidate_invoice_id/,
+    "[ONTVANGEN-BESLUIT] …and must be read from the row this app wrote")
+
+  // Both sides proved, in the statements. The FK proves the invoice EXISTS; only this proves whose.
+  assert.match(lib, /\.eq\("id", args\.documentId\)\s*\n\s*\.eq\("user_id", args\.ownerId\)/,
+    "[ONTVANGEN-BESLUIT] the document must be owner-scoped")
+  assert.match(lib, /\.from\("invoices"\)[\s\S]{0,200}\.eq\("receiver_id", args\.ownerId\)/,
+    "[ONTVANGEN-BESLUIT] the candidate must be proved to be this owner's — the FK does not say so")
+
+  // Every write is a compare-and-set on the open question, so two taps resolve to one outcome.
+  const writes = [...lib.matchAll(/\.eq\("ai_doc_type", DOC_TYPE_WACHT_OP_BESLUIT\)/g)]
+  assert.equal(writes.length, 2,
+    "[ONTVANGEN-BESLUIT] both answers must be compare-and-set on the question being open")
+
+  // And keep_existing deletes the ROW before the object — the other order loses evidence invisibly.
+  const del = lib.indexOf('.delete()')
+  const obj = lib.indexOf("removeObject(path)")
+  assert.ok(del > -1 && obj > del,
+    "[ONTVANGEN-BESLUIT] the object is being removed before the row it belongs to")
+})
+
+test("[ONTVANGEN-BESLUIT] the answer is what carries the override, and it is not a second upload", () => {
+  const processor = codeFile("src/lib/stored-document-processor.ts")
+  assert.match(processor, /force: doc\.duplicateDecision === "add_anyway"/,
+    "[ONTVANGEN-BESLUIT] the durable answer must reach the door, or the same question is asked again")
+
+  const door = codeFile("src/app/api/documents/[id]/duplicate-decision/route.ts")
+  assert.match(door, /kickStoredDocument\(\{ documentId: id, ownerId: user\.id \}\)/,
+    "[ONTVANGEN-BESLUIT] answering must continue the SAME document")
+  assert.doesNotMatch(door, /await kickStoredDocument/,
+    "[ONTVANGEN-BESLUIT] the answer is already durable; the owner does not wait for the pass")
+})
+
+test("[ONTVANGEN-BESLUIT] the question is shown where it is a question, not where reads failed", () => {
+  // "Overgeslagen bij import" is for files we could NOT read, and it offers a second read. Here
+  // the read succeeded, and a second one buys the same answer for the same money.
+  const panel = codeFile("src/components/intake/DuplicateQuestions.tsx")
+  assert.match(panel, /if \(!questions \|\| questions\.length === 0\) return null/,
+    "[ONTVANGEN-BESLUIT] nothing to ask is nothing on screen")
+  assert.ok(!panel.includes("Lees opnieuw"),
+    "[ONTVANGEN-BESLUIT] a second read is not an answer to this question")
+  // A component holds no language of its own.
+  assert.match(panel, /questionCopy\(t, q\)/)
+  assert.doesNotMatch(panel, /"[A-Z][a-z]+ [a-z]+"/,
+    "[ONTVANGEN-BESLUIT] the panel is carrying copy of its own")
+
+  const scherm = codeFile("src/app/dashboard/incoming/IncomingInvoicesClient.tsx")
+  assert.match(scherm, /<DuplicateQuestions \/>/,
+    "[ONTVANGEN-BESLUIT] the question must be on a screen the owner opens")
 })
