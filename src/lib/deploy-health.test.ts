@@ -104,3 +104,97 @@ test("het webhook-geheim alarmeert alleen als afrekenen AAN staat", () => {
   assert.equal(envVerdict(aan), "let-op");
   assert.ok(/Het geld is binnen/.test(wh2.gevolg));
 });
+
+// ── [EB-TESTER] De drie variabelen van de bankkoppeling ───────────────────────────────────────
+//
+// De uitrol heeft er drie: twee sleutels die zeggen DAT er een bankkoppeling is, en een lijst die
+// zegt WIE erbij mag. De derde ontbrak in dit contract, en dat is precies het soort gat waar dit
+// bestand voor bestaat — niet omdat er dan iets stuk gaat, maar omdat de STORING ONZICHTBAAR IS:
+// met sleutels en zonder lijst weigert canUseEnableBanking() iedereen, en een afwezige bankkaart
+// ziet er exact zo uit als een bankkaart die terecht verborgen is.
+
+test("[EB-TESTER] alle drie afwezig: de bankkoppeling staat uit, en dat is geen alarm", () => {
+  const r = checkEnv(zonder("ENABLEBANKING_APPLICATION_ID", "ENABLEBANKING_PRIVATE_KEY", "ENABLEBANKING_TESTERS"));
+  assert.equal(
+    envVerdict(r),
+    "gezond",
+    "een installatie zonder bankkoppeling mag geen let-op krijgen over een lijst die nergens voor dient",
+  );
+  const testers = r.find((x) => x.key === "ENABLEBANKING_TESTERS")!;
+  assert.equal(testers.severity, "optioneel");
+  assert.match(testers.gevolg, /zodra je de bankkoppeling aanzet/);
+});
+
+test("[EB-TESTER] sleutels aanwezig, lijst leeg: stil, dus let-op", () => {
+  const r = checkEnv(zonder("ENABLEBANKING_TESTERS"));
+  const testers = r.find((x) => x.key === "ENABLEBANKING_TESTERS")!;
+  assert.equal(testers.severity, "stil", "met sleutels en zonder lijst ziet NIEMAND de bankkaart, ook de eigenaar niet");
+  assert.equal(
+    envVerdict(r),
+    "let-op",
+    "het rapport mag geen groen geven over een deur die voor iedereen dicht zit",
+  );
+  assert.ok(missingEnv(r).some((m) => m.key === "ENABLEBANKING_TESTERS"), "en hij moet bij naam genoemd worden");
+});
+
+test("[EB-TESTER] één sleutel is niet genoeg om de lijst stil te maken", () => {
+  // Halverwege ingevuld: er kan nog niemand een bank bereiken, dus de lijst is nog niet aan de
+  // beurt. Zou dit 'stil' zijn, dan gaat het alarm af tijdens het invullen zelf.
+  for (const aanwezig of ["ENABLEBANKING_APPLICATION_ID", "ENABLEBANKING_PRIVATE_KEY"]) {
+    const e = zonder("ENABLEBANKING_APPLICATION_ID", "ENABLEBANKING_PRIVATE_KEY", "ENABLEBANKING_TESTERS");
+    e[aanwezig] = "een-echte-waarde";
+    const testers = checkEnv(e).find((x) => x.key === "ENABLEBANKING_TESTERS")!;
+    assert.equal(testers.severity, "optioneel", `met alleen ${aanwezig} is er nog geen deur die dichtblijft`);
+  }
+});
+
+test("[EB-TESTER] alle drie aanwezig: de bedrading van de uitrol is compleet", () => {
+  const r = checkEnv(VOL);
+  const eb = r.filter((x) => x.key.startsWith("ENABLEBANKING_"));
+  assert.equal(eb.length, 3, "de bankkoppeling heeft drie variabelen, niet twee");
+  assert.deepEqual(
+    eb.filter((x) => !x.aanwezig),
+    [],
+    "met alle drie aanwezig mag er niets over de bankkoppeling in het rapport staan",
+  );
+  assert.equal(envVerdict(r), "gezond");
+});
+
+test("[EB-TESTER] een placeholder-testerlijst telt niet als ingevuld", () => {
+  // hasValue() is de enige plek waar 'ingevuld' wordt bepaald, en dat moet voor deze sleutel net
+  // zo streng zijn als voor de andere — een lijst met `your-uuid-here` erin laat iedereen buiten
+  // staan, precies zoals een lege lijst.
+  for (const rommel of ["", "   ", "undefined", "null", "${ENABLEBANKING_TESTERS}", "your-uuid-here", "TODO_vul_in", "placeholder"]) {
+    const e = { ...VOL, ENABLEBANKING_TESTERS: rommel };
+    const testers = checkEnv(e).find((x) => x.key === "ENABLEBANKING_TESTERS")!;
+    assert.equal(testers.aanwezig, false, `"${rommel}" mag niet als ingevulde testerlijst tellen`);
+    assert.equal(envVerdict(checkEnv(e)), "let-op", `"${rommel}" moet hetzelfde let-op geven als een lege lijst`);
+  }
+});
+
+test("[EB-TESTER] het rapport bevat geen enkele WAARDE, alleen of hij er is", () => {
+  // Een gezondheidsrapport dat sleutels lekt is zelf het lek. Dit test de serialisatie zoals
+  // /api/health hem opbouwt: elke variabele krijgt een herkenbare waarde, en geen ervan mag in de
+  // JSON terugkomen — niet heel, niet ingekort.
+  const geheim: Record<string, string> = Object.fromEntries(
+    ENV_CHECKS.map((c, i) => [c.key, `GEHEIM-${i}-${c.key.toLowerCase()}-abcdef0123456789`]),
+  );
+  geheim["ENABLEBANKING_TESTERS"] = "ac22189e-7052-4c48-b4ec-90947cf92ecc,11111111-2222-3333-4444-555555555555";
+  geheim["ENABLEBANKING_PRIVATE_KEY"] = "-----BEGIN PRIVATE KEY-----MIIEvQIBADAN-----END PRIVATE KEY-----";
+
+  const r = checkEnv(geheim);
+  const rapport = JSON.stringify({
+    oordeel: envVerdict(r),
+    mist: missingEnv(r).map((m) => ({ key: m.key, ernst: m.severity, gevolg: m.gevolg })),
+    alles: r,
+  });
+
+  for (const [key, waarde] of Object.entries(geheim)) {
+    assert.ok(!rapport.includes(waarde), `de waarde van ${key} staat in het rapport`);
+    // Ook geen fragment: een "eerste acht tekens" is nog steeds een lek.
+    assert.ok(!rapport.includes(waarde.slice(0, 8)), `een fragment van ${key} staat in het rapport`);
+  }
+  // Geen telling, geen "2 testers" — dat is ook informatie over de waarde.
+  assert.ok(!/\btesters?\s*:\s*\d/i.test(rapport), "het rapport telt de testers");
+  assert.ok(rapport.includes("ENABLEBANKING_TESTERS"), "de NAAM hoort er juist wel in te staan");
+});

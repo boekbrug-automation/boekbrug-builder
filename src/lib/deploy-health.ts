@@ -90,6 +90,9 @@ export const ENV_CHECKS: readonly EnvCheck[] = [
   //
   // 'optioneel', niet 'stil': ontbreken ze, dan verbergt de koppelkaart zichzelf en blijft
   // uploaden gewoon werken. Er gaat dus niets stil kapot — er staat alleen iets niet aan.
+  //
+  // [EB-TESTER] De DERDE hoort er sinds de Sandbox bij, en die is wél stil zodra de andere twee
+  // staan. Alle drie aanwezig = de uitrol is compleet bedraad.
   {
     key: "ENABLEBANKING_APPLICATION_ID",
     severity: "optioneel",
@@ -99,6 +102,17 @@ export const ENV_CHECKS: readonly EnvCheck[] = [
     key: "ENABLEBANKING_PRIVATE_KEY",
     severity: "optioneel",
     gevolg: "de bankkoppeling verbergt zich; een bankafschrift uploaden werkt gewoon door",
+  },
+  {
+    // [EB-TESTER] De derde variabele, en de enige STILLE van de drie — zie checkEnv voor waarom
+    // dat alleen geldt zodra de twee sleutels er staan.
+    key: "ENABLEBANKING_TESTERS",
+    severity: "stil",
+    gevolg:
+      "de sleutels staan er, maar niemand staat op de lijst: canUseEnableBanking() weigert dan " +
+      "iedereen en NIEMAND ziet de bankkaart — ook jij niet. Dat is op het scherm niet te " +
+      "onderscheiden van 'de koppeling is terecht verborgen', dus zonder deze regel zoek je het " +
+      "in de bank, in de sleutels of in de code, terwijl er alleen een lijst leeg is",
   },
 ];
 
@@ -122,13 +136,34 @@ export function checkEnv(env: Readonly<Record<string, string | undefined>>): Env
   // dat het ergens over kan gaan. Dat is precies hoe je mensen leert alarmen te negeren, en dan
   // missen ze het alarm dat er wél toe doet.
   const afrekenenAan = hasValue(env["STRIPE_SECRET_KEY"]);
+
+  // [VOORWAARDELIJK] [EB-TESTER] Dezelfde redenering, één deur verder. ENABLEBANKING_TESTERS is
+  // pas een STILLE storing zodra de twee sleutels er staan — dán zijn de credentials aan, weigert
+  // de poort zonder lijst iedereen, en ziet ook de eigenaar zelf geen bankkaart. Op het scherm is
+  // dat niet te onderscheiden van "de koppeling is terecht verborgen voor wie er niet bij hoort",
+  // en precies dat maakt hem stil.
+  //
+  // Staan de sleutels er NIET, dan is de bankkoppeling gewoon uit en is een lege testerlijst geen
+  // storing maar een stap die nog niet aan de beurt is. Een alarm dat dan afgaat is hetzelfde
+  // valse alarm dat het Stripe-geheim hierboven ooit gaf, en zo leer je mensen alarmen negeren.
+  const bankkoppelingAan =
+    hasValue(env["ENABLEBANKING_APPLICATION_ID"]) && hasValue(env["ENABLEBANKING_PRIVATE_KEY"]);
+
   return ENV_CHECKS.map((c) => {
-    const severity: Severity =
-      c.key === "STRIPE_WEBHOOK_SECRET" && !afrekenenAan ? "optioneel" : c.severity;
-    const gevolg =
-      c.key === "STRIPE_WEBHOOK_SECRET" && !afrekenenAan
-        ? "nog in te stellen zodra je Stripe aanzet; nu kan er niemand afrekenen, dus er is ook geen betaling die zoekraakt"
-        : c.gevolg;
+    let severity: Severity = c.severity;
+    let gevolg = c.gevolg;
+
+    if (c.key === "STRIPE_WEBHOOK_SECRET" && !afrekenenAan) {
+      severity = "optioneel";
+      gevolg =
+        "nog in te stellen zodra je Stripe aanzet; nu kan er niemand afrekenen, dus er is ook geen betaling die zoekraakt";
+    }
+    if (c.key === "ENABLEBANKING_TESTERS" && !bankkoppelingAan) {
+      severity = "optioneel";
+      gevolg =
+        "nog in te stellen zodra je de bankkoppeling aanzet; nu staan de sleutels er niet, dus er is geen deur die dichtblijft";
+    }
+
     return { ...c, severity, gevolg, aanwezig: hasValue(env[c.key]) };
   });
 }
