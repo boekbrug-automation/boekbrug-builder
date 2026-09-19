@@ -23,10 +23,23 @@ import { useLocale } from "@/lib/i18n/use-locale";
 import { translator } from "@/lib/i18n/t";
 import {
   questionCopy, questionsHeading, questionsUnknownText, candidatesUnavailableText,
-  type QuestionsState,
+  type QuestionsState, type DuplicateQuestion,
 } from "@/lib/duplicate-question";
+import { nextRecheckDelayMs } from "@/lib/duplicate-recheck";
 
-export default function DuplicateQuestions() {
+export default function DuplicateQuestions({ awaitDocumentIds }: {
+  /**
+   * [ONTVANGEN-WAAR] documentIds of receive-first handoffs that just happened on this screen.
+   *
+   * Supplying them arms a BOUNDED re-check (see duplicate-recheck.ts): the reader runs after the
+   * owner has been told "Ontvangen", so a question about one of these documents can come into
+   * existence while this panel is already on screen and has already been handed an empty list.
+   *
+   * Absent or empty — which is every screen except an upload screen mid-batch — the panel behaves
+   * exactly as it always did: it asks once and then stays quiet.
+   */
+  awaitDocumentIds?: readonly string[];
+} = {}) {
   const t = translator(useLocale());
   const [state, setState] = useState<QuestionsState>({ kind: "loading" });
   const [busy, setBusy] = useState<string | null>(null);
@@ -35,21 +48,28 @@ export default function DuplicateQuestions() {
   // [VRAAG-BLIJFT] A failed read is `unknown`, never an empty list. The two look the same on a
   // screen that renders nothing, and they mean opposite things: "nothing waits for you" versus
   // "we could not find out". The first is the one that makes an owner stop looking.
-  const load = useCallback(async () => {
+  //
+  // Returns the documentIds it now knows a question for, so the bounded re-check below can tell
+  // "the question I was waiting for has arrived" from "still nothing". A failed read returns [] —
+  // it has learned nothing, which keeps the window open rather than closing it on an error.
+  const load = useCallback(async (): Promise<string[]> => {
     try {
       const res = await fetch("/api/documents/duplicate-questions");
       if (!res.ok) {
         setState({ kind: "unknown" });
-        return;
+        return [];
       }
       const data = await res.json();
+      const questions: DuplicateQuestion[] = Array.isArray(data.questions) ? data.questions : [];
       setState({
         kind: "loaded",
-        questions: Array.isArray(data.questions) ? data.questions : [],
+        questions,
         candidatesUnavailable: data.candidatesUnavailable === true,
       });
+      return questions.map((q) => q.documentId);
     } catch {
       setState({ kind: "unknown" });
+      return [];
     }
   }, []);
 
@@ -57,6 +77,56 @@ export default function DuplicateQuestions() {
   // set from the awaited answer, not during the effect itself.
   useEffect(() => {
     void (async () => { await load(); })();
+  }, [load]);
+
+  // [ONTVANGEN-WAAR] The bounded window after a fresh handoff.
+  //
+  // Keyed on the CONTENTS of the list, not its identity: the caller rebuilds this array on every
+  // render, and depending on the array itself would re-arm the window several times a second.
+  const awaitKey = Array.from(awaitDocumentIds ?? []).sort().join(",");
+  useEffect(() => {
+    const awaited = awaitKey ? awaitKey.split(",") : [];
+    if (awaited.length === 0) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    const arm = (delayMs: number) => {
+      timer = setTimeout(() => {
+        void (async () => {
+          const answered = await load();
+          if (cancelled) return;
+          attempt += 1;
+          const next = nextRecheckDelayMs({ attempt, awaited, answered });
+          if (next !== null) arm(next);
+        })();
+      }, delayMs);
+    };
+
+    const first = nextRecheckDelayMs({ attempt: 0, awaited, answered: [] });
+    if (first !== null) arm(first);
+    // Unmounting stops it, and so does a new batch: the cleanup runs before the next arming.
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [awaitKey, load]);
+
+  // [BRIDGE-REFRESH] The other half of the same problem, with the app's existing answer: a panel
+  // the owner left open on a phone is a panel that has been wrong for as long as they were away.
+  // Event-driven and free when nothing happens — no timer, so no traffic on an idle screen.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onFocus = () => {
+      if (document.visibilityState !== "visible") return;
+      // Debounced for the reason BrugClient documents: returning to a tab fires both events.
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; void load(); }, 150);
+    };
+    window.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [load]);
 
   async function answer(documentId: string, decision: "keep_existing" | "add_anyway") {
@@ -143,6 +213,19 @@ export default function DuplicateQuestions() {
               {q.candidate?.invoiceNumber ? ` · ${q.candidate.invoiceNumber}` : ""}
               {q.candidate?.vendor ? ` · ${q.candidate.vendor}` : ""}
             </div>
+
+            {/* [ONTVANGEN-WAAR] What is true about the invoice already in the books. Assembled in
+                duplicate-question.ts — this holds no language and no rule of its own, and prints
+                nothing at all when nothing is known. */}
+            {copy.contextLines.length > 0 && (
+              <div style={{ fontSize: 13.5, color: "#202124", lineHeight: 1.5, wordBreak: "break-word" }}>
+                {copy.contextLines.map((line, i) => (
+                  // The amount comes first and is the one line that carries weight: [RUSTIG] says
+                  // a number beats a sentence, and this is the number the owner compares.
+                  <div key={line} style={{ fontWeight: i === 0 ? 700 : 400 }}>{line}</div>
+                ))}
+              </div>
+            )}
 
             {copy.candidateLink && (
               <Link

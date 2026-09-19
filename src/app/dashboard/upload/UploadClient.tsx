@@ -581,8 +581,15 @@ export default function UploadClient() {
 
         {/* [ONTVANGEN-WAAR] De open vraag, op het scherm waar de eigenaar nog staat. Boven de
             dropzone, want een vraag over een bestand dat er al is gaat vóór het volgende bestand.
-            Staat er niets open, dan tekent de component niets. */}
-        <DuplicateQuestions />
+            Staat er niets open, dan tekent de component niets.
+
+            De documentIds van wat we zojuist hebben AFGEGEVEN gaan mee. Alleen met die lijst kan
+            het paneel een vraag vinden die nog niet bestond toen het voor het eerst keek — en
+            precies dat is het geval hier: de lezer draait ná het antwoord "Ontvangen". Het raam
+            is begrensd en sluit zichzelf; zie duplicate-recheck.ts. */}
+        <DuplicateQuestions
+          awaitDocumentIds={received.map((i) => i.target?.documentId).filter((id): id is string => !!id)}
+        />
 
         {/* Drop zone + pickers */}
         <div
@@ -736,9 +743,16 @@ export default function UploadClient() {
         {items.length > 0 && (
           <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 13, color: M3.neutral }}>
+              {/* [ONTVANGEN-WAAR] Deze regel zei "Klaar — {n} bestand(en) verwerkt" zodra er niets
+                  meer in de wachtrij stond. Voor een receive-first-batch is dat precies de zin die
+                  niet waar is: de overdracht is klaar, de verwerking begint dan pas. De
+                  samenvatting eronder had het al goed en sprak deze regel dus tegen, twee
+                  alinea's uit elkaar. Drie toestanden, niet twee. */}
               {busyCount > 0
                 ? t('up.bezigVerwerken', { done: items.length - busyCount, total: items.length })
-                : t('up.klaarVerwerkt', { n: items.length })}
+                : received.length > 0
+                  ? t('up.nOntvangen', { n: received.length })
+                  : t('up.klaarVerwerkt', { n: items.length })}
             </span>
             {/* [BLOB-CLEANUP] De lijst opruimen zonder de pagina te verlaten. Naast het schoonvegen
                 van het scherm is dit de enige plek waar het geheugen van de vorige batch tussentijds

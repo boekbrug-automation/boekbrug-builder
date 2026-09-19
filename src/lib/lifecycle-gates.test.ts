@@ -22484,7 +22484,17 @@ test("[INTAKE-VOORTGANG] the add-button shows the upload's progress honestly, an
   assert.match(btn, /patchRow\(rowId, \{ phase: 'uploading', percent: 0 \}\)/);
   assert.match(btn, /onUploaded: \(\) => patchRow\(rowId, \{ phase: 'reading', percent: 100 \}\)/);
   assert.match(btn, /patchRow\(rowId, \{ phase: outcome === 'error' \? 'failed' : 'done' \}\)/, "a refused upload leaves its row spinning");
-  assert.match(btn, /patchRow\(rowId, \{ phase: 'done' \}\)\s*\n\s*return 'ok'/, "a landed upload leaves its row spinning");
+  // [ONTVANGEN-WAAR] Was `patchRow(rowId, { phase: 'done' })`. A landed upload has TWO honest end
+  // states now, because receive-first landed is not receive-first finished — but the rule this
+  // line has always guarded is unchanged and is what is asserted: whatever the answer was, the row
+  // reaches a TERMINAL phase before the function returns, and never keeps spinning.
+  assert.match(btn, /patchRow\(rowId, \{ phase: isReceived \? 'received' : 'done' \}\)\s*\n\s*return 'ok'/,
+    "a landed upload leaves its row spinning");
+  assert.match(btn, /const isReceived = data\.received === true/,
+    "…and which of the two it is comes from the route's own field, not from a guess about the destination");
+  // The one that would be silent: 'received' quietly re-pointed at the finished label.
+  assert.match(btn, /r\.phase === 'received' \? t\('int\.voortgang\.ontvangen'\)/,
+    "a received handoff must not end on the word for a finished read");
   assert.match(btn, /patchRow\(rowId, \{ phase: 'failed' \}\)\s*\n\s*return 'error'/, "a thrown upload leaves its row spinning");
   assert.match(btn, /function noteLanded\(rowId: string, name: string, where: string\)/, "where the file landed does not reach its row");
   assert.doesNotMatch(btn, /noteLanded\(file\.name/, "a call site forgot its row");

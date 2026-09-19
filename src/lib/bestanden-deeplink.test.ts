@@ -55,9 +55,43 @@ test("[BESTANDEN-WIJS] both intake shapes are read — including the duplicate o
   );
 });
 
+test("[ONTVANGEN-WAAR] the receive-first response carries a target, and it is read", () => {
+  // The exact body /api/intake answers on the receive-first road. camelCase, and no folder: the
+  // file sits where RECEIVE put it and the reader files it later.
+  assert.deepEqual(
+    targetFromIntake({
+      ok: true, received: true, destination: "received", documentId: "abc",
+      message: "Ontvangen — je kunt verder. We lezen dit bestand zo voor je uit; je hoeft niet te wachten.",
+    }),
+    { documentId: "abc", folderId: null },
+  );
+  // The minimal shape the owner named, on its own.
+  assert.deepEqual(targetFromIntake({ documentId: "abc" }), { documentId: "abc", folderId: null });
+
+  // And it produces a link, which is the whole point: for a received row there is no invoice to go
+  // to yet, so the stored file is the only thing the owner can follow.
+  assert.equal(
+    bestandenDeepLink(targetFromIntake({ received: true, documentId: "abc" })),
+    "/dashboard/bestanden?focus=abc",
+  );
+
+  // snake_case still wins when both are somehow present — the established shape is not displaced.
+  assert.deepEqual(
+    targetFromIntake({ document_id: "snake", folder_id: "f1", documentId: "camel" }),
+    { documentId: "snake", folderId: "f1" },
+  );
+  // A camelCase folder is read when it is there, and is not required.
+  assert.deepEqual(
+    targetFromIntake({ documentId: "abc", folderId: "fold-2" }),
+    { documentId: "abc", folderId: "fold-2" },
+  );
+});
+
 test("[BESTANDEN-WIJS] a response with no target yields none, never a half one", () => {
   for (const junk of [null, undefined, {}, { ok: true }, { existing: null }, { existing: {} },
-                      { document_id: 42 }, { existing: { id: 42 } }, "nonsense", []]) {
+                      { document_id: 42 }, { existing: { id: 42 } }, "nonsense", [],
+                      // [ONTVANGEN-WAAR] the camelCase branch is held to the same standard
+                      { documentId: 42 }, { documentId: "" }, { received: true }, { folderId: "f" }]) {
     assert.equal(targetFromIntake(junk), null, `${JSON.stringify(junk)} carries no target`);
   }
   // A folder without an id is not a target — the id is what makes it findable.

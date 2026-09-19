@@ -1716,6 +1716,9 @@ export const MESSAGES = {
   // de overdracht duurzaam maken — bestand opslaan, rij schrijven — en de lezing komt daarna, in de
   // achtergrond. De oude zin beloofde dus precies het wachten dat deze hele omslag heeft weggehaald.
   'int.voortgang.bewaren': { nl: 'Bewaren…', ar: 'جارٍ الحفظ…', en: 'Securing…' },
+  // [ONTVANGEN-WAAR] De EINDstand van een receive-first-overdracht. 'Klaar' zou hier beloven dat
+  // het lezen achter de rug is; wat achter de rug is, is het afgeven.
+  'int.voortgang.ontvangen': { nl: 'Ontvangen ✓', ar: 'تم الاستلام ✓', en: 'Received ✓' },
   'int.voortgang.klaar': { nl: 'Klaar', ar: 'جاهز', en: 'Done' },
   'int.voortgang.mislukt': { nl: 'Niet gelukt', ar: 'لم ينجح', en: 'Did not succeed' },
   'int.bestaande': { nl: 'Bekijk de bestaande factuur', ar: 'عرض الفاتورة الموجودة', en: 'View the existing invoice' },
@@ -9003,6 +9006,13 @@ export const MESSAGES = {
     ar: 'تذكير بالدفع ← حُفظ ولم يُقيّد',
     en: 'payment reminder → filed, not booked',
   },
+  // [ONTVANGEN-WAAR] De samenvattingsregel van een fotoreeks. Elke andere regel hier noemt een
+  // BESTEMMING ("→ geboekt", "→ gecontroleerd"); deze mag er geen noemen, want die is er nog niet.
+  'int.landed.ontvangen': {
+    nl: 'ontvangen → we verwerken dit verder',
+    ar: 'تم الاستلام ← نتابع المعالجة',
+    en: 'received → we carry on with it',
+  },
   'int.herinneringBewaard': {
     nl: 'Dit is een betalingsherinnering, geen factuur. Hij staat in je bestanden en is niet als kost geboekt.',
     ar: 'هذا تذكير بالدفع وليس فاتورة. حُفظ في ملفاتك ولم يُقيَّد كتكلفة.',
@@ -9082,6 +9092,13 @@ export const MESSAGES = {
     nl: 'Toegevoegd ✓',
     ar: 'أُضيف ✓',
     en: 'Added ✓',
+  },
+  // [ONTVANGEN-WAAR] De terugval als de route geen eigen zin meesturt. 'Toegevoegd ✓' was de oude
+  // terugval en is hier onwaar: toegevoegd waaraan weet op dit moment niemand.
+  'int.ontvangen': {
+    nl: 'Ontvangen ✓ — je kunt verder.',
+    ar: 'تم الاستلام ✓ — يمكنك المتابعة.',
+    en: 'Received ✓ — you can carry on.',
   },
   'int.veiligNietGelezen': {
     nl: 'Het bestand is veilig opgeslagen, maar we konden er niets uit lezen:',
@@ -13503,8 +13520,49 @@ export const MESSAGES = {
     ar: 'يبدو أن هذه الفاتورة موجودة بالفعل.',
     en: 'This invoice appears to already exist.',
   },
+  // [ONTVANGEN-WAAR] Een factuur die aantoonbaar betaald is, is geen "lijkt". Zachter formuleren
+  // dan we kunnen bewijzen is precies hoe iemand een rekening twee keer voldoet.
+  'ink.vraag.dubbelBetaald': {
+    nl: 'Deze factuur staat al in BoekBrug.',
+    ar: 'هذه الفاتورة موجودة بالفعل في BoekBrug.',
+    en: 'This invoice is already in BoekBrug.',
+  },
   'ink.vraag.bestaande': { nl: 'Bestaande houden', ar: 'الاحتفاظ بالموجودة', en: 'Keep the existing one' },
-  'ink.vraag.tochToevoegen': { nl: 'Toch toevoegen', ar: 'أضفها على أي حال', en: 'Add it anyway' },
+  // [ONTVANGEN-WAAR] Was 'Toch toevoegen'. Dat beschrijft een klik; dit beschrijft de bewering die
+  // de eigenaar doet, en dát is wat een tweede kostenpost en een tweede voorbelasting rechtvaardigt.
+  // De opgeslagen beslissing heet nog steeds `add_anyway` — die staat in de database en verandert niet.
+  'ink.vraag.andereFactuur': {
+    nl: 'Dit is echt een andere factuur',
+    ar: 'هذه فاتورة أخرى فعلًا',
+    en: 'This really is a different invoice',
+  },
+  // [ONTVANGEN-WAAR] Wat er met het geld van de BESTAANDE factuur is gebeurd. Korte zakelijke
+  // waarheid, geen machinetaal — en niets als de betaalstand niet vast te stellen is.
+  'ink.vraag.geld.onbetaald': { nl: 'Nog niet betaald', ar: 'لم تُدفع بعد', en: 'Not paid yet' },
+  'ink.vraag.geld.onbetaaldOpen': {
+    nl: 'Nog niet betaald · {open} open',
+    ar: 'لم تُدفع بعد · {open} مفتوح',
+    en: 'Not paid yet · {open} outstanding',
+  },
+  'ink.vraag.geld.deels': {
+    nl: '{betaald} betaald · {open} open',
+    ar: 'مدفوع {betaald} · {open} مفتوح',
+    en: '{betaald} paid · {open} outstanding',
+  },
+  'ink.vraag.geld.betaald': { nl: 'Betaald ✓', ar: 'مدفوعة ✓', en: 'Paid ✓' },
+  'ink.vraag.geld.teveel': {
+    nl: 'Meer betaald dan het bedrag',
+    ar: 'دُفع أكثر من المبلغ',
+    en: 'Paid more than the amount',
+  },
+  // [DUP-ARCHIVED] De eigenaar ziet deze factuur in geen enkele gewone lijst staan. Zonder deze
+  // regel vraagt het paneel iets over een factuur die hij nergens kan vinden.
+  'ink.vraag.staatInGenegeerd': { nl: 'Staat in Genegeerd', ar: 'موجودة في المتجاهَلة', en: 'Sits in Genegeerd' },
+  'ink.vraag.alVerwerkt': {
+    nl: 'Je boekhouder heeft deze factuur al verwerkt',
+    ar: 'قام محاسبك بمعالجة هذه الفاتورة بالفعل',
+    en: 'Your accountant has already processed this invoice',
+  },
   // [AR-TERMEN] «عرض», the verbal noun, not the imperative «اعرض»: a label names what the control
   // DOES, and in Arabic that is a noun. The reviewed vocabulary is explicit about this.
   'ink.vraag.bekijkBestaande': { nl: 'Bekijk de bestaande factuur', ar: 'عرض الفاتورة الموجودة', en: 'View the existing invoice' },
