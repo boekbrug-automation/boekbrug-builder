@@ -1711,7 +1711,11 @@ export const MESSAGES = {
   },
   'int.voortgang.klaarmaken': { nl: 'Bestand wordt klaargemaakt…', ar: 'يجري تجهيز الملف…', en: 'Preparing the file…' },
   'int.voortgang.uploaden': { nl: 'Uploaden… {p}%', ar: 'جارٍ الرفع… {p}%', en: 'Uploading… {p}%' },
-  'int.voortgang.lezen': { nl: 'Wordt gelezen — dit kan even duren', ar: 'جارٍ القراءة — قد يستغرق ذلك قليلًا', en: 'Being read — this can take a moment' },
+  // [ONTVANGEN-WAAR] Deze fase begint als de laatste byte weg is, en heette 'Wordt gelezen — dit
+  // kan even duren'. Onder receive-first is dat niet meer waar: wat de server op dat moment doet is
+  // de overdracht duurzaam maken — bestand opslaan, rij schrijven — en de lezing komt daarna, in de
+  // achtergrond. De oude zin beloofde dus precies het wachten dat deze hele omslag heeft weggehaald.
+  'int.voortgang.bewaren': { nl: 'Bewaren…', ar: 'جارٍ الحفظ…', en: 'Securing…' },
   'int.voortgang.klaar': { nl: 'Klaar', ar: 'جاهز', en: 'Done' },
   'int.voortgang.mislukt': { nl: 'Niet gelukt', ar: 'لم ينجح', en: 'Did not succeed' },
   'int.bestaande': { nl: 'Bekijk de bestaande factuur', ar: 'عرض الفاتورة الموجودة', en: 'View the existing invoice' },
@@ -10918,6 +10922,25 @@ export const MESSAGES = {
     nl: 'Klaar — {n} bestand(en) verwerkt',
     ar: 'تم — الملفات المعالَجة: {n}',
     en: 'Done — {n} file(s) processed',
+  },
+  // [ONTVANGEN-WAAR] Wat een receive-first-antwoord BETEKENT. Het bestand is duurzaam van ons —
+  // daar staat het vinkje voor — maar of het gelezen en geboekt is weet niemand op dit moment, en
+  // deze pagina hoort dat niet te suggereren. Geen 'klaar', geen 'verwerkt', geen 'factuur gelezen'.
+  'up.ontvangen': {
+    nl: 'Ontvangen ✓ — BoekBrug verwerkt dit verder.',
+    ar: 'تم الاستلام ✓ — يتابع BoekBrug المعالجة.',
+    en: 'Received ✓ — BoekBrug carries on with it.',
+  },
+  'up.nOntvangen': {
+    nl: '{n} ontvangen — we verwerken ze',
+    ar: 'المستلمة: {n} — نعالجها الآن',
+    en: '{n} received — we are processing them',
+  },
+  // De kop boven de samenvatting. 'Klaar ✓' zou hier liegen: er staat nog werk open dat wij doen.
+  'up.ontvangenKop': {
+    nl: 'Ontvangen ✓ — we verwerken ze',
+    ar: 'تم الاستلام ✓ — نعالجها الآن',
+    en: 'Received ✓ — we are processing them',
   },
   'up.klaarVink': {
     nl: 'Klaar ✓',

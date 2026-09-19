@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 
 import {
   questionCopy, questionsHeading, questionsUnknownText, candidatesUnavailableText,
@@ -98,4 +99,88 @@ test("[VRAAG-BLIJFT] the three states are three, and none of them is the other",
     states.filter((s) => s.kind === "loaded").length, 1,
     "exactly one state holds a list; the others are honest about not knowing",
   );
+});
+
+// ── [ONTVANGEN-WAAR] The upload screen tells the same truth the backend tells ──────────────────
+//
+// Two separate claims, and they fail in opposite directions:
+//
+//   1. a receive-first answer is DURABLE, not FINISHED. The upload page called every 200 'done' —
+//      green edge, ✓, counted under "verwerkt" — while the reader had not run yet. Three
+//      statements nobody could back at that moment.
+//   2. the question that the reader may raise afterwards lived only on Inkomend. The owner who
+//      stayed on the upload screen, where he had just been told "je kunt verder", had no way to
+//      see that we needed him after all.
+
+test("[ONTVANGEN-WAAR] a received answer is its own state — never counted as processed", async () => {
+  const src = readFileSync("src/app/dashboard/upload/UploadClient.tsx", "utf8");
+
+  // The branch exists and is taken BEFORE the generic ok-branch, or every receive-first answer
+  // falls through into 'done' exactly as it used to.
+  const receivedBranch = src.indexOf("res.ok && data?.received === true");
+  const genericOk = src.indexOf("} else if (res.ok) {");
+  assert.ok(receivedBranch > -1, "the receive-first branch is gone — every 200 reads as processed again");
+  assert.ok(genericOk > receivedBranch, "the generic ok-branch must come SECOND, or it swallows the received case");
+
+  // 'received' is a status of its own, and `done` is what every tally is built from.
+  assert.match(src, /type Status =[^\n]*'received'/, "received must be a first-class status");
+  assert.match(src, /const done = items\.filter\(\(i\) => i\.status === 'done'\)/,
+    "the tallies must key off 'done' alone, so a received row cannot leak into countBy/autoBooked/toVerify");
+  assert.match(src, /const received = items\.filter\(\(i\) => i\.status === 'received'\)/);
+
+  // No green, and no ✓ heading over work that is still ours.
+  assert.match(src, /it\.status === 'received' \? M3\.primary/,
+    "a received row may not wear the green of a finished read");
+  assert.match(src, /received\.length > 0 \? t\('up\.ontvangenKop'\)[\s\S]{0,60}t\('up\.klaarVink'\)/,
+    "'Klaar ✓' must not stand above files we are still processing");
+
+  // And emphatically no live job tracking was added to make the row turn green later.
+  //
+  // Read the CODE, not the prose. The first version of this loop searched the raw file for "poll"
+  // and went red on the comment above the Status type, which says there is deliberately NO polling.
+  // A gate that cannot tell a promise from its opposite is the trap AGENTS.md describes, in a file
+  // that happens not to use code().
+  const bare = src
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  for (const engine of ["setInterval", "EventSource", "WebSocket", "poll"]) {
+    assert.ok(!bare.includes(engine),
+      `[ONTVANGEN-WAAR] ${engine} appeared in the CODE — this slice is truthfulness, not job tracking`);
+  }
+});
+
+test("[ONTVANGEN-WAAR] the owner-facing copy says received, and not processed", () => {
+  assert.equal(t("up.ontvangen"), "Ontvangen ✓ — BoekBrug verwerkt dit verder.");
+  assert.equal(t("up.ontvangenKop"), "Ontvangen ✓ — we verwerken ze");
+  // The words this row must NOT claim. "verwerkt dit verder" is a promise about what comes next,
+  // so the bare participle is what is checked — not the substring inside that sentence.
+  for (const lie of ["Klaar", "gelezen", "geboekt", "geverifieerd"]) {
+    assert.ok(!t("up.ontvangen").includes(lie), `the received row claims "${lie}", which nobody knows yet`);
+  }
+
+  // [ONTVANGEN-WAAR] The upload PROGRESS phase said "Wordt gelezen — dit kan even duren" from the
+  // moment the last byte left. Under receive-first the server is securing the handoff there; the
+  // read comes after, in the background. The old sentence promised the very wait this removed.
+  assert.equal(t("int.voortgang.bewaren"), "Bewaren…");
+  const btn = readFileSync("src/components/intake/IntakeButton.tsx", "utf8");
+  assert.match(btn, /r\.phase === 'reading' \? t\('int\.voortgang\.bewaren'\)/);
+  assert.ok(!btn.includes("int.voortgang.lezen"), "the retired phrase is still wired up");
+});
+
+test("[ONTVANGEN-WAAR] the SAME question component is mounted on the upload screen", () => {
+  // One question, one endpoint, one decision state. A second implementation is how two screens
+  // start disagreeing about what the owner already answered.
+  const upload = readFileSync("src/app/dashboard/upload/UploadClient.tsx", "utf8");
+  const incoming = readFileSync("src/app/dashboard/incoming/IncomingInvoicesClient.tsx", "utf8");
+  for (const [name, src] of [["upload", upload], ["incoming", incoming]] as const) {
+    assert.match(src, /from ['"]@\/components\/intake\/DuplicateQuestions['"]/,
+      `[ONTVANGEN-WAAR] ${name} does not import the shared question panel`);
+    assert.match(src, /<DuplicateQuestions \/>/, `[ONTVANGEN-WAAR] ${name} imports it but never renders it`);
+  }
+  // No upload-specific duplicate machinery crept in alongside it.
+  for (const second of ["duplicate-questions", "duplicate-decision", "wacht_op_besluit"]) {
+    assert.ok(!upload.includes(second),
+      `[ONTVANGEN-WAAR] the upload screen is talking to the decision lifecycle directly ("${second}") instead of through the shared panel`);
+  }
 });

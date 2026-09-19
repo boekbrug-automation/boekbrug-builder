@@ -19560,8 +19560,14 @@ test("[BESTANDEN-WIJS] wat /api/intake stuurt om naartoe te linken, wordt ook ec
   // 3. En het uploadscherm VERBINDT ze — op allebei de takken, want de duplicaat-tak is degene
   //    die vergeten was.
   const upload = code("src/app/dashboard/upload/UploadClient.tsx");
-  assert.equal((upload.match(/targetFromIntake\(data\)/g) ?? []).length, 2,
-    "zowel de geslaagde als de duplicaat-tak leest het doel");
+  // Drie takken sinds [ONTVANGEN-WAAR]: geslaagd, duplicaat, en ontvangen. Die derde hoort er
+  // NET ZO GOED bij — een receive-first-antwoord draagt zijn documentId, het bestand staat op dat
+  // moment al in bestanden, en juist bij die rij is de link het enige wat de eigenaar kan volgen:
+  // er is nog geen factuur om naartoe te gaan.
+  assert.equal((upload.match(/targetFromIntake\(data\)/g) ?? []).length, 3,
+    "de geslaagde, de duplicaat- én de ontvangen-tak lezen het doel");
+  assert.match(upload, /status: 'received'[^}]*targetFromIntake\(data\)/,
+    "[ONTVANGEN-WAAR] de ontvangen-rij moet naar het bewaarde bestand kunnen linken");
   // Op de VOORWAARDE, niet alleen op een vermelding. Deze gate matchte eerst de losse aanroep, en
   // bleef daardoor groen toen de conditie op `false` werd gezet: de `href` verderop noemde de
   // functie nog. Precies de fout die dit bestand overal elders opspoort.

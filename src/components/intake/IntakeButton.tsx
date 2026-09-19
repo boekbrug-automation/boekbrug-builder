@@ -640,7 +640,7 @@ export default function IntakeButton({
           phaseLabel:
             r.phase === 'fitting' ? t('int.voortgang.klaarmaken')
             : r.phase === 'uploading' ? t('int.voortgang.uploaden', { p: r.percent })
-            : r.phase === 'reading' ? t('int.voortgang.lezen')
+            : r.phase === 'reading' ? t('int.voortgang.bewaren')
             : r.phase === 'done' ? t('int.voortgang.klaar')
             : t('int.voortgang.mislukt'),
         }))}

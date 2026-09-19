@@ -48,6 +48,11 @@ import { failureText } from '@/lib/server-message'
 // [MELDING-WEG] The X on a finished row, and the duplicate's place in the owner's language.
 import { DismissX } from '@/components/ui/DismissX'
 import { duplicateWhere } from '@/lib/duplicate-sentence'
+// [ONTVANGEN-WAAR] Dezelfde component als op Inkomend — niet een tweede vraag, een tweede eindpunt
+// of een tweede besluitstaat. Het document is de bron van waarheid; dit is een extra plek waar
+// dezelfde open vraag zichtbaar wordt. Zonder dit moest de eigenaar naar Inkomend om te zien dat
+// wij iets van hem nodig hebben, terwijl hij nog op het scherm staat waar hij net heeft geüpload.
+import DuplicateQuestions from '@/components/intake/DuplicateQuestions'
 
 const FONT = "'Roboto', -apple-system, sans-serif"
 // Same accept set as the app's intake button: images + PDF + bank-statement formats + the
@@ -64,7 +69,17 @@ const ACCEPT = 'image/*,application/pdf,.pdf,.xml,.mt940,.sta,.camt,.053,.txt,.9
 // [MULTI-PAGE] Cap the pages of one paper invoice, mirroring the intake button.
 const MAX_PAGES = 20
 
-type Status = 'queued' | 'busy' | 'done' | 'duplicate' | 'error'
+// [ONTVANGEN-WAAR] 'received' is niet 'done' met een ander woord ervoor.
+//
+// Onder receive-first antwoordt /api/intake `received: true` zodra de overdracht DUURZAAM is: het
+// bestand staat er, de rij staat er, en de eigenaar mag weglopen. Wat er NIET is, is een uitslag —
+// de lezing draait daarna, in de achtergrond. Deze pagina kende dat verschil niet en zette elke
+// 200 op 'done': groene rand, vinkje, en een telling onder "verwerkt". Drie keer een uitspraak
+// doen die op dat moment niemand kan waarmaken.
+//
+// Er komt met opzet GEEN polling bij om de regel later alsnog groen te maken. Het doel hier is dat
+// het scherm hetzelfde zegt als de database, niet dat het scherm een taak volgt.
+type Status = 'queued' | 'busy' | 'received' | 'done' | 'duplicate' | 'error'
 interface Item {
   id: string
   file: File
@@ -120,6 +135,8 @@ interface Item {
 /** Wat /api/intake terugstuurt, voor zover deze pagina het leest. Expliciet opgeschreven omdat het
  *  verschil tussen "geen veld" en "geen JSON" hier betekenis heeft (zie [UPLOAD-ERRORS]). */
 interface IntakeResponse {
+  /** [ONTVANGEN-WAAR] The receive-first road sets this; the synchronous road never does. */
+  received?: boolean
   destination?: Item['destination']
   message?: string
   auto_verified?: boolean
@@ -303,7 +320,13 @@ export default function UploadClient() {
           // bestond daar nooit — en juist daardoor viel elk zo'n geval in de algemene zin "Lezen
           // mislukt", over een bestand waar niets mis mee was.
           const data = (await res.json().catch(() => null)) as IntakeResponse | null
-          if (res.ok) {
+          if (res.ok && data?.received === true) {
+            // [ONTVANGEN-WAAR] Durable, and nothing more is known yet. No destination (the reader
+            // decides that later), no extracted fields, no auto_verified — claiming any of them
+            // here would be inventing an outcome. Our own sentence, not the server's, because this
+            // screen may be read in Arabic.
+            patch(item.id, { status: 'received', message: t('up.ontvangen'), target: targetFromIntake(data) ?? undefined })
+          } else if (res.ok) {
             patch(item.id, {
               status: 'done', destination: data?.destination, message: data?.message,
               autoVerified: data?.auto_verified === true,
@@ -520,6 +543,9 @@ export default function UploadClient() {
 
   const busyCount = items.filter((i) => i.status === 'queued' || i.status === 'busy').length
   const done = items.filter((i) => i.status === 'done')
+  // [ONTVANGEN-WAAR] Apart van `done`, en dus buiten countBy, autoBooked, toVerify en het vinkje.
+  // Dit zijn de bestanden die we HEBBEN; wat ze worden weet nog niemand.
+  const received = items.filter((i) => i.status === 'received')
   const dups = items.filter((i) => i.status === 'duplicate')
   const errs = items.filter((i) => i.status === 'error')
   // [UNREAD-HONESTY] Opgeslagen maar NIET gelezen — een eigen categorie, niet "klaar" en niet "fout".
@@ -540,7 +566,7 @@ export default function UploadClient() {
   // [MULTI-INVOICE] Files that imported one invoice and silently left others behind. Counted
   // separately from the plain successes, because "klaar" is exactly what they are NOT.
   const multiFiles = done.filter((i) => i.multiInvoice).length
-  const anyResult = done.length + dups.length + errs.length > 0
+  const anyResult = done.length + received.length + dups.length + errs.length > 0
 
   return (
     <div style={{ minHeight: '100vh', background: M3.bg, fontFamily: FONT }}>
@@ -552,6 +578,11 @@ export default function UploadClient() {
             {t('up.alles')} <strong>{t('up.allesMeerdere')}</strong>{t('up.allesRest')}
           </p>
         </div>
+
+        {/* [ONTVANGEN-WAAR] De open vraag, op het scherm waar de eigenaar nog staat. Boven de
+            dropzone, want een vraag over een bestand dat er al is gaat vóór het volgende bestand.
+            Staat er niets open, dan tekent de component niets. */}
+        <DuplicateQuestions />
 
         {/* Drop zone + pickers */}
         <div
@@ -738,6 +769,9 @@ export default function UploadClient() {
                 // Het bestand is veilig, maar er moet nog iets gebeuren, en dat is wat de rand
                 // hoort te zeggen.
                 : it.status === 'done' ? (it.couldNotRead || it.multiInvoice ? M3.warn : M3.success)
+                // [ONTVANGEN-WAAR] Bewaard, nog niet gelezen. Niet het groen van een uitslag en
+                // niet het oranje van een probleem — er is geen probleem, er is nog geen uitslag.
+                : it.status === 'received' ? M3.primary
                 : M3.outlineVariant
               const isImg = it.file.type.startsWith('image/')
               // The at-a-glance summary of WHAT the file is (so you don't open each one).
@@ -753,6 +787,7 @@ export default function UploadClient() {
                     ) : (
                       <div style={{ width: 46, height: 46, borderRadius: 8, background: '#F1F3F4', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 }}>
                         {it.status === 'queued' ? '⏳' : it.status === 'busy' ? '🔄'
+                          : it.status === 'received' ? '📥'
                           : it.status === 'done' ? (it.couldNotRead ? '⚠️' : (d?.icon ?? '📄'))
                           : it.status === 'duplicate' ? '⚠️' : '📄'}
                       </div>
@@ -880,9 +915,12 @@ export default function UploadClient() {
                 — niet gelezen, dubbel, of mislukt — dan is de batch wél af maar niet schoon, en dan
                 hoort er geen ✓ boven te staan dat de eigenaar laat ophouden met kijken. */}
             <p style={{ fontSize: 14, fontWeight: 700, color: M3.onSurface, margin: '0 0 8px' }}>
-              {unread.length + dups.length + errs.length === 0 ? t('up.klaarVink') : t('up.klaarAandacht')}
+              {unread.length + dups.length + errs.length > 0 ? t('up.klaarAandacht')
+                : received.length > 0 ? t('up.ontvangenKop')
+                : t('up.klaarVink')}
             </p>
             <p style={{ fontSize: 13, color: M3.neutral, margin: '0 0 12px', lineHeight: 1.6 }}>
+              {received.length > 0 && <>{t('up.nOntvangen', { n: received.length })} · </>}
               {autoBooked > 0 && <><strong style={{ color: M3.success }}>{t('up.nAutoGeboekt', { n: autoBooked })}</strong> · </>}
               {toVerify > 0 && <>{t('up.nTeControleren', { n: toVerify })} · </>}
               {countBy('bank') > 0 && <>{t('up.nBankafschrift', { n: countBy('bank') })} · </>}
