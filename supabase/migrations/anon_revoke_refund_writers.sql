@@ -1,0 +1,87 @@
+-- supabase/migrations/anon_revoke_refund_writers.sql
+-- [DEFINER-ANON] Two SECURITY DEFINER functions that write money were callable without signing in.
+--
+-- ── WHAT WAS OPEN ────────────────────────────────────────────────────────────────────────────
+--
+--   public.reverse_invoice_payment(uuid, uuid)
+--   public.answer_mollie_refund(uuid, text, text, numeric)
+--
+-- Both are SECURITY DEFINER owned by `postgres`, and both carried an explicit EXECUTE grant to
+-- `anon`. Measured ACL before this file ran, identical on both:
+--
+--   postgres=X/postgres | anon=X/postgres | authenticated=X/postgres | service_role=X/postgres
+--
+-- That grant makes them reachable unauthenticated at /rest/v1/rpc/<name> with nothing but the
+-- publishable anon key, which ships in every browser bundle.
+--
+-- ── WHY THE FUNCTION'S OWN GUARD DID NOT STOP IT ─────────────────────────────────────────────
+--
+-- Both open with:
+--
+--     IF auth.uid() IS NOT NULL AND auth.uid() <> p_user_id THEN
+--       RAISE EXCEPTION ... USING ERRCODE = '42501';
+--     END IF;
+--
+-- `auth.uid()` is current_setting('request.jwt.claim.sub', true)::uuid — missing_ok, so an
+-- anonymous request yields NULL rather than an error. The condition is therefore FALSE and the
+-- check is skipped entirely. The pattern was written for the service-role path, where NULL means
+-- "the server already authorised this"; it cannot tell that apart from "nobody is logged in".
+--
+-- There is no second line of defence. invoices, bank_tx_invoices and mollie_refunds all have
+-- rowsecurity=true but forcerowsecurity=false, and the functions are owned by `postgres`, which
+-- owns those tables — so RLS is not enforced inside them.
+--
+-- With the guard skipped, reverse_invoice_payment reaches:
+--
+--     DELETE FROM public.bank_tx_invoices WHERE id = p_link_id AND user_id = p_user_id;
+--     UPDATE public.invoices SET amount_paid = ..., status = ... WHERE id = v_inv_id;
+--
+-- i.e. destroying a payment allocation and rewriting invoice payment state, for any p_user_id.
+--
+-- Measured, and deliberately NOT overstated: anon has no ordinary read path to bank_tx_invoices or
+-- mollie_refunds, so an attacker still needs to know the relevant identifiers. That is identifier
+-- secrecy, not authorization, and it does not expire — anyone who saw those ids once keeps the
+-- capability, unauthenticated, forever.
+--
+-- ── WHY THESE TWO ESCAPED rpc_anon_revoke.sql ────────────────────────────────────────────────
+--
+-- That file is the standing anti-anon programme and it WORKS: all thirteen functions it names
+-- verify closed in production. But it is a hard-coded list, and these two were created afterwards
+-- (the [TERUGBETALING] refund work) and were never added to it. Supabase ships
+-- `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated,
+-- service_role`, so a new function arrives with the anon grant already attached and stays open
+-- unless somebody remembers it by name. A deny-by-default shape would have caught this; that is a
+-- separate change and is deliberately not in this file.
+--
+-- ── WHAT THIS FILE DOES, AND WHAT IT REFUSES TO DO ───────────────────────────────────────────
+--
+-- ONLY the anon grant, on exactly these two signatures. Not PUBLIC (neither ACL contains a PUBLIC
+-- entry — there is nothing to remove, and `REVOKE ... FROM PUBLIC` on a function whose ACL omits
+-- it is a no-op that would still widen this file's blast radius for no gain). Not `authenticated`,
+-- not `service_role`, not the bodies, not SECURITY DEFINER, not search_path, not RLS, and not the
+-- four other anon-reachable definer functions — two of them are load-bearing RLS helpers
+-- (is_my_accountant_client, acting_for_owner) whose policies run as the querying role, and
+-- revoking those blindly breaks every accountant screen. Those are a later, separate decision.
+--
+-- On SIGNATURE, not on name: a REVOKE by name alone silently misses an overload. Neither function
+-- is overloaded today (measured), and this stays correct on the day one is.
+--
+-- Idempotent. Safe to run more than once.
+
+REVOKE ALL ON FUNCTION public.reverse_invoice_payment(uuid, uuid) FROM anon;
+REVOKE ALL ON FUNCTION public.answer_mollie_refund(uuid, text, text, numeric) FROM anon;
+
+-- ── VERIFICATION ─────────────────────────────────────────────────────────────────────────────
+-- Run this afterwards against production. Both rows must read:
+--   anon_exec = false, authenticated_exec = true, service_role_exec = true
+--
+--   SELECT format('public.%I(%s)', p.proname, pg_get_function_identity_arguments(p.oid)) AS sig,
+--          has_function_privilege('anon',          p.oid, 'EXECUTE') AS anon_exec,
+--          has_function_privilege('authenticated', p.oid, 'EXECUTE') AS authenticated_exec,
+--          has_function_privilege('service_role',  p.oid, 'EXECUTE') AS service_role_exec
+--     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+--    WHERE n.nspname = 'public'
+--      AND p.proname IN ('reverse_invoice_payment', 'answer_mollie_refund');
+--
+-- And the Supabase linter 0028_anon_security_definer_function_executable must no longer name
+-- either function. The migration having run is not the evidence; the catalog is.
