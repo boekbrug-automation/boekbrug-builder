@@ -31,7 +31,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+// [ONTVANGEN] The intake DOOR is two files since #129: the route keeps the guards and the
+// deterministic branches, intake-processor.ts holds everything that needs the reader. Reading
+// both is reading the door — which is what this test was always asking about.
 const ROUTE = "src/app/api/intake/route.ts";
+const ROUTE_HALVES = [ROUTE, "src/lib/intake-processor.ts"] as const;
+const routeSource = () => ROUTE_HALVES.map((f) => readFileSync(f, "utf8")).join("\n");
 
 /**
  * De schermen die het antwoord van /api/intake vertalen naar wat de eigenaar ziet.
@@ -51,7 +56,7 @@ const SCHERMEN = [
 const NIET_LETTERLIJK_IN_DE_ROUTE = ["receipt"] as const;
 
 function bestemmingenUitDeRoute(): string[] {
-  const bron = readFileSync(ROUTE, "utf8");
+  const bron = routeSource();
   const gevonden = new Set<string>(NIET_LETTERLIJK_IN_DE_ROUTE);
   for (const m of bron.matchAll(/destination:\s*["']([a-z_]+)["']/g)) gevonden.add(m[1]);
   return [...gevonden].sort();

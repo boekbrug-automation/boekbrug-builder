@@ -187,20 +187,32 @@ export async function gateFairUse(params: {
     };
   }
 
+  return fairUseRefusal(params.metric, verdict.used, plan);
+}
+
+/**
+ * The published refusal, built in ONE place.
+ *
+ * Two doors now reach it — the period gate above and the per-document reservation
+ * ([ONTVANGEN], fair-use-document.ts) — and what an owner is shown when a limit is reached is a
+ * promise on /eerlijk-gebruik, not a detail of whichever door happened to ask. A second copy would
+ * be a second wording, drifting silently, on the screen where a paying decision is made.
+ */
+export function fairUseRefusal(metric: FairUseKey, used: number, plan: UsagePlan): FairUseGate {
   return {
     allowed: false,
     release: async () => {},
     response: NextResponse.json(
       {
-        error: exceededMessage(params.metric),
+        error: exceededMessage(metric),
         reason: "fair_use",
-        metric: params.metric,
-        used: verdict.used,
+        metric,
+        used,
         // [EERLIJK-GEBRUIK-UITLEG] The LIMIT travels with the count. Without it the screen can say
         // "je hebt er 50 gebruikt" and not what 50 is out of — which is the difference between a
         // number and an explanation. Taken from the same table /eerlijk-gebruik publishes, so the
         // modal, the policy page and Instellingen cannot disagree.
-        limit: plan === "plus" ? fairUseLimit(params.metric).plus : fairUseLimit(params.metric).free,
+        limit: plan === "plus" ? fairUseLimit(metric).plus : fairUseLimit(metric).free,
         plan,
         // Waar de gebruiker heen kan. Twee uitwegen, allebei goed — precies zoals
         // /eerlijk-gebruik §4 het beschrijft.

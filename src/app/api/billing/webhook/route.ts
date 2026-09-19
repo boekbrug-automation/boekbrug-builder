@@ -28,6 +28,10 @@
 // which makes the endpoint naturally idempotent without an events table.
 
 import { NextRequest, NextResponse } from "next/server";
+import { wakePausedDocumentsForPlanChange } from "@/lib/stored-document";
+// [MEERVOUD] Ook een serverlog telt: "document(s)" is geen afkorting die iemand leest, het is een
+// mislukte samenvoeging. De gate scant elk .ts-bestand en heeft gelijk — er is één teller voor.
+import { telWoord } from "@/lib/nl-plural";
 import type Stripe from "stripe";
 import {
   getStripe,
@@ -231,6 +235,16 @@ async function handleEvent(event: Stripe.Event): Promise<void> {
       `[BILLING] plan label '${plan}' rejected for profile ${profileId} ` +
         `(access was still granted): ${planErr.message}`
     );
+  }
+
+  // WRITE 3 — [ONTVANGEN] an upgrade may wake a document that the month's allowance paused.
+  // Best-effort in the same spirit as WRITE 2, and for the same reason: an owner who has just
+  // paid should not be told to come back on the 1st, but a failure to wake a file must never
+  // touch the access WRITE 1 granted. Only upward: a downgrade takes nothing away from a document
+  // that is already waiting, and moving its date would make it ask sooner and be refused sooner.
+  if (plan === "plus") {
+    const { woken } = await wakePausedDocumentsForPlanChange({ userId: profileId });
+    if (woken > 0) console.log(`[ONTVANGEN] ${telWoord(woken, "gepauzeerd document", "gepauzeerde documenten")} gewekt voor profiel ${profileId}`);
   }
 
   console.log(`[BILLING] ${event.type} → profile ${profileId} is ${status}/${plan}`);

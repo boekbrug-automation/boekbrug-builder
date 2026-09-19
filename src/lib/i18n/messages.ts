@@ -13463,6 +13463,51 @@ export const MESSAGES = {
   'log.supplier.updated': { nl: 'Gegevens van een leverancier aangepast', en: 'Supplier details changed', ar: 'عُدّلت بيانات مورّد' },
   'log.supplier.merged': { nl: 'Twee leveranciers samengevoegd tot één', en: 'Two suppliers merged into one', ar: 'دُمج مورّدان في واحد' },
   'log.document.uploaded': { nl: 'Bestand geüpload', en: 'File uploaded', ar: 'رُفع ملف' },
+  // [ONTVANGEN] A different moment from "geüpload": this is when the bytes, the row and the
+  // owner's intent all became durable and we said we had it — which is when we took
+  // responsibility, and is not the same as when we managed to read it.
+  // ── [ONTVANGEN-BESLUIT] De ene vraag die alleen de eigenaar kan beantwoorden ────────────────
+  //
+  // De lezing IS gelukt. Daarom staat dit niet bij "Overgeslagen bij import": daar hoort wat we
+  // niet konden lezen, met een knop om het opnieuw te proberen — en opnieuw proberen levert hier
+  // precies dezelfde vraag op, voor precies hetzelfde geld.
+  //
+  // [KNOP-IN-ZIN] De zin noemt geen knop; de twee knoppen staan eronder en spreken voor zich.
+  'ink.vraag.kop': { nl: '1 vraag voor jou', ar: 'سؤال واحد لك', en: '1 question for you' },
+  'ink.vraag.kopMeer': { nl: '{aantal} vragen voor jou', ar: '{aantal} أسئلة لك', en: '{aantal} questions for you' },
+  'ink.vraag.dubbel': {
+    nl: 'Deze factuur lijkt al te bestaan.',
+    ar: 'يبدو أن هذه الفاتورة موجودة بالفعل.',
+    en: 'This invoice appears to already exist.',
+  },
+  'ink.vraag.bestaande': { nl: 'Bestaande houden', ar: 'الاحتفاظ بالموجودة', en: 'Keep the existing one' },
+  'ink.vraag.tochToevoegen': { nl: 'Toch toevoegen', ar: 'أضفها على أي حال', en: 'Add it anyway' },
+  // [AR-TERMEN] «عرض», the verbal noun, not the imperative «اعرض»: a label names what the control
+  // DOES, and in Arabic that is a noun. The reviewed vocabulary is explicit about this.
+  'ink.vraag.bekijkBestaande': { nl: 'Bekijk de bestaande factuur', ar: 'عرض الفاتورة الموجودة', en: 'View the existing invoice' },
+  // [AR-TERMEN] The settled wording for «Bezig…» — one Arabic form per Dutch source, decided once
+  // in ar-decisions.ts so the interface does not say it three ways.
+  'ink.vraag.bezig': { nl: 'Bezig…', ar: 'جارٍ التنفيذ…', en: 'Working…' },
+  'ink.vraag.mislukt': {
+    nl: 'Je keuze kon niet worden vastgelegd. Probeer het zo opnieuw.',
+    ar: 'تعذّر تسجيل اختيارك. حاول مرة أخرى بعد قليل.',
+    en: 'Your choice could not be saved. Please try again shortly.',
+  },
+  // [VRAAG-BLIJFT] Een mislukte lezing is NIET "geen vragen". Als dit paneel weg is omdat we het
+  // niet konden ophalen, zou de eigenaar denken dat er niets op hem wacht — en nooit terugkijken.
+  'ink.vraag.nietGeladen': {
+    nl: 'We konden je openstaande vragen nu niet laden. Probeer het zo opnieuw.',
+    ar: 'تعذّر تحميل أسئلتك المفتوحة الآن. حاول مرة أخرى بعد قليل.',
+    en: 'We could not load your open questions right now. Please try again shortly.',
+  },
+  // De vraag staat er wél; alleen het nummer en de leverancier van de bestaande factuur ontbreken.
+  'ink.vraag.geenDetails': {
+    nl: 'De gegevens van de bestaande factuur konden we er nu niet bij laden.',
+    ar: 'تعذّر تحميل بيانات الفاتورة الموجودة معها الآن.',
+    en: 'We could not load the details of the existing invoice alongside it right now.',
+  },
+  'log.document.received': { nl: 'Bestand ontvangen', en: 'File received', ar: 'استُلم ملف' },
+  'log.document.duplicate_decided': { nl: 'Dubbele factuur beantwoord', en: 'Duplicate question answered', ar: 'تمت الإجابة عن سؤال التكرار' },
   'log.document.duplicate_blocked': { nl: 'Dubbel bestand geweigerd', en: 'Duplicate file refused', ar: 'رُفض ملف مكرر' },
   'log.document.deleted': { nl: 'Bestand verwijderd', en: 'File deleted', ar: 'حُذف ملف' },
   'log.document.bulk_deleted': { nl: 'Meerdere bestanden verwijderd', en: 'Several files deleted', ar: 'حُذفت عدة ملفات' },

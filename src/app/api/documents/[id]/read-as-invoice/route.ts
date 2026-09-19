@@ -38,6 +38,7 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit
 import { gateFairUseForRead } from "@/lib/fair-use-gate";
 import { verifyInvoiceFromPdf } from "@/lib/ai";
 import { makeOwnInvoiceLookup } from "@/lib/own-invoice-lookup";
+import { findInvoiceForDocument } from "@/lib/document-placement";
 import { mergeSafecore, resolveSupplierAtIntake } from "@/lib/intake-supplier";
 // [DEDUP-SOFT] "We konden de dubbelcheck niet uitvoeren" is een ander antwoord dan "hij staat
 // er niet in" — zie possible-duplicate-collect.ts.
@@ -285,7 +286,28 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       field_confidence: fieldConfidence as InvoiceFieldConfidence,
     })
     .select("id").single();
-  if (insErr || !invoice) {
+  // [ONTVANGEN] A lost race is not a failure, and it is not a licence either.
+  //
+  // The guard at the top of this route reads doc.invoice_id and refuses when it is set. That read
+  // and this insert are not one operation, so two taps can both pass it — and until
+  // uq_invoices_document_id exists, the loser silently books a SECOND invoice for one document.
+  // With the index the loser gets 23505 instead, and the right answer is to adopt the invoice the
+  // winner made rather than to tell an owner their file failed.
+  //
+  // But ONLY when the document itself proves it. A 23505 can come from any uniqueness rule in this
+  // table, and swallowing an unrelated one would report success for a booking that never happened.
+  // So the conflict is resolved by looking for an invoice that names THIS document and belongs to
+  // THIS owner; anything else falls through to the ordinary failure below.
+  let booked: { id: string } | null = invoice
+  if (insErr && (insErr as { code?: string }).code === "23505") {
+    const existing = await findInvoiceForDocument(doc.id, user.id, pipeline)
+    if (existing.kind === "found") {
+      // The reading DID happen and did cost a model call, so the allowance is not given back.
+      console.warn("[TWEEDE-KANS] a concurrent read won the race — adopting its invoice", { id, invoiceId: existing.invoiceId });
+      booked = { id: existing.invoiceId }
+    }
+  }
+  if (!booked) {
     // [FAIR-USE] Same rule as the read failure above, and it was missing here: a reading that
     // produced nothing storable is not a reading. Without this every failed attempt cost the owner
     // a document from their monthly allowance — and this branch failed on EVERY attempt.
@@ -297,19 +319,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // The document is no longer unread: link it and clear the marker, so it leaves the skipped panel
   // and stops being counted as something nobody looked at.
   await pipeline.from("documents")
-    .update({ invoice_id: invoice.id, ai_doc_type: v.document_kind ?? "invoice", ai_processed: true })
+    .update({ invoice_id: booked.id, ai_doc_type: v.document_kind ?? "invoice", ai_processed: true })
     .eq("id", doc.id).eq("user_id", user.id);
 
   await logAuditAction({
     userId: user.id, action: "invoice.reread_from_document",
-    entityType: "invoice", entityId: invoice.id,
+    entityType: "invoice", entityId: booked.id,
     oldValue: { document_id: doc.id, ai_doc_type: doc.ai_doc_type },
     newValue: { status: "processing", source: "reread", free: isEInvoice },
     ipAddress: getClientIP(req),
   }).catch(() => {});
 
   return NextResponse.json({
-    ok: true, booked: true, invoice_id: invoice.id,
+    ok: true, booked: true, invoice_id: booked.id,
     message: "Gelukt — deze staat nu in je controlewachtrij.",
   });
 }

@@ -121,7 +121,10 @@ test("[IBAN-CHECK-HONEST] the fraud lookup still has no catch to swallow its own
 // The fix is not "add five lines to the mapper" — that is the instance. The fix is that ONE
 // function answers the payment question and both doors call it. These gates hold that shape.
 
-const INTAKE = readFileSync("src/app/api/intake/route.ts", "utf8");
+// [ONTVANGEN] The intake DOOR is two files since #129: the route keeps the guards and the
+// deterministic branches, intake-processor.ts holds everything that needs the reader. Reading
+// both is reading the door — which is what this test was always asking about.
+const INTAKE = readFileSync("src/app/api/intake/route.ts", "utf8") + "\n" + readFileSync("src/lib/intake-processor.ts", "utf8");
 
 /** The _intake_* markers a file actually WRITES (assignments, not mentions in prose). */
 function writtenMarkers(src: string): Set<string> {

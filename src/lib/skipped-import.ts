@@ -40,6 +40,99 @@ export const DOC_TYPE_UNSUPPORTED = "unsupported_type" as const;
 export const DOC_TYPE_REMINDER = "reminder" as const;
 
 /**
+ * [ONTVANGEN] BEWAARD, en wij moeten hem nog lezen.
+ *
+ * Dit is geen mislukking en geen overslaan: het is de normale toestand van elk document tussen
+ * "Ontvangen — je kunt verder" en het moment dat de lezer eraan toe is. De reden dat het een EIGEN
+ * waarde is en niet `could_not_read`, is dat die twee tegengestelde dingen zeggen tegen de
+ * eigenaar én tegen ons:
+ *
+ *   could_not_read  → wij hebben het geprobeerd en het lukte niet. Hoort in "Overgeslagen bij
+ *                     import", met de knop "Lees opnieuw" ernaast.
+ *   wacht_op_lezen  → wij zijn nog niet begonnen. Hoort NERGENS in dat paneel, want er is niets
+ *                     overgeslagen; het staat gewoon in de rij.
+ *
+ * Zou elk vers geüpload bestand als could_not_read binnenkomen, dan meldt dat paneel bij iedere
+ * foto "overgeslagen bij import" over een bestand waar niets mis mee is. Een paneel dat bij elke
+ * normale handeling alarm slaat, is een paneel dat niemand meer leest.
+ */
+export const DOC_TYPE_WACHT_OP_LEZEN = "wacht_op_lezen" as const;
+
+/**
+ * [ONTVANGEN] GELEZEN, en er is één vraag die alleen de eigenaar kan beantwoorden.
+ *
+ * De lezer denkt dat deze factuur al in de administratie staat — dezelfde factuur, een ander
+ * bestand. Vroeger blokkeerde dat het antwoord terwijl de eigenaar nog keek; nu is hij allang weer
+ * aan het werk, dus wordt het een duurzame vraag op het document dat er al staat.
+ *
+ * Ook dit is nadrukkelijk GEEN leesfout, en het onderscheid is niet cosmetisch: de drain mag een
+ * infrastructuurstoring vanzelf opnieuw proberen, maar een vraag aan een mens niet. Nog een keer
+ * rekenen maakt het antwoord niet anders. Zonder een eigen toestand zou de achtergrondpas dit
+ * document eeuwig blijven oppakken en eeuwig op hetzelfde punt stoppen.
+ */
+export const DOC_TYPE_WACHT_OP_BESLUIT = "wacht_op_besluit" as const;
+
+/**
+ * [ONTVANGEN] BEWAARD en GELEZEN kon niet, omdat het BELEID het betaalde lezen nu pauzeert.
+ *
+ * De maandgrens uit /eerlijk-gebruik is bereikt. Dat is geen leesfout en geen vraag aan de
+ * eigenaar; het is een pauze met een einddatum die wij kennen. Vier waarheden die uit elkaar
+ * moeten blijven, want ze verdienen alle vier een ander antwoord:
+ *
+ *   wacht_op_lezen   → wij zijn hem nog verschuldigd, nu.
+ *   wacht_op_limiet  → wij hebben het bestand, maar het beleid pauzeert het betaalde lezen.
+ *   wacht_op_besluit → wij hebben een beslissing van de eigenaar nodig.
+ *   could_not_read   → wij hebben het geprobeerd en het lezen zelf mislukte.
+ *
+ * Nadrukkelijk GEEN overslaan: er is niets overgeslagen en er is niets mis met het bestand. Het
+ * hoort dus niet in het paneel "Overgeslagen bij import", en al helemaal niet onder "1 vraag voor
+ * jou" — er is geen vraag die alleen de eigenaar kan beantwoorden. Hij hoort één keer te horen dat
+ * het bestand veilig staat en wanneer wij het vanzelf opnieuw proberen.
+ */
+export const DOC_TYPE_WACHT_OP_LIMIET = "wacht_op_limiet" as const;
+
+/**
+ * De toestanden waarin een document op IEMAND wacht in plaats van klaar te zijn.
+ *
+ * Eén lijst, omdat elk scherm dat "is hier nog iets mee aan de hand?" vraagt hem in zijn geheel
+ * nodig heeft — en omdat een tweede lijst ergens anders precies de drift is die het overgeslagen-
+ * paneel ooit liet liegen (zie de kop van dit bestand).
+ */
+export const WACHTENDE_DOC_TYPES: readonly string[] = [
+  DOC_TYPE_WACHT_OP_LEZEN,
+  DOC_TYPE_WACHT_OP_LIMIET,
+  DOC_TYPE_WACHT_OP_BESLUIT,
+];
+
+/** Wacht dit document nog op ons of op de eigenaar? */
+export function isWachtendDocType(aiDocType: string | null | undefined): boolean {
+  return WACHTENDE_DOC_TYPES.includes((aiDocType ?? "").trim());
+}
+
+/**
+ * Mag de achtergrondpas dit document zelf nog een keer proberen?
+ *
+ * Alleen wat op ONS wacht. Een document dat op de eigenaar wacht is niet mislukt en wordt niet
+ * beter van nog een poging — het wacht op een mens, en daar is geen rekenkracht voor.
+ */
+export function mayDrainRetry(aiDocType: string | null | undefined): boolean {
+  return (aiDocType ?? "").trim() === DOC_TYPE_WACHT_OP_LEZEN;
+}
+
+/**
+ * [ONTVANGEN] Wacht dit op ons, maar mag het pas NA een bepaald moment weer geprobeerd worden?
+ *
+ * Bewust een eigen vraag naast mayDrainRetry, en niet een derde waarde erin. Die functie zegt
+ * "hier mag je nu mee door"; deze zegt "hier mag je mee door, maar niet vóór een tijdstip dat
+ * ergens anders staat". Zou wacht_op_limiet gewoon in mayDrainRetry zitten, dan was de tijdpoort
+ * iets wat de aanroeper moet ONTHOUDEN — en een poort die je moet onthouden, vergeet iemand. Dan
+ * draait de drain elk uur tegen een grens die pas op de 1e verschuift.
+ */
+export function isTimeGatedWait(aiDocType: string | null | undefined): boolean {
+  return (aiDocType ?? "").trim() === DOC_TYPE_WACHT_OP_LIMIET;
+}
+
+/**
  * De volledige lijst die het overgeslagen-paneel moet tellen.
  *
  * DIT IS DE ENIGE PLEK waar die lijst staat. Voegt een nieuwe opnameweg ooit een derde reden
@@ -50,6 +143,15 @@ export const SKIPPED_DOC_TYPES: readonly string[] = [
   DOC_TYPE_COULD_NOT_READ,
   DOC_TYPE_UNSUPPORTED,
 ];
+
+// [ONTVANGEN] De DRIE wachttoestanden horen hier NIET bij, en dat is geen omissie. "Overgeslagen"
+// betekent: er kwam iets binnen dat wij niet hebben verwerkt. Een document dat nog in de rij staat
+// is niet overgeslagen; een document dat op een antwoord van de eigenaar wacht al helemaal niet —
+// dat wacht op hem, niet op ons; en een document dat op de maandgrens wacht is niet overgeslagen
+// maar gepauzeerd, met een datum waarop wij het uit onszelf weer oppakken. Zou die laatste hier
+// wél staan, dan meldt het paneel "overgeslagen bij import" over een bestand waar niets mis mee
+// is en waar de eigenaar niets aan hoeft te doen — precies de valse alarmbel die de kop van dit
+// bestand beschrijft. Een gate hieronder houdt de lijsten uit elkaar.
 
 /**
  * Welke `ai_doc_type` hoort een opgeslagen document te krijgen?

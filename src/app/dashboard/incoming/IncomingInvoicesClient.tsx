@@ -36,6 +36,8 @@ import { waitingReasonOf, explainWaiting } from "@/lib/why-waiting";
 import { failureText } from '@/lib/server-message'
 // [MELDING-WEG] The X on a result row, and the duplicate's place in the owner's language.
 import { DismissX } from "@/components/ui/DismissX";
+// [ONTVANGEN-BESLUIT] The durable question, above everything else on this screen.
+import DuplicateQuestions from "@/components/intake/DuplicateQuestions";
 import { duplicateWhere } from "@/lib/duplicate-sentence";
 // [TZ] The owner's Amsterdam day, never the UTC one — see format-nl.ts.
 import { formatEuroNL, amsterdamToday } from '@/lib/format-nl'
@@ -4692,7 +4694,16 @@ export default function IncomingInvoicesClient({
           pixels further in than the tabs, the search field and every card below
           it, which is exactly the kind of ragged left edge nobody can name but
           everybody sees. */}
-      <div style={{ padding: "20px 16px 0", marginBottom: 14 }}>
+      {/* [ONTVANGEN-BESLUIT] The one question a reader cannot answer, above everything else on
+          this screen — it is the only thing here that is waiting on the OWNER rather than on us.
+          Deliberately NOT in "Overgeslagen bij import": the read succeeded, and that panel offers
+          a second read, which here buys the same answer for the same money. Renders nothing when
+          there is nothing to ask. */}
+      <div style={{ padding: "20px 16px 0" }}>
+        <DuplicateQuestions />
+      </div>
+
+      <div style={{ padding: "0 16px 0", marginBottom: 14 }}>
         {/* [IMPORT-MONITOR] Two-axis subtitle — calm about correctness, honest
             about flow. Never says "done" while items still wait to be sent. */}
         {/* [NO-SILENT-EMPTY] The empty state comes SECOND. "Alles verwerkt" is a statement about
