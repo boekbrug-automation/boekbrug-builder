@@ -93,6 +93,23 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role')  THEN CREATE ROLE service_role;  END IF;
 END $$;
 
+-- ── [SEAM-STANDAARDRECHT] Supabase deelt EXECUTE uit voordat een migratie iets doet ────────────
+--
+-- Zonder deze regel bewijst een privilege-seam het goede ding in een wereld waarin de fout niet
+-- KAN bestaan. Een kale PostgreSQL geeft EXECUTE op een nieuwe functie alleen aan PUBLIC, dus
+-- `REVOKE ... FROM PUBLIC` haalt daar ook anon en authenticated onderuit — die erven het recht via
+-- PUBLIC en hebben zelf niets. De test werd groen en de productie stond open.
+--
+-- Supabase draait op elk project `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON
+-- FUNCTIONS TO anon, authenticated, service_role`. Dat is een DIRECTE toekenning aan die rollen,
+-- en een REVOKE van PUBLIC raakt hem niet. Precies dat verschil liet fair_use_release_for_document
+-- — SECURITY DEFINER, met p_user_id als parameter, en het verlaagt usage_counters — bereikbaar
+-- vanaf elke ingelogde browser via PostgREST.
+--
+-- Dus bootst de fixture het standaardrecht na, vóór de migraties draaien. Een migratie die alleen
+-- van PUBLIC revoket laat de rollen nu staan, en de seam ziet het.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
+
 -- ═══ [RLS-PROEF] What the mandate migrations need to exist ══════════════════════════════════════
 -- Added for invoice_rls_isolation.test.sql, which applies accountant_invoice_mandate.sql and
 -- accountant_confirm_mandate.sql — the policies that let an ACCOUNTANT touch a CLIENT's invoices,

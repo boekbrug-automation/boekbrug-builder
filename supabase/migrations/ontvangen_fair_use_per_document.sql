@@ -174,8 +174,27 @@ COMMENT ON FUNCTION public.fair_use_release_for_document IS
 -- Dus eerst intrekken, dan geven. Dezelfde volgorde als fair_use_usage.sql, en om dezelfde reden:
 -- dit zijn interne serverprimitieven, geen browser-API. anon en authenticated horen er niet bij te
 -- kunnen, en een seam-test bewijst dat per rol in plaats van het aan te nemen.
-REVOKE ALL ON FUNCTION public.fair_use_consume_for_document(uuid, uuid, text, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.fair_use_release_for_document(uuid, uuid) FROM PUBLIC;
+--
+-- FROM PUBLIC IS NIET GENOEG OP SUPABASE. Dit stond hier eerst alleen als `FROM PUBLIC`, en dat is
+-- op een kale PostgreSQL correct: daar is het standaardrecht van anon en authenticated geërfd via
+-- PUBLIC. Supabase draait echter op elk project `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT
+-- EXECUTE ON FUNCTIONS TO anon, authenticated, service_role` — een DIRECTE toekenning, die een
+-- REVOKE van PUBLIC niet aanraakt. In productie bleven beide functies daardoor aanroepbaar vanaf
+-- elke ingelogde browser via PostgREST, en fair_use_release_for_document verlaagt usage_counters:
+-- wie hem op zijn eigen document aanriep, zette zijn eigen maandverbruik terug op nul.
+--
+-- Het te bewijzen recht is dus niet "PUBLIC heeft niets" maar de hele matrix:
+--
+--     PUBLIC        ✗
+--     anon          ✗
+--     authenticated ✗
+--     service_role  ✓
+--
+-- tests/sql/fair_use_per_document.test.sql toetst die vier per rol, en tests/sql/fixture.sql bootst
+-- het Supabase-standaardrecht na — anders slaagt die toets in een wereld waarin de fout niet kan
+-- bestaan, wat hier letterlijk is gebeurd.
+REVOKE ALL ON FUNCTION public.fair_use_consume_for_document(uuid, uuid, text, integer) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.fair_use_release_for_document(uuid, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.fair_use_consume_for_document(uuid, uuid, text, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.fair_use_release_for_document(uuid, uuid) TO service_role;
 

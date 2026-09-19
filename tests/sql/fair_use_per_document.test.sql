@@ -127,6 +127,19 @@ END $$;
 -- tussen "wij hebben service_role een recht gegeven" en "alleen service_role heeft dat recht" is
 -- precies één REVOKE, en die is met het blote oog niet te zien — dus wordt hij hier per rol
 -- nagerekend in plaats van aangenomen.
+--
+-- ── EN WAAROM DIT BLOK ALLEEN WERKT MET DE FIXTURE ──────────────────────────────────────────
+--
+-- Deze vier regels stonden er al en waren groen terwijl PRODUCTIE openstond. Niet omdat ze het
+-- verkeerde vroegen, maar omdat ze het in een wereld vroegen waarin het antwoord niet anders KON
+-- zijn: op een kale PostgreSQL erven anon en authenticated hun EXECUTE via PUBLIC, dus een
+-- `REVOKE ... FROM PUBLIC` haalt die er vanzelf af. Supabase geeft ze een DIRECTE toekenning via
+-- ALTER DEFAULT PRIVILEGES, en daar doet die REVOKE niets aan.
+--
+-- tests/sql/fixture.sql bootst dat standaardrecht nu na. HAAL DIE REGEL NIET WEG: zonder haar
+-- slaagt dit blok weer altijd, en is het een vinkje in plaats van een bewijs. Gemeten: met de
+-- fixture en een migratie die alleen van PUBLIC revoket faalt dit blok (exit 1); zonder de
+-- fixture slaagt diezelfde kapotte migratie (exit 0).
 DO $$
 DECLARE
   v_consume constant text := 'public.fair_use_consume_for_document(uuid, uuid, text, integer)';
