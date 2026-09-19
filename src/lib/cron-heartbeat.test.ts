@@ -81,6 +81,10 @@ test("de lijst met aandacht bevat alleen wat niet in orde is", () => {
     {
       "email-sync": run(1),
       reconcile: run(0.5),
+      // [ONTVANGEN-DRAIN] Elk kwartier, dus een run van een kwartier oud is vers. Hij doet met
+      // opzet vaak NUL werk — zolang de vlag uit staat komt er niets in wacht_op_lezen — en juist
+      // daarom telt alleen dat de pass gebeurde.
+      "intake-drain": run(0.25),
       // [ENABLEBANKING] De bankfeed hoort er ook bij. Ontbreekt hij hier, dan telt hij als
       // nooit-gedraaid — precies de kant waar deze functie bewust op faalt (zie hieronder).
       "bank-sync": run(2),

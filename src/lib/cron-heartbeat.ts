@@ -15,6 +15,17 @@
 export const CRON_JOBS = {
   "email-sync": 2,
   reconcile: 1,
+  // [ONTVANGEN-DRAIN] De hersteldoorloop van receive-first, elk kwartier. De directe kick na een
+  // upload doet het gewone geval; deze maakt de belofte waar als die kick nooit begon. Eén uur is
+  // de bovengrens die telt: /api/intake veegt elke claim van die eigenaar ouder dan een uur weg,
+  // dus een drain die langer wegblijft dan dat laat een document achter waarvan de claim al is
+  // opgeruimd. Vier passes per uur houdt daar ruime afstand van.
+  //
+  // Hij is met opzet VAAK STIL: zolang de vlag uit staat komt er niets in wacht_op_lezen terecht en
+  // doet elke pass nul werk. Dat is de gezonde toestand, niet een storing — wat bewaakt wordt is
+  // dat de pass zelf gebeurde, want valt hij om NA het aanzetten, dan blijft een document waarvan
+  // de eigenaar "Ontvangen" hoorde geruisloos liggen.
+  "intake-drain": 1,
   // [ENABLEBANKING] De bankfeed. Draait dagelijks omdat de bank maar een handvol opvragingen per
   // dag per rekening toestaat — vaker draaien levert niets op en zet de feed juist stil. Valt
   // hij om, dan komen er geen banktransacties meer binnen terwijl het scherm er normaal uitziet:

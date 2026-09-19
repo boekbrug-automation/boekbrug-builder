@@ -23640,34 +23640,22 @@ test("[CRON-BEDRAAD] every cron route is scheduled AND watched — none of the t
   const registry = beat.slice(beat.indexOf("CRON_JOBS"), beat.indexOf("} as const"));
   const bewaakt = new Set([...registry.matchAll(/^\s+"?([a-z-]+)"?:\s*\d+,/gm)].map((m) => m[1]));
 
-  // ── Eén uitzondering, met naam, reden en vervaldatum in de code zelf ─────────────────────────
+  // ── De uitzondering is weg, en dat is het bewijs dat de drain bedraad is ────────────────────
   //
-  // [ONTVANGEN-DRAIN] draait BEWUST nog niet. Receive-first mag pas aan wanneer elke schemagrens
-  // live bewezen is — de intake-intent-kolommen, de retry/fair-use-kolommen en RPC's,
-  // uq_invoices_document_id, notifications.event_key met zijn partiële UNIQUE, en de claimtabel.
-  // Een drain die vóór die tijd loopt vindt wachtende documenten die hij niet kan afmaken.
+  // [ONTVANGEN-DRAIN] stond hier als de enige donkere cron: een route die met opzet niet draaide
+  // tot elke schemagrens live bewezen was. Die grenzen staan er nu — de intake-intent-kolommen, de
+  // retry/fair-use-kolommen en RPC's, uq_invoices_document_id, notifications.event_key met zijn
+  // partiële UNIQUE, en de claimtabel — dus ging de planning erin en gaat de uitzondering eruit,
+  // samen met de markering in de route zelf. Precies zoals hier stond dat het zou gaan.
   //
-  // De uitzondering is daarom niet "deze mag buiten de lijst vallen" maar "deze moet ZELF zeggen
-  // dat hij donker staat, en waarom". Zodra de planning erin gaat, gaan de regel hieronder en de
-  // markering in de route samen weg — en valt hij vanzelf weer onder de gewone eis.
-  const DONKER = ["intake-drain"];
-  assert.ok(DONKER.length <= 1,
-    "meer dan één ongeplande cron is geen uitzondering meer, maar een gewoonte");
-  for (const naam of DONKER) {
-    assert.ok(routes.includes(naam), `[CRON-BEDRAAD] de uitzondering ${naam} bestaat niet (meer)`);
-    // RAUW gelezen, niet via codeFile(): deze bewering GAAT over een toelichting, en codeFile()
-    // strookt commentaar weg. Een gate die de zin in een gestripte string zoekt, zou rood worden
-    // om de verkeerde reden — precies de val die AGENTS.md beschrijft.
-    const bron = readFileSync(`src/app/api/cron/${naam}/route.ts`, "utf8");
-    assert.match(bron, /NOT SCHEDULED YET, AND THAT IS DELIBERATE/i,
-      `[CRON-BEDRAAD] ${naam} staat op de donkere lijst maar zegt zelf nergens dat hij niet draait`);
-    assert.ok(!gepland.has(naam),
-      `[CRON-BEDRAAD] ${naam} IS gepland — haal hem van de donkere lijst en zet hem in CRON_JOBS`);
-  }
+  // Hij valt daarmee weer onder de gewone eis van de drie lijsten hieronder. Dat de drain nog géén
+  // werk doet is een eigenschap van de VLAG, niet van de bedrading: zolang
+  // ONTVANGEN_RECEIVE_FIRST_ENABLED ontbreekt komt er niets in wacht_op_lezen, en draait elke pass
+  // leeg. Bedraad en donker zijn twee verschillende dingen, en alleen het eerste hoort hier thuis.
 
-  assert.deepEqual(routes.filter((r) => !gepland.has(r) && !DONKER.includes(r)), [],
+  assert.deepEqual(routes.filter((r) => !gepland.has(r)), [],
     "these cron routes have no entry in vercel.json, so they never run — nothing fails, the feature simply does not exist");
-  assert.deepEqual(routes.filter((r) => !bewaakt.has(r) && !DONKER.includes(r)), [],
+  assert.deepEqual(routes.filter((r) => !bewaakt.has(r)), [],
     "these cron routes are not in CRON_JOBS, so nobody is told when they stop");
   assert.deepEqual([...gepland].filter((p) => !routes.includes(p)), [],
     "these schedules point at a route that is gone — a daily 404");
@@ -37164,18 +37152,35 @@ test("[ONTVANGEN-DRAIN] the door filter is in the statement, not an afterthought
     "[ONTVANGEN-DRAIN] a 'done' marker outside the document row is a second truth that will lie")
 })
 
-test("[ONTVANGEN-DRAIN] the cron door is closed by default, and unscheduled on purpose", () => {
+test("[ONTVANGEN-DRAIN] the cron door is closed by default, and scheduled behind that door", () => {
   const door = codeFile("src/app/api/cron/intake-drain/route.ts")
   assert.match(door, /timingSafeEqualStr\(auth, `Bearer \$\{secret\}`\)/,
     "[ONTVANGEN-DRAIN] it walks every account, so it must never be publicly callable")
   assert.match(door, /if \(!secret\)[\s\S]{0,300}status: 401/,
     "[ONTVANGEN-DRAIN] a missing secret must CLOSE the door, never open it")
 
-  // vercel.json is untouched: the schedule goes in with the deployment preconditions, and a drain
-  // running against a database that is missing one of them would find work it cannot finish.
-  const crons = readFileSync("vercel.json", "utf8")
-  assert.doesNotMatch(crons, /intake-drain/,
-    "[ONTVANGEN-DRAIN] the schedule was added before the schema boundaries were proven live")
+  // This assertion used to be `doesNotMatch(/intake-drain/)` — the drain was deliberately dark
+  // until every schema boundary was proven live in production. They are, so it runs; the gate now
+  // asserts the other half of that promise instead of the half that has been kept.
+  const crons = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons?: { path: string; schedule: string }[] }
+  const drain = (crons.crons ?? []).find((c) => c.path === "/api/cron/intake-drain")
+  assert.ok(drain, "[ONTVANGEN-DRAIN] the drain is not scheduled — a recovery pass that never runs recovers nothing")
+
+  // Bounded from above by an hour, and that bound is not a preference. /api/intake sweeps every
+  // claim of that owner older than one hour WITHOUT reading the key, so a drain that stayed away
+  // longer would meet documents whose claim had already been swept from under it.
+  const minutes = /^\*\/(\d+) \* \* \* \*$/.exec(drain!.schedule)
+  assert.ok(minutes && Number(minutes[1]) <= 30,
+    `[ONTVANGEN-DRAIN] the schedule must stay well inside the one-hour claim sweep, got "${drain!.schedule}"`)
+
+  // The heartbeat row is written AFTER the gate. Before it, an unauthorised probe would mark the
+  // cron as alive on the strength of somebody knocking.
+  const gate = door.indexOf("status: 401")
+  const beat = door.indexOf("beginCronRun(")
+  assert.ok(beat > gate,
+    "[ONTVANGEN-DRAIN] the heartbeat is written before the door is closed — a probe would fake a run")
+  assert.match(door, /finishCronRun\([\s\S]{0,120}ok: false/,
+    "[ONTVANGEN-DRAIN] a failed pass must be recorded as failed, or silence and failure look alike")
 })
 
 // ── [ONTVANGEN-VLAG] Two roads, and the one that works today is the default ───────────────────

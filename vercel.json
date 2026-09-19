@@ -9,6 +9,10 @@
       "schedule": "0 * * * *"
     },
     {
+      "path": "/api/cron/intake-drain",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/bank-sync",
       "schedule": "0 5 * * *"
     },
