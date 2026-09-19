@@ -98,7 +98,9 @@ test("[VRAAG-BLIJFT] a complete lookup prints the number and the supplier", asyn
   assert.deepEqual(questions[0].candidate, {
     invoiceId: A, invoiceNumber: "F-2026-14", vendor: "Jansen Groothandel",
     total: null, payment: "onbekend", outstanding: null,
-    archived: false, accountantProcessed: false,
+    // A fixture with no status is a row whose home screen we cannot name — and `unknown` is what
+    // suppresses the link, rather than sending the owner somewhere that may not hold it.
+    where: "unknown", accountantProcessed: false,
   })
   assert.equal(questions[0].fileName, "bon-maart.pdf")
   assert.equal(questions[2].fileName, "document", "a nameless file is still a question, with a name to show")
@@ -183,7 +185,7 @@ test("[ONTVANGEN-WAAR] money we could not read invents NOTHING", () => {
 test("[ONTVANGEN-WAAR] the two places the owner cannot see are named", () => {
   // [DUP-ARCHIVED] "This invoice already exists" is useless when it exists somewhere invisible.
   const archived = questionFor(candidate({ id: A, status: "archived", total_inc_btw: 120, amount_paid: 0 }))
-  assert.equal(archived.candidate?.archived, true)
+  assert.equal(archived.candidate?.where, "archived")
   assert.ok(candidateContextLines(tnl, archived).includes("Staat in Genegeerd"))
 
   const locked = questionFor(candidate({ id: A, accountant_status: "verwerkt", total_inc_btw: 120, amount_paid: 120 }))
@@ -192,7 +194,7 @@ test("[ONTVANGEN-WAAR] the two places the owner cannot see are named", () => {
     ["€ 120,00", "Betaald ✓", "Je boekhouder heeft deze factuur al verwerkt"])
 
   const ordinary = questionFor(candidate({ id: A, status: "received", total_inc_btw: 120, amount_paid: 0 }))
-  assert.equal(ordinary.candidate?.archived, false)
+  assert.equal(ordinary.candidate?.where, "books")
   assert.equal(ordinary.candidate?.accountantProcessed, false)
 })
 
@@ -221,23 +223,6 @@ test("[ONTVANGEN-WAAR] no machine word reaches the owner", () => {
   }
 })
 
-test("[ONTVANGEN-WAAR] a settled invoice is stated, not hedged", () => {
-  // "Lijkt al te bestaan" is the right hedge while money is still open — the reader can be wrong.
-  // Over a bill that is demonstrably paid it reads as doubt about something provable, and doubt is
-  // what makes somebody pay twice. Same question, same two answers, firmer first line.
-  const open = questionFor(candidate({ id: A, total_inc_btw: 500, amount_paid: 0 }))
-  const settled = questionFor(candidate({ id: A, total_inc_btw: 500, amount_paid: 500 }))
-  assert.equal(questionCopy(tnl, open).sentence, "Deze factuur lijkt al te bestaan.")
-  assert.equal(questionCopy(tnl, settled).sentence, "Deze factuur staat al in BoekBrug.")
-
-  // [ONTVANGEN-WAAR] §F — and payment state changes NOTHING about the two answers on offer. A paid
-  // original does not earn the second copy a free pass; that road stays the owner's own assertion.
-  for (const q of [open, settled]) {
-    assert.equal(questionCopy(tnl, q).keepLabel, "Bestaande houden")
-    assert.equal(questionCopy(tnl, q).addLabel, "Dit is echt een andere factuur")
-  }
-})
-
 test("[ONTVANGEN-WAAR] enrichment that fails costs the context, never the question", () => {
   // [VRAAG-BLIJFT], unchanged and re-proved with the money columns in place: the new read is more
   // to lose, so the rule that losing it is survivable matters more, not less.
@@ -248,4 +233,80 @@ test("[ONTVANGEN-WAAR] enrichment that fails costs the context, never the questi
   assert.deepEqual(candidateContextLines(tnl, questions[0]), [], "and claims nothing about money")
   assert.equal(questionCopy(tnl, questions[0]).sentence, "Deze factuur lijkt al te bestaan.",
     "an unreadable candidate is never described as settled")
+})
+
+// ── [ONTVANGEN-WAAR] Payment is context. It is not evidence, and it is not a destination ───────
+
+test("[ONTVANGEN-WAAR] a paid candidate does not make the duplicate MORE certain", () => {
+  // This briefly said "Deze factuur staat al in BoekBrug" once the candidate was settled, and that
+  // crossed a boundary. A paid candidate is a fact about the invoice ALREADY in the books; it is
+  // not evidence that the document just uploaded is that same invoice. The semantic gate exists
+  // because its match can be a false positive — which is exactly why it is forceable — so hardening
+  // the sentence aimed our extra confidence at the owner's own correct answer.
+  //
+  // The exact-bytes gate is the certain one, and it never reaches this panel: it answers 409
+  // synchronously, carries no canForce, and can never become wacht_op_besluit.
+  const states: Array<[string, CandidateRow]> = [
+    ["unpaid", candidate({ id: A, status: "received", total_inc_btw: 500, amount_paid: 0 })],
+    ["partly", candidate({ id: A, status: "received", total_inc_btw: 500, amount_paid: 200 })],
+    ["paid", candidate({ id: A, status: "paid", total_inc_btw: 500, amount_paid: 500 })],
+    ["overpaid", candidate({ id: A, status: "paid", total_inc_btw: 500, amount_paid: 900 })],
+    ["unknown money", candidate({ id: A, status: "received" })],
+  ]
+  const copies = states.map(([name, row]) => [name, questionCopy(tnl, questionFor(row))] as const)
+
+  for (const [name, copy] of copies) {
+    assert.equal(copy.sentence, "Deze factuur lijkt al te bestaan.",
+      `${name}: the question must stay hedged — payment state is risk, never identity`)
+    assert.equal(copy.keepLabel, "Bestaande houden", `${name}: same first decision`)
+    assert.equal(copy.addLabel, "Dit is echt een andere factuur", `${name}: same second decision`)
+  }
+  // One sentence across the board, and no wording that upgrades a maybe into a statement.
+  assert.equal(new Set(copies.map(([, c]) => c.sentence)).size, 1)
+  for (const [name, copy] of copies) {
+    for (const certain of ["staat al", "is al", "bestaat al"]) {
+      assert.ok(!copy.sentence.includes(certain), `${name}: «${certain}» claims to know what we do not`)
+    }
+  }
+
+  // Only the CONTEXT differs — which is where the settled warning belongs, as a fact.
+  const lines = copies.map(([name, c]) => [name, c.contextLines.join(" · ")] as const)
+  assert.equal(lines.find(([n]) => n === "unpaid")?.[1], "€ 500,00 · Nog niet betaald · € 500,00 open")
+  assert.equal(lines.find(([n]) => n === "paid")?.[1], "€ 500,00 · Betaald ✓")
+  assert.equal(lines.find(([n]) => n === "unknown money")?.[1], "")
+})
+
+test("[ONTVANGEN-WAAR] the candidate link goes where that invoice actually lives", () => {
+  // The two screens hold disjoint sets, read off their own queries:
+  //   /dashboard/incoming        → .eq("status","processing") and .eq("status","archived")
+  //   /dashboard/incoming/manage → .in('status', ['received','paid'])
+  // The hard semantic gate filters on no status, so all four are reachable — and the panel used to
+  // send every one of them to manage. A question that had just said «Staat in Genegeerd» offered a
+  // link to a list that cannot contain it.
+  const href = (status: string | null) =>
+    questionCopy(tnl, questionFor(candidate({ id: A, status }))).candidateLink?.href ?? null
+
+  assert.equal(href("processing"), `/dashboard/incoming?focus=${A}`, "the verify queue holds it");
+  assert.equal(href("archived"), `/dashboard/incoming?focus=${A}`,
+    "…and so does Genegeerd, on the same screen — [ZOEK-LANDT] switches to that tab itself");
+  assert.equal(href("received"), `/dashboard/incoming/manage?focus=${A}`, "booked and unpaid lives in manage");
+  assert.equal(href("paid"), `/dashboard/incoming/manage?focus=${A}`, "and so does booked and settled");
+
+  // Anything we have not been taught about gets NO link. A wrong destination is worse than none:
+  // it looks like it worked, and the owner only finds out by not finding the invoice.
+  for (const unknown of [null, "draft", "sent", "overdue", "rejected", ""]) {
+    assert.equal(href(unknown), null, `status "${unknown}" must not invent a screen`)
+  }
+
+  // A question with no candidate at all offers nothing to click, as before.
+  const rows: QuestionRow[] = [{ id: "doc-1", file_name: "f.pdf", duplicate_candidate_invoice_id: A }]
+  const orphan = buildQuestions(rows, { byId: new Map(), unavailable: true })[0]
+  assert.equal(questionCopy(tnl, orphan).candidateLink, null)
+
+  // The archived case is the one that has to agree with itself: the line and the link, one fact.
+  const arch = questionFor(candidate({ id: A, status: "archived", total_inc_btw: 10, amount_paid: 0 }))
+  const copy = questionCopy(tnl, arch)
+  assert.ok(copy.contextLines.includes("Staat in Genegeerd"))
+  assert.match(copy.candidateLink?.href ?? "", /^\/dashboard\/incoming\?focus=/,
+    "the screen named by the line must be the screen the link opens")
 })

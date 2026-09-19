@@ -22,7 +22,13 @@ const t = translator("nl");
 const WITH_CANDIDATE: DuplicateQuestion = {
   documentId: "33333333-3333-3333-3333-333333333333",
   fileName: "bon-maart.pdf",
-  candidate: { invoiceId: "inv-14", invoiceNumber: "F-2026-14", vendor: "Jansen Groothandel" },
+  candidate: {
+    invoiceId: "inv-14", invoiceNumber: "F-2026-14", vendor: "Jansen Groothandel",
+    // [ONTVANGEN-WAAR] `where` decides which screen the link opens, so a fixture has to state it:
+    // 'books' = status received/paid, which is what /dashboard/incoming/manage loads. Without it
+    // the candidate is `unknown` and gets NO link — which is the correct refusal, not a regression.
+    where: "books",
+  },
 };
 
 test("[ONTVANGEN-BESLUIT] the heading counts, and one is not four", () => {
@@ -353,4 +359,32 @@ test("[ONTVANGEN-WAAR] the shared intake button ends a receive-first handoff as 
   for (const engine of ["setInterval", "EventSource", "WebSocket"]) {
     assert.ok(!bare.includes(engine), `[ONTVANGEN-WAAR] ${engine} in the intake button`);
   }
+});
+
+test("[ONTVANGEN-WAAR] the batch summary makes no blanket claim over its own rows", () => {
+  // The individual row was fixed; the sheet ABOVE the rows still said "{n} verwerkt". So a
+  // three-photo receive-first batch closed with "3 verwerkt" over three lines each reading
+  // "ontvangen → we verwerken dit verder" — the same contradiction as the upload screen, one
+  // surface further along. A heading has nothing to summarise here: the rows say it per file.
+  const btn = readFileSync("src/components/intake/IntakeButton.tsx", "utf8");
+  const bare = btn.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+
+  assert.ok(!bare.includes("int.nVerwerkt"), "the blanket 'verwerkt' heading is still wired up");
+  assert.match(bare, /\{t\('int\.batchKop'\)\}/, "the batch sheet needs a heading that claims nothing");
+
+  // The heading, and the line under it, in every language this screen speaks.
+  for (const loc of ["nl", "ar", "en"] as const) {
+    const tr = translator(loc);
+    for (const key of ["int.batchKop", "int.batchUitleg"] as const) {
+      const text = tr(key);
+      for (const claim of ["verwerkt", "processed", "gelezen", "were read", "المعالَج", "قراءتها"]) {
+        assert.ok(!text.includes(claim),
+          `[${loc}] ${key} claims "${claim}" over rows that may only be received`);
+      }
+    }
+  }
+  assert.equal(translator("nl")("int.batchKop"), "Dit gebeurde met je bestanden");
+
+  // And the per-row wording underneath is still the thing that carries the truth.
+  assert.equal(translator("nl")("int.landed.ontvangen"), "ontvangen → we verwerken dit verder");
 });

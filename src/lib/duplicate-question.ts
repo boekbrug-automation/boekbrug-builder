@@ -32,16 +32,51 @@ export type QuestionsState =
  * interpret. `payment` is `betaalstandVan`'s own answer, `onbekend` included, so a total nobody
  * could read stays a total nobody could read all the way to the screen.
  */
+/**
+ * [ONTVANGEN-WAAR] WHICH SCREEN can actually show this invoice.
+ *
+ * Not a cosmetic label — it decides where the link goes, and the two screens hold disjoint sets:
+ *
+ *   · `/dashboard/incoming`        loads status 'processing' and status 'archived'
+ *   · `/dashboard/incoming/manage` loads status 'received' and 'paid' — `.in('status', […])`
+ *
+ * The hard semantic gate filters on NO status, so its candidate can be any of the four. The panel
+ * linked every one of them to `manage`, which means a question that correctly said «Staat in
+ * Genegeerd» offered, one line below, a link to a screen that cannot contain that invoice. The
+ * owner lands on a list, finds nothing, and the app has just contradicted itself about a document
+ * it is asking them to make a money decision on.
+ *
+ * `unknown` is a real member and produces NO link. A wrong destination is worse than none: it
+ * looks like it worked.
+ */
+export type CandidateWhere = "queue" | "books" | "archived" | "unknown"
+
 export interface CandidateFacts {
   /** total_inc_btw, or null when it could not be read. */
   total: number | null
   payment: Betaalstand
   /** What is still owed. Null when the total could not be read. */
   outstanding: number | null
-  /** The invoice sits in Genegeerd — invisible in every ordinary list. */
-  archived: boolean
+  /** Which screen holds this invoice. `archived` is also what Genegeerd means to the owner. */
+  where: CandidateWhere
   /** accountant_status = 'verwerkt'. Stated, never changed from here. */
   accountantProcessed: boolean
+}
+
+/**
+ * The deep link for a candidate, or null when we cannot name a screen that holds it.
+ *
+ * `/dashboard/incoming?focus=` is the right door for BOTH queue and archived, and needs nothing
+ * new: [ZOEK-LANDT] on that screen already switches to the Genegeerd tab for an archived row,
+ * expands the card, scrolls to it, and says so out loud when the id is on neither list. Which also
+ * settles the Terugzetten gap without a third mutation path in this panel — the restore action
+ * lives on that card, and the owner now arrives at it.
+ */
+export function candidateHref(invoiceId: string, where: CandidateWhere): string | null {
+  const id = encodeURIComponent(invoiceId)
+  if (where === "queue" || where === "archived") return `/dashboard/incoming?focus=${id}`
+  if (where === "books") return `/dashboard/incoming/manage?focus=${id}`
+  return null
 }
 
 /** One open question, as the API hands it over. */
@@ -157,21 +192,42 @@ export function candidateContextLines(t: T, q: DuplicateQuestion): string[] {
 
   // The two facts that change where the invoice IS rather than what the money did, and that the
   // owner cannot discover from the list they are looking at.
-  if (c.archived) lines.push(t("ink.vraag.staatInGenegeerd"))
+  if (c.where === "archived") lines.push(t("ink.vraag.staatInGenegeerd"))
   if (c.accountantProcessed) lines.push(t("ink.vraag.alVerwerkt"))
 
   return lines
 }
 
+/**
+ * The "bekijk de bestaande factuur" link, or none.
+ *
+ * `where` is absent on a question built before this field existed, and unknown is the safe reading
+ * of absent: no link beats a link to a screen that may not hold the row.
+ */
+function linkFor(t: T, q: DuplicateQuestion): { href: string; label: string } | null {
+  if (!q.candidate) return null
+  const href = candidateHref(q.candidate.invoiceId, q.candidate.where ?? "unknown")
+  return href ? { href, label: t("ink.vraag.bekijkBestaande") } : null
+}
+
 export function questionCopy(t: T, q: DuplicateQuestion): QuestionCopy {
-  // [ONTVANGEN-WAAR] A fully settled invoice is not a maybe. "Deze factuur lijkt al te bestaan" is
-  // the right hedge while the money is still open — the reader may be wrong — but once the bill is
-  // demonstrably paid, the softer sentence reads as doubt about a fact we can prove, and doubt is
-  // what makes someone pay twice. Same question, same two answers; a firmer first line.
-  const settled = q.candidate?.payment === "betaald" || q.candidate?.payment === "teveel_betaald"
+  // [ONTVANGEN-WAAR] ONE sentence, for every payment state. This briefly said "Deze factuur staat
+  // al in BoekBrug" when the candidate was settled, and that was wrong in a way worth writing down.
+  //
+  // A paid candidate is not evidence about IDENTITY. It says something about the invoice already in
+  // the books; it says nothing about whether the document just uploaded is that same invoice. The
+  // semantic gate is forceable precisely because its match can be a false positive — that is the
+  // whole reason this question exists — so dropping the hedge turned risk into certainty and
+  // pointed it at the owner's own correct answer ("this really is a different invoice").
+  //
+  // The exact-bytes gate is the one that IS certain, and it never reaches this panel: it answers
+  // 409 synchronously and cannot be forced.
+  //
+  // The warning the settled case deserves is already underneath, in the context: «Betaald ✓».
+  // A fact is a better warning than a firmer adjective.
   return {
     heading: q.fileName,
-    sentence: settled ? t("ink.vraag.dubbelBetaald") : t("ink.vraag.dubbel"),
+    sentence: t("ink.vraag.dubbel"),
     keepLabel: t("ink.vraag.bestaande"),
     // [ONTVANGEN-WAAR] The owner-facing name of the decision, which the durable state keeps
     // calling `add_anyway`. "Toch toevoegen" describes a stubborn click; what the owner is
@@ -180,14 +236,11 @@ export function questionCopy(t: T, q: DuplicateQuestion): QuestionCopy {
     // the moment of choosing. The stored decision is untouched: see duplicate-decision.ts.
     addLabel: t("ink.vraag.andereFactuur"),
     contextLines: candidateContextLines(t, q),
-    candidateLink: q.candidate
-      ? {
-          // The same deep link the notification uses, so "bekijk de bestaande" lands on the row
-          // rather than on a list the owner then has to search.
-          href: `/dashboard/incoming/manage?focus=${q.candidate.invoiceId}`,
-          label: t("ink.vraag.bekijkBestaande"),
-        }
-      : null,
+    // [ONTVANGEN-WAAR] The link follows WHERE the invoice is, not a single hard-coded screen.
+    // This always pointed at /incoming/manage, which loads only 'received' and 'paid' — so a
+    // question that had just said «Staat in Genegeerd» sent the owner to a list that cannot
+    // contain it. No link at all when we cannot name a screen: see candidateHref.
+    candidateLink: linkFor(t, q),
     busyLabel: t("ink.vraag.bezig"),
     failureText: t("ink.vraag.mislukt"),
   }

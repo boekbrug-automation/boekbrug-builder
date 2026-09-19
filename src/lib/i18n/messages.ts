@@ -8881,10 +8881,13 @@ export const MESSAGES = {
     ar: 'أضفت هذا الملف من قبل:',
     en: 'You already added this file before:',
   },
+  // [ONTVANGEN-WAAR] Zei: "…terwijl deze werden gelezen. Dit is waar ze terecht zijn gekomen."
+  // Allebei de helften claimen een afgeronde lezing, en dat is precies wat er bij receive-first
+  // nog niet is. De ene ware zin die overblijft is waarom de eigenaar door kon gaan.
   'int.batchUitleg': {
-    nl: 'Je kon doorgaan met fotograferen terwijl deze werden gelezen. Dit is waar ze terecht zijn gekomen.',
-    ar: 'كان بإمكانك متابعة التصوير أثناء قراءتها. هذا ما آلت إليه.',
-    en: 'You could keep photographing while these were read. This is where they ended up.',
+    nl: 'Je kon doorgaan met fotograferen. Per bestand zie je hieronder wat er is gebeurd.',
+    ar: 'كان بإمكانك متابعة التصوير. أدناه ما جرى مع كل ملف.',
+    en: 'You could keep photographing. Below is what happened to each file.',
   },
   'int.bestaatAl': {
     nl: 'Deze factuur bestaat al',
@@ -9033,10 +9036,15 @@ export const MESSAGES = {
     ar: 'صوّر أو اختر كل صفحة من الفاتورة نفسها. سنجمعها في فاتورة واحدة.',
     en: 'Photograph or choose each page of the same invoice. We merge them into one invoice.',
   },
-  'int.nVerwerkt': {
-    nl: '{n} verwerkt',
-    ar: 'عدد المعالَج: {n}',
-    en: '{n} processed',
+  // [ONTVANGEN-WAAR] Was 'int.nVerwerkt' — «{n} verwerkt». Eén blanket-uitspraak over een lijst
+  // waarin de regels onder elkaar heel verschillende dingen zeggen, en sinds receive-first ook
+  // «ontvangen → we verwerken dit verder». Drie regels die zeggen dat het werk nog loopt, onder
+  // een kop die zegt dat het klaar is — dezelfde tegenspraak als op het uploadscherm, op een
+  // tweede plek. De kop hoeft niets samen te vatten: de regels eronder doen dat al, per bestand.
+  'int.batchKop': {
+    nl: 'Dit gebeurde met je bestanden',
+    ar: 'هذا ما جرى مع ملفاتك',
+    en: 'This is what happened to your files',
   },
   'int.opgeslagen': {
     nl: 'Opgeslagen in je bestanden',
@@ -13520,14 +13528,7 @@ export const MESSAGES = {
     ar: 'يبدو أن هذه الفاتورة موجودة بالفعل.',
     en: 'This invoice appears to already exist.',
   },
-  // [ONTVANGEN-WAAR] Een factuur die aantoonbaar betaald is, is geen "lijkt". Zachter formuleren
-  // dan we kunnen bewijzen is precies hoe iemand een rekening twee keer voldoet.
-  'ink.vraag.dubbelBetaald': {
-    nl: 'Deze factuur staat al in BoekBrug.',
-    ar: 'هذه الفاتورة موجودة بالفعل في BoekBrug.',
-    en: 'This invoice is already in BoekBrug.',
-  },
-  'ink.vraag.bestaande': { nl: 'Bestaande houden', ar: 'الاحتفاظ بالموجودة', en: 'Keep the existing one' },
+  'ink.vraag.bestaande':{ nl: 'Bestaande houden', ar: 'الاحتفاظ بالموجودة', en: 'Keep the existing one' },
   // [ONTVANGEN-WAAR] Was 'Toch toevoegen'. Dat beschrijft een klik; dit beschrijft de bewering die
   // de eigenaar doet, en dát is wat een tweede kostenpost en een tweede voorbelasting rechtvaardigt.
   // De opgeslagen beslissing heet nog steeds `add_anyway` — die staat in de database en verandert niet.

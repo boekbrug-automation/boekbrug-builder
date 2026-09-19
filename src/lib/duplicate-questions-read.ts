@@ -15,7 +15,7 @@
 // The question is the primary truth. The candidate's number and supplier are what we print beside
 // it. One of those may be missing; the other may not.
 
-import type { DuplicateQuestion, CandidateFacts } from "@/lib/duplicate-question"
+import type { DuplicateQuestion, CandidateFacts, CandidateWhere } from "@/lib/duplicate-question"
 import { betaalstandVan } from "@/lib/factuurstaat"
 
 /** One `documents` row, as the question list selects it. */
@@ -151,12 +151,34 @@ function candidateFactsOf(row: CandidateRow): CandidateFacts {
       : null,
     payment: stand,
     outstanding: openstaand,
-    // [DUP-ARCHIVED] The owner cannot see this invoice in any ordinary list — it is in Genegeerd.
-    // Saying "this invoice already exists" while pointing at something invisible is the complaint
-    // that produced archivedDuplicateMessage on the synchronous road; the question panel has to
-    // name it too, or it asks about a thing the owner cannot find.
-    archived: row.status === "archived",
+    where: whereOf(row.status),
     // The accountant's lock. Not changeable from this panel — this only says that it is there.
     accountantProcessed: row.accountant_status === "verwerkt",
+  }
+}
+
+/**
+ * [ONTVANGEN-WAAR] Which screen holds an invoice with this status.
+ *
+ * Read off the two screens rather than invented here:
+ *
+ *   `/dashboard/incoming`        → `.eq("status","archived")` and `.eq("status","processing")`
+ *   `/dashboard/incoming/manage` → `.in('status', ['received','paid'])`
+ *
+ * The sets are disjoint and the hard semantic gate filters on no status at all, so all four are
+ * reachable as a candidate. Anything outside them is `unknown` on purpose: a status this function
+ * has not been taught about must produce NO link rather than a guess, because a link to the wrong
+ * screen is indistinguishable from a working one until the owner is already lost.
+ *
+ * [DUP-ARCHIVED] `archived` doubles as what the owner is told — the invoice is in Genegeerd, which
+ * is why "deze factuur bestaat al" was useless on its own: it named something invisible.
+ */
+function whereOf(status: string | null): CandidateWhere {
+  switch (status) {
+    case "processing": return "queue"
+    case "archived": return "archived"
+    case "received":
+    case "paid": return "books"
+    default: return "unknown"
   }
 }

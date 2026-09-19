@@ -870,7 +870,11 @@ export default function IntakeButton({
             style={{ background: '#fff', borderRadius: '20px 20px 0 0', padding: '22px 20px', paddingBottom: sheetPaddingBottom(22), width: '100%', maxWidth: 460, maxHeight: '80vh', overflowY: 'auto' }}
           >
             <p style={{ fontSize: 17, fontWeight: 700, color: '#202124', margin: 0 }}>
-              {t('int.nVerwerkt', { n: batchSummary.length })}
+              {/* [ONTVANGEN-WAAR] Neutraal, en met opzet zonder samenvattend oordeel: de regels
+                  hieronder zeggen per bestand wat er is gebeurd — «factuur → …», «bank → …»,
+                  «ontvangen → we verwerken dit verder». Een kop die daar één woord overheen legt
+                  kan alleen maar minder waar zijn dan de lijst die hij samenvat. */}
+              {t('int.batchKop')}
             </p>
             <p style={{ fontSize: 13, color: '#5F6368', margin: '4px 0 14px', lineHeight: 1.45 }}>
               {t('int.batchUitleg')}
