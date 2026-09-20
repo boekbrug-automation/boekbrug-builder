@@ -22,7 +22,7 @@
 -- The acl_md5 column is forensic only: it changes when ACL entries are reordered, which is not a
 -- privilege change. Never read it as pass or fail.
 --
--- Registry at generation time: 52 live functions, 40 UNKNOWN decisions, 22 accepted deviations.
+-- Registry at generation time: 52 live functions, 33 UNKNOWN decisions, 29 accepted deviations.
 
 -- ═══ 1. PER FUNCTION: registry intent ↔ effective privileges ═══════════════════════════════════
 
@@ -35,7 +35,7 @@ WITH intent(sig, kind, status, definer, i_anon, i_authenticated, i_service_role,
   ('public.move_invoice_payment(uuid, uuid, uuid)', 'client_rpc', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.next_invoice_seq(uuid, integer, text)', 'client_rpc', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.is_my_accountant_client(uuid)', 'rls_helper', 'live', true, 'ALLOW', 'ALLOW', 'ALLOW', 'UNKNOWN', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
-  ('public.acting_for_owner()', 'rls_helper', 'live', true, 'UNKNOWN', 'ALLOW', 'ALLOW', 'UNKNOWN', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
+  ('public.acting_for_owner()', 'rls_helper', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; anon EXECUTE is default-grant residue, not a policy dependency; left in place until a separate hardening step', NULL, NULL, 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; the PUBLIC entry is the CREATE-time default, not a policy dependency; left in place until a separate hardening step', ARRAY[]::text[]),
   ('public.audit_row_is_about_me(text, uuid, uuid)', 'rls_helper', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.has_active_confirm_mandate(uuid, uuid)', 'rls_helper', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.has_active_invoice_mandate(uuid, uuid)', 'rls_helper', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
@@ -62,13 +62,13 @@ WITH intent(sig, kind, status, definer, i_anon, i_authenticated, i_service_role,
   ('public.accountant_status_door_only()', 'trigger', 'live', true, 'DENY', 'DENY', 'UNKNOWN', 'UNKNOWN', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', NULL, NULL, ARRAY[]::text[]),
   ('public.grant_welcome_plus()', 'trigger', 'live', true, 'DENY', 'DENY', 'UNKNOWN', 'UNKNOWN', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', NULL, NULL, ARRAY[]::text[]),
   ('public.reverse_invoice_payment(uuid, uuid)', 'server_rpc', 'live', true, 'DENY', 'ALLOW', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
-  ('public.answer_mollie_refund(uuid, text, text, numeric)', 'server_rpc', 'live', true, 'DENY', 'UNKNOWN', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
+  ('public.answer_mollie_refund(uuid, text, text, numeric)', 'server_rpc', 'live', true, 'DENY', 'DENY', 'ALLOW', 'DENY', NULL, 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; authenticated EXECUTE is the creation-time named default grant that REVOKE FROM PUBLIC never touched; no caller uses it; left in place until a separate hardening step', NULL, NULL, ARRAY[]::text[]),
   ('public.search_clients_fuzzy(text)', 'invoker_rpc', 'live', false, 'DENY', 'ALLOW', 'ALLOW', 'UNKNOWN', 'PUBLIC default entry never revoked; later hardening, not this PR', NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.search_documents_fuzzy(text)', 'invoker_rpc', 'live', false, 'DENY', 'ALLOW', 'ALLOW', 'UNKNOWN', 'PUBLIC default entry never revoked; later hardening, not this PR', NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.search_folders_fuzzy(text)', 'invoker_rpc', 'live', false, 'DENY', 'ALLOW', 'ALLOW', 'UNKNOWN', 'PUBLIC default entry never revoked; later hardening, not this PR', NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.search_invoices_fuzzy(text)', 'invoker_rpc', 'live', false, 'DENY', 'ALLOW', 'ALLOW', 'UNKNOWN', 'PUBLIC default entry never revoked; later hardening, not this PR', NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.mollie_refund_reason_of(text)', 'internal', 'live', false, 'DENY', 'DENY', 'ALLOW', 'DENY', 'original migration intended service_role only; anon/authenticated kept by the default grant; no change in this PR', 'original migration intended service_role only; no change in this PR', NULL, NULL, ARRAY[]::text[]),
-  ('public.get_accountant_for_zzper(uuid)', 'invoker_rpc', 'live', false, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
+  ('public.get_accountant_for_zzper(uuid)', 'obsolete', 'live', false, 'DENY', 'DENY', 'DENY', 'DENY', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP', ARRAY[]::text[]),
   ('public.assert_paid_is_backed()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'UNKNOWN', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', NULL, NULL, ARRAY[]::text[]),
   ('public.documents_search_vector_update()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'UNKNOWN', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', NULL, NULL, ARRAY[]::text[]),
   ('public.prevent_billing_self_grant()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'UNKNOWN', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)', NULL, NULL, ARRAY[]::text[]),
@@ -281,6 +281,7 @@ findings AS (
       ('public.confirm_bank_payment(uuid, uuid, uuid, date)', NULL),
       ('public.move_invoice_payment(uuid, uuid, uuid)', NULL),
       ('public.next_invoice_seq(uuid, integer, text)', NULL),
+      ('public.acting_for_owner()', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; anon EXECUTE is default-grant residue, not a policy dependency; left in place until a separate hardening step'),
       ('public.audit_row_is_about_me(text, uuid, uuid)', NULL),
       ('public.has_active_confirm_mandate(uuid, uuid)', NULL),
       ('public.has_active_invoice_mandate(uuid, uuid)', NULL),
@@ -313,6 +314,7 @@ findings AS (
       ('public.search_folders_fuzzy(text)', 'PUBLIC default entry never revoked; later hardening, not this PR'),
       ('public.search_invoices_fuzzy(text)', 'PUBLIC default entry never revoked; later hardening, not this PR'),
       ('public.mollie_refund_reason_of(text)', 'original migration intended service_role only; anon/authenticated kept by the default grant; no change in this PR'),
+      ('public.get_accountant_for_zzper(uuid)', 'resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP'),
       ('public.assert_paid_is_backed()', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)'),
       ('public.documents_search_vector_update()', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)'),
       ('public.prevent_billing_self_grant()', 'trigger functions need no EXECUTE; the anon grant is inert but not yet removed (later hardening pass, not this PR)'),
@@ -534,7 +536,7 @@ acknowledged(version, name, repo_file, functions, reason) AS (VALUES
   ('20260820203635', 'profile_vak', 'profile_vak.sql', ARRAY['handle_new_user']::text[], 'same-named repo file; recorded here because the production row also rewrites handle_new_user'),
   ('20260831194434', 'accountant_discount_guard', 'accountant_discount_guard.sql', ARRAY['prevent_accountant_amount_changes']::text[], 'same-named repo file'),
   ('20260901232158', 'rls_baseline_snapshot_before_initplan', NULL, ARRAY[]::text[], 'snapshot of pg_policies into rls_backup.policies_20260901 before the initplan rewrite, with REVOKEs on that schema and table; creates no function, no repo file'),
-  ('20260912162856', 'anon_owner_oracle_revoke', NULL, ARRAY[]::text[], 'the [ANON-ORAKEL] incident: revoked anon from is_my_accountant_client/acting_for_owner and broke anonymous reads; rolled back by the three rows that follow'),
+  ('20260912162856', 'anon_owner_oracle_revoke', NULL, ARRAY[]::text[], 'the [ANON-ORAKEL] incident: revoked anon from is_my_accountant_client and acting_for_owner together and broke anonymous reads; the error came from is_my_accountant_client, whose policies are TO public — acting_for_owner''s are all TO authenticated and never needed anon; rolled back by the three rows that follow'),
   ('20260912162934', 'anon_owner_oracle_revoke_from_public', NULL, ARRAY[]::text[], 'second step of the same incident'),
   ('20260912163155', 'anon_owner_oracle_revoke_rollback', NULL, ARRAY[]::text[], 'rollback of the incident: anon re-granted'),
   ('20260912163226', 'anon_owner_oracle_restore_public_grant', NULL, ARRAY[]::text[], 'rollback of the incident: PUBLIC re-granted'),

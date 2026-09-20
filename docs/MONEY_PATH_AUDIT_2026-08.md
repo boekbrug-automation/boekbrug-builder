@@ -1039,7 +1039,11 @@ It looks like the same shape and it is not: four `{public}` policies call it —
 `documents_accountant_read` — so an anonymous `SELECT` on `invoices` or `documents` **evaluates it**.
 Revoking would have turned those reads into a permission error instead of an empty result. It is
 also not an oracle: it reads `auth.uid()`, which is NULL for a stranger, so it always answers false.
-`acting_for_owner()` is the same case, used by seven policies.
+`acting_for_owner()` was left alone at the same time. *(Correction, 2026-09-20: it is **not** the
+same case. Its seven policies are all `{authenticated}`, in the live catalog and in the 1 September
+snapshot, so anon never evaluates it and its anon/PUBLIC grant is default residue rather than a
+policy dependency. `scripts/privilege-registry.ts` records anon and PUBLIC as DENY for it, with the
+current grant as an accepted deviation until a separate, approved production step.)*
 
 Proven before applying, in a transaction that always aborts: the revoke flips anon's access from
 `true` to `false`, signed-in access stays `true`, `is_my_accountant_client` keeps its grant — and an

@@ -589,6 +589,11 @@ meer leest.
   boolean of één uuid terug. Ze worden samen in **19 RLS-policies** aangeroepen, en een policy
   draait als de bevragende rol — `anon` het recht afnemen zou dus LEZEN breken op de publieke
   pagina's in plaats van schrijven dichtzetten. Dat is de verkeerde kant op.
+  *(Correction, 2026-09-20: this held for `is_my_accountant_client` only, whose policies are
+  `TO public`. The three mandate/audit helpers were closed to anon by `anon_mandate_oracle_revoke.sql`
+  without breaking a read, and `acting_for_owner` is used solely by `TO authenticated` policies, so
+  anon never evaluates it; `scripts/privilege-registry.ts` records anon and PUBLIC as DENY for it,
+  with the current grant as an accepted deviation until a separate, approved production step.)*
 - **`rls_enabled_no_policy` op `ai_spend_daily`, `cron_runs`, `email_skipped_attachments`** — RLS
   aan met nul policies betekent **alles geweigerd** voor `anon` en `authenticated`; alleen
   `service_role` komt erlangs, en dat is precies wat deze drie tabellen nodig hebben. De linter
