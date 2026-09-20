@@ -358,6 +358,7 @@ WITH repo(name) AS (VALUES
   ('accountant_discount_guard'),
   ('accountant_guard_fixed_search_path'),
   ('accountant_invoice_mandate'),
+  ('accountant_invoice_question_door_only'),
   ('accountant_invoice_status_sync'),
   ('accountant_subject_status'),
   ('accountant_vat_deduction_guard'),

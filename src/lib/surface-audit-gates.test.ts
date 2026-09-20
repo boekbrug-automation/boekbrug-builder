@@ -367,7 +367,10 @@ test("[READINESS-DEGRADE] the readiness route classifies every fail-soft read, a
   assert.doesNotMatch(route, /\} catch \{\s*\n\s*\/\*/, "a bare catch with a comment is a read that falls to its zero");
   assert.doesNotMatch(route, /\.catch\(\(\) => \[\]\)/, "a swallowed read on the verdict path");
   assert.doesNotMatch(route, /const \{ data: korProfile \} = await/, "the KOR flag is read without its error again — a failed read is not 'KOR off'");
-  assert.match(route, /if \(korErr && !schemaAbsent\(korErr, "kor_active"\)\) \{\s*\n\s*throw/, "a failed KOR read must throw (essential), unless the column is not there yet");
+  assert.match(route, /if \(korErr\) \{\s*\n\s*throw/, "a failed KOR read must throw (essential) — an absent column included: it does not prove KOR is off");
+  assert.doesNotMatch(route, /schemaAbsent\(korErr/, "the KOR read grew a class-C exception again");
+  assert.doesNotMatch(route, /if \(!schemaAbsent\(e\)\) unread\("bank_(continuity|coverage)"/, "an absent evidence table is read as 'no gaps' again — that is class B");
+  assert.match(route, /function schemaAbsent\(e: unknown, column: "auto_match_reason" \| "ignore_reason"\)/, "class C must stay limited to the two columns whose absence proves non-applicability");
   assert.match(route, /if \(periodsErr\) throw periodsErr;/, "the continuity read's error value is thrown away again");
   assert.match(route, /if \(overlapErr\) throw overlapErr;/, "the coverage read's error value is thrown away again");
   assert.match(route, /readExcludedBankIdsChecked\(/, "the excluded-lines read no longer says whether it happened");

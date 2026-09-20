@@ -240,3 +240,25 @@ ALTER TABLE public.invoice_lines ENABLE ROW LEVEL SECURITY;
 GRANT USAGE ON SCHEMA public, auth TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO authenticated;
+
+-- ═══ [VRAAG-SYNC] What accountant_write_holes.sql needs to exist ═══════════════════════════════
+-- Added for accountant_invoice_question_sync.test.sql, which applies the PRODUCTION write policy on
+-- accountant_subject_status (acc_status_owner_write, from accountant_write_holes.sql) before the
+-- migration that restricts it to document rows — so the proof that an accountant session cannot
+-- write an invoice question row runs against the policy chain production actually has. Two things
+-- that policy file touches predate this repo, and are stubbed to exactly what it reads:
+--
+--   · invoices.shared — the policy's invoice branch reads it, and the file adds a partial index on it;
+--   · is_my_accountant_client(uuid) — the dashboard-era SECURITY DEFINER helper the policies call
+--     ("is the caller a confirmed accountant of this user"; see scripts/privilege-registry.ts).
+--     Stubbed to the join it answers. The fixture's link table carries no confirmation column, so
+--     a row IS a confirmed link here — which is the case every test in this file sets up.
+ALTER TABLE public.invoices ADD COLUMN shared boolean NOT NULL DEFAULT false;
+
+CREATE OR REPLACE FUNCTION public.is_my_accountant_client(p_user_id uuid) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.accountant_clients ac
+    WHERE ac.accountant_id = auth.uid() AND ac.zzper_id = p_user_id
+  )
+$$;

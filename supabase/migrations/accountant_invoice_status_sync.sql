@@ -28,6 +28,8 @@
 --     addressed by (accountant_id, 'invoice', subject_id);
 --   · the client never calls this: EXECUTE is revoked from PUBLIC, anon and authenticated. The
 --     client answers through /api/messages; that path does not exist in this function.
+--   · no session writes an invoice question row around it either — once the companion policy
+--     migration is applied (see THE OTHER DOOR below).
 --
 -- WHO RUNS IT
 --
@@ -35,6 +37,17 @@
 -- caller's rights and never lends anyone else's). The `invoices_accountant_door` trigger keeps
 -- refusing every session write of `accountant_status`; the door's checks through the SESSION
 -- client (who is calling, may they see this invoice) stay in front of this call, unchanged.
+--
+-- THE OTHER DOOR — read this before calling the invariant complete
+--
+-- This file makes the function the one APPLICATION write path. It does not, on its own, make it
+-- the one write path: the RLS policy acc_status_owner_write (accountant_write_holes.sql) still
+-- lets an authenticated accountant session insert, update, delete or move an INVOICE question
+-- row directly, with the anon key, without moving invoices.accountant_status in the same
+-- transaction — the split truth this function exists to remove. The companion migration
+-- accountant_invoice_question_door_only.sql restricts that policy to document rows. Apply BOTH;
+-- with only this file applied, the invariant holds for the application's routes and not for the
+-- Data API. The seam test accountant_invoice_question_sync.test.sql proves the pair together.
 --
 -- No privilege-default or SECURITY DEFINER work: this file creates one INVOKER function and
 -- decides its four EXECUTE paths explicitly, as scripts/privilege-registry.ts requires.

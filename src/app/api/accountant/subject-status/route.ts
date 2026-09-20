@@ -15,8 +15,10 @@
 //   2. Document must be readable by the caller (documents_accountant_read only
 //      returns shared docs of linked clients) → null = 403.
 //   3. Accountant↔client link (accountant_clients) must exist → else 403.
-//   4. UPSERT via the ACCOUNTANT SESSION (RLS acc_status_owner_all: accountant_id
-//      = auth.uid()) — no service_role needed for the status write itself.
+//   4. UPSERT via the ACCOUNTANT SESSION (RLS acc_status_owner_write: accountant_id
+//      = auth.uid(), linked client, and — since accountant_invoice_question_door_only.sql —
+//      subject_type = 'document' only) — no service_role needed for the status write itself.
+//      Invoice rows have no session write path at all; they move through the door (VR-01).
 //   5. status==='vraag' → notify the client (service_role, notifications has no
 //      authenticated INSERT policy). Best-effort: never fails the status write.
 

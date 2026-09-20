@@ -269,20 +269,36 @@ test("[READINESS-DEGRADE] B · with a till, a failed terminal witness is not 'no
 const absentColumn = (column: string) => ({ message: `column bank_transactions.${column} does not exist`, code: "42703" });
 const absentTable = { message: 'relation "public.bank_statement_periods" does not exist', code: "42P01" };
 
-test("[READINESS-DEGRADE] C · a column or table a migration has not created yet leaves the verdict ready", async () => {
+test("[READINESS-DEGRADE] C · a column whose absence proves non-applicability leaves the verdict ready", async () => {
+  // Only these two: nothing can have been booked under auto_match_reason, and nothing excluded
+  // under ignore_reason, before those columns existed. The zero is the truth there.
   const restore = quiet();
   try {
     for (const [name, failures] of [
       ["auto_match_reason absent", [{ table: "bank_transactions", when: (q: Query) => q.filters.some((f) => f.col === "auto_match_reason"), error: absentColumn("auto_match_reason") }]],
       ["ignore_reason absent", [{ table: "bank_transactions", when: (q: Query) => /ignore_reason/.test(q.select), error: absentColumn("ignore_reason") }]],
-      ["bank_statement_periods absent", [{ table: "bank_statement_periods", error: absentTable }]],
-      ["kor_active absent", [{ table: "profiles", when: (q: Query) => /kor_active/.test(q.select), error: { message: "column profiles.kor_active does not exist", code: "42703" } }]],
     ] as const) {
       const { status, body } = await run({ failures: [...failures] });
       assert.equal(status, 200, name);
       assert.equal(body.report.ready, true, `${name}: pre-migration, the zero is the truth`);
       assert.equal(body.report.verified, true, name);
     }
+  } finally { restore(); }
+});
+
+test("[READINESS-DEGRADE] schema absence that proves nothing is NOT class C", async () => {
+  // An absent evidence table does not mean the statements connect — they may have been imported
+  // before the table existed. Class B: the page stays up, the verdict is incomplete, never green.
+  await expectIncomplete("bank_statement_periods absent", "bank_continuity", [{ table: "bank_statement_periods", error: absentTable }]);
+  await expectIncomplete("bank_statement_periods absent (coverage)", "bank_coverage", [{ table: "bank_statement_periods", error: absentTable }]);
+  // An absent kor_active column does not mean KOR is off — this deployment cannot determine the
+  // KOR state, and the KOR state decides the concept's figures. Class A: no verdict at all.
+  const restore = quiet();
+  try {
+    const { status, body } = await run({ failures: [{ table: "profiles", when: (q: Query) => /kor_active/.test(q.select), error: { message: "column profiles.kor_active does not exist", code: "42703" } }] });
+    assert.equal(status, 503, JSON.stringify(body));
+    assert.equal(body.error, "readiness_unavailable");
+    assert.equal(body.report, undefined, "no verdict travels with a refusal");
   } finally { restore(); }
 });
 

@@ -20,10 +20,15 @@
 //       is never 100. A failed read of a review count is not zero reviews; a failed continuity
 //       read is not "no gaps"; a failed regime read is not "no regimes". Each such site says
 //       `unread(...)` instead of falling to its zero.
-//   C · NOT APPLICABLE — a column or table a hand-applied migration has not created yet
-//       (schemaAbsent). There, the zero IS the truth: nothing can have been written under a column
-//       that does not exist. Only a recognised absent-column/-relation error counts as C; a
-//       network or permission error never does.
+//   C · NOT APPLICABLE — a column a hand-applied migration has not created yet (schemaAbsent),
+//       and ONLY where absence proves genuine non-applicability: nothing can have been booked
+//       under `auto_match_reason`, and nothing excluded under `ignore_reason`, before those columns
+//       existed — the zero is the truth there. Absence is NOT class C where it proves nothing:
+//       a missing `bank_statement_periods` table does not mean the statements connect (they may
+//       have been imported before the evidence table existed), so that stays class B; and a
+//       missing `kor_active` column does not mean KOR is off, it means this deployment cannot
+//       determine the KOR state — class A, no verdict. Only a recognised absent-column error
+//       counts as C; a network or permission error never does.
 //
 // The three are decided per read at the read, never by a catch-all. See readiness.ts for what
 // buildReadiness does with `unverified`, and readiness-route.test.ts for each read failing alone.
@@ -84,14 +89,13 @@ function shiftDays(iso: string, days: number): string {
 const EU_VAT = /^(AT|BE|BG|CY|CZ|DE|DK|EE|ES|FI|FR|GR|EL|HR|HU|IE|IT|LT|LU|LV|MT|PL|PT|RO|SE|SI|SK)/i;
 
 /**
- * [READINESS-DEGRADE] Class C: the schema does not have this column or table yet (hand-applied
- * migration lag). 42P01 is undefined_table; the rest is columnIsAbsent's own list. Anything else —
- * a timeout, a permission refusal, a broken connection — is a failed read, never a missing schema.
+ * [READINESS-DEGRADE] Class C: the schema does not have this COLUMN yet (hand-applied migration
+ * lag), for the two columns whose absence proves non-applicability — see the header. Anything
+ * else — a timeout, a permission refusal, a broken connection, or a column named elsewhere — is a
+ * failed read, never a missing schema.
  */
-function schemaAbsent(e: unknown, column?: string): boolean {
+function schemaAbsent(e: unknown, column: "auto_match_reason" | "ignore_reason"): boolean {
   const err = (e && typeof e === "object" ? e : { message: String(e) }) as { code?: string | null; message?: string | null };
-  if (err.code === "42P01" || err.code === "PGRST205") return true;
-  if (/relation .* does not exist|could not find the table/i.test(err.message ?? "")) return true;
   return columnIsAbsent(err, column);
 }
 
@@ -270,9 +274,10 @@ async function readinessVerdict(req: NextRequest, deps: ReadinessDeps): Promise<
   // er NIET is: januari en maart geüpload, februari vergeten — beide bestanden kloppen intern, er
   // zijn transacties genoeg, en toch mist er een maand aan betalingen. We halen de periodes op met
   // een marge van een maand rond het kwartaal (het gat zit vaak op de grens) en melden alleen de
-  // gaten die het kwartaal zelf raken. Class C als de tabel nog niet bestaat (migratie niet
-  // gedraaid): dan is er niets om aan te sluiten. Elke andere storing is class B — een mislukte
-  // aansluitingscontrole is niet "geen gaten", en het oordeel zegt dat hij niet is uitgevoerd.
+  // gaten die het kwartaal zelf raken. Class B, ook als de tabel nog niet bestaat: afschriften
+  // kunnen zijn ingelezen vóór deze bewijstabel bestond, dus "geen tabel" bewijst niet dat ze op
+  // elkaar aansluiten — alleen dat het niet te controleren was. Een mislukte aansluitingscontrole
+  // is niet "geen gaten", en het oordeel zegt dat hij niet is uitgevoerd.
   let bankGapMessages: string[] = [];
   try {
     const marginStart = new Date(Date.parse(`${start}T00:00:00Z`) - 45 * 86_400_000).toISOString().slice(0, 10);
@@ -309,7 +314,7 @@ async function readinessVerdict(req: NextRequest, deps: ReadinessDeps): Promise<
         .slice(0, 5);
     }
   } catch (e) {
-    if (!schemaAbsent(e)) unread("bank_continuity", "de aansluiting tussen je bankafschriften", e);
+    unread("bank_continuity", "de aansluiting tussen je bankafschriften", e);
   }
 
   // [DEKKING] En de vraag waar de controle hierboven structureel blind voor is: beslaan de
@@ -360,8 +365,9 @@ async function readinessVerdict(req: NextRequest, deps: ReadinessDeps): Promise<
       ].slice(0, 5);
     }
   } catch (e) {
-    // Class B, same reason: a coverage check that did not run is not "the quarter is covered".
-    if (!schemaAbsent(e)) unread("bank_coverage", "de dekking van het kwartaal door je bankafschriften", e);
+    // Class B, same reason — and an absent evidence table is the same class: a coverage check
+    // that did not run is not "the quarter is covered".
+    unread("bank_coverage", "de dekking van het kwartaal door je bankafschriften", e);
   }
 
   // ── 3) Invoices + cash for the VAT engine (same inputs as /api/aangifte) ──
@@ -768,16 +774,19 @@ async function readinessVerdict(req: NextRequest, deps: ReadinessDeps): Promise<
   // figures this route exposes — so the two concepts are identical here, and rebuilding the ICP
   // just to reach the same numbers would be work that proves nothing.
   // [DEPLOY-SAFE] kor_active is fetched in its OWN query — never folded into the kas_opening_balance
-  // select above — so if the regime_kor.sql migration lags this deploy, a missing column only nulls
-  // korActive (→ no flags), and can NEVER collaterally drop the opening balance (a wrong number).
+  // select above — so if the regime_kor.sql migration lags this deploy, a missing column can NEVER
+  // collaterally drop the opening balance (a wrong number). What it does instead is decided below:
+  // it withholds the verdict.
   // [KOR-AANGIFTE-UIT] Read BEFORE the concept: under the KOR the concept owes only what was
   // shifted to the owner, and this route hands its 5a/5b/5g to the readiness board.
-  // [READINESS-DEGRADE] Class A: the KOR flag decides the concept's figures and the clawback, so a
-  // read that failed is not "KOR off" — it is no verdict (the throw becomes a 503 above). Class C
-  // only when the column itself is not there yet, where off is the truth.
+  // [READINESS-DEGRADE] Class A, with no class-C exception: the KOR flag decides the concept's
+  // figures and the clawback, so a read that failed is not "KOR off" — it is no verdict (the throw
+  // becomes a 503 above). An absent column is the same case, not a smaller one: it does not prove
+  // KOR is off, it proves this deployment cannot determine the KOR state — exactly the way an
+  // undeterminable exemption regime is surfaced rather than read as inactive.
   const { data: korProfile, error: korErr } = await pipeline
     .from("profiles").select("kor_active").eq("id", ownerId).maybeSingle();
-  if (korErr && !schemaAbsent(korErr, "kor_active")) {
+  if (korErr) {
     throw new Error(`[READINESS-DEGRADE] kor_active read failed: ${korErr.message}`);
   }
   const korActive = !!(korProfile as { kor_active?: boolean | null } | null)?.kor_active;

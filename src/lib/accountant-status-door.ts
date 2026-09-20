@@ -25,7 +25,10 @@
 // The database refuses this column from every session client (`invoices_accountant_door`), and
 // the function's EXECUTE is revoked from anon and authenticated. So the browser cannot set a
 // status, cannot forge who set it, and cannot resolve a question — the client answers through
-// /api/messages, and that path does not exist here.
+// /api/messages, and that path does not exist here. And since
+// accountant_invoice_question_door_only.sql the RLS write policy on accountant_subject_status is
+// document-only, so an accountant session cannot write an invoice question row AROUND this door
+// either: the two facts have one writer, in SQL, and this file is its one caller.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
