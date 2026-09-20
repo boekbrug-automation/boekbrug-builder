@@ -210,7 +210,11 @@ test("[PRIVILEGE-REGISTRY] the settled decisions stay settled", () => {
   };
   assert.deepEqual(by("public.cleanup_old_rate_limits()").intent, { anon: "DENY", authenticated: "DENY", serviceRole: "ALLOW", public: "DENY" });
   assert.deepEqual(by("public.reverse_invoice_payment(uuid, uuid)").intent, { anon: "DENY", authenticated: "ALLOW", serviceRole: "ALLOW", public: "DENY" });
-  assert.deepEqual(by("public.answer_mollie_refund(uuid, text, text, numeric)").intent, { anon: "DENY", authenticated: "UNKNOWN", serviceRole: "ALLOW", public: "DENY" });
+  // [PRIVILEGE-BEWIJS] authenticated resolved to DENY by the 2026-09-20 evidence pass: the creation
+  // migration granted service_role only; the only known caller (PR #344) runs as service_role.
+  const answer = by("public.answer_mollie_refund(uuid, text, text, numeric)");
+  assert.deepEqual(answer.intent, { anon: "DENY", authenticated: "DENY", serviceRole: "ALLOW", public: "DENY" });
+  assert.ok(answer.acceptedDeviations?.authenticated, "authenticated still has EXECUTE in production; that must be recorded, not hidden, until a separate hardening step");
   assert.deepEqual(by("public.mollie_refund_reason_of(text)").intent, { anon: "DENY", authenticated: "DENY", serviceRole: "ALLOW", public: "DENY" });
   for (const t of ["clients", "documents", "folders", "invoices"]) {
     const e = by(`public.search_${t}_fuzzy(text)`);
@@ -218,20 +222,31 @@ test("[PRIVILEGE-REGISTRY] the settled decisions stay settled", () => {
     assert.equal(e.intent.authenticated, "ALLOW");
     assert.equal(e.intent.serviceRole, "ALLOW");
   }
+  // [PRIVILEGE-BEWIJS] acting_for_owner: anon and PUBLIC resolved to DENY. Every policy that calls
+  // it is TO authenticated (live catalog and the 1 September snapshot), so anon never evaluates it.
+  // The two are NOT the same case: is_my_accountant_client DOES sit in TO public policies.
   const acting = by("public.acting_for_owner()");
-  assert.equal(acting.intent.anon, "UNKNOWN");
-  assert.equal(acting.intent.authenticated, "ALLOW");
-  assert.equal(acting.intent.serviceRole, "ALLOW");
+  assert.deepEqual(acting.intent, { anon: "DENY", authenticated: "ALLOW", serviceRole: "ALLOW", public: "DENY" });
+  assert.ok(acting.acceptedDeviations?.anon && acting.acceptedDeviations?.public,
+    "anon and PUBLIC still have EXECUTE in production; recorded as deviations until a separate hardening step");
   const client = by("public.is_my_accountant_client(uuid)");
   assert.equal(client.intent.anon, "ALLOW", "five policies are TO public; revoking anon broke production once");
-  assert.deepEqual(by("public.get_accountant_for_zzper(uuid)").intent, { anon: "UNKNOWN", authenticated: "UNKNOWN", serviceRole: "UNKNOWN", public: "UNKNOWN" });
+  // [PRIVILEGE-BEWIJS] get_accountant_for_zzper: obsolete / no live caller found. DENY for every
+  // role is the boundary; the four current ALLOWs are legacy default exposure, each recorded.
+  const zzper = by("public.get_accountant_for_zzper(uuid)");
+  assert.equal(zzper.kind, "obsolete");
+  assert.deepEqual(zzper.intent, { anon: "DENY", authenticated: "DENY", serviceRole: "DENY", public: "DENY" });
+  assert.deepEqual(Object.keys(zzper.acceptedDeviations ?? {}).sort(), ["anon", "authenticated", "public", "serviceRole"]);
 });
 
 test("[PRIVILEGE-REGISTRY] the counts are pinned, so changing an UNKNOWN or a deviation is a visible act", () => {
   assert.equal(liveEntries().length, 52, "52 postgres-owned functions in public were measured: 36 SECURITY DEFINER + 16 INVOKER");
   assert.equal(liveEntries().filter((e) => e.definer).length, 36);
-  assert.equal(unknownCount(), 40);
-  assert.equal(acceptedDeviationCount(), 22);
+  // 40 → 33: the 2026-09-20 evidence pass resolved seven (answer_mollie_refund authenticated;
+  // acting_for_owner anon + public; get_accountant_for_zzper all four).
+  assert.equal(unknownCount(), 33);
+  // 22 → 29: the same seven, recorded as deviations because production was deliberately not changed.
+  assert.equal(acceptedDeviationCount(), 29);
   assert.equal(PLATFORM_CLASSES.length, 1);
   assert.equal(EXPECTED_FUNCTION_DEFAULT_ACL.length, 8, "eight function-type rows in pg_default_acl were measured");
 });
