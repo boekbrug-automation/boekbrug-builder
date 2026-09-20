@@ -40,14 +40,21 @@ test("[PROFILE-READ] the three readers on the gate keep a failed read apart from
       `${f} no longer reads the profile through the one classifier`);
   }
 
-  // The middleware never decides anything on a null it cannot explain.
+  // The middleware decides nothing itself: the classified read goes through the tested gate, and
+  // a failed read is never onboarding state and never opens a deeper route (onboarding-gate.ts).
   const mw = code("src/middleware.ts");
   assert.match(mw, /select\("onboarding_done"\)\.eq\("id", user\.id\)\.maybeSingle\(\)/,
     "the middleware's profile read is back to .single(), which reports a missing row as an error");
   assert.doesNotMatch(mw, /if \(profile && !profile\.onboarding_done\)/, "the data-only test is back");
-  assert.match(mw, /profileRead\.kind === "failed"/, "a failed read is not named as such");
-  assert.match(mw, /profileRead\.kind === "row" && !profileRead\.row\.onboarding_done/,
-    "the wizard redirect must rest on a ROW that says onboarding is not done");
+  assert.match(mw, /import \{ onboardingGate \} from "@\/lib\/onboarding-gate"/, "the middleware no longer uses the tested gate");
+  assert.match(mw, /const gate = onboardingGate\(\{ read: profileRead, pathname: request\.nextUrl\.pathname \}\)/,
+    "the gate is not handed the classified read and the path");
+  assert.match(mw, /if \(gate\.action === "redirect"\) \{\s*\n\s*return withRefreshedCookies\(response, NextResponse\.redirect\(new URL\(gate\.to, request\.url\)\)\);/,
+    "the gate's redirect is not what the middleware answers with");
+  assert.doesNotMatch(mw, /profileRead\.kind === "row" && !profileRead\.row\.onboarding_done/,
+    "the middleware forms its own opinion about onboarding again, beside the tested gate");
+  assert.doesNotMatch(mw, /new URL\("\/onboarding", request\.url\)/,
+    "a hand-written /onboarding redirect is back in the middleware — the gate decides, and a failed read never goes there");
 
   // The home refuses before it routes: a failed read reaches the error boundary, never the wizard.
   const home = code("src/app/dashboard/page.tsx");

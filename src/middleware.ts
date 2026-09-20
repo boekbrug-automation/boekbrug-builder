@@ -7,6 +7,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { canAccessScreen } from "@/lib/acting-for";
 // [PROFILE-READ] A failed read is not a missing row — see the header of src/lib/profile-read.ts.
 import { classifyProfileRead } from "@/lib/profile-read";
+// [ONBOARDING-GATE] What each of the three answers means for THIS request — see that file's header
+// for why a failed read may continue on the home and nowhere deeper.
+import { onboardingGate } from "@/lib/onboarding-gate";
 
 // [PUBLIC-SURFACE] The public path list moved to src/lib/public-paths.ts so the smoke test can
 // assert against the SAME array this guard enforces. It was unreachable from anywhere else, which
@@ -250,22 +253,27 @@ export async function middleware(request: NextRequest) {
     !request.nextUrl.pathname.startsWith("/onboarding")
   ) {
     // [PROFILE-READ] Three answers, kept apart. This used to look at `data` alone, so a read that
-    // FAILED was the same null as a row that is missing, and the three readers on this path each
-    // drew their own conclusion from it. This one falls through on both: a missing row is the
-    // wizard's to create, and a failed read is the page's to refuse honestly (dashboard/page.tsx
-    // throws to its error boundary). What it must never do is decide anything on a null it cannot
-    // explain — and it says so in the log, because from every screen that null looks like nothing.
+    // FAILED was the same null as a row that is missing. The decision itself lives in
+    // src/lib/onboarding-gate.ts, tested per branch: done → through; not done or missing → the
+    // wizard; failed → never an onboarding decision, and never a deeper route. The home may
+    // continue on a failed read because /dashboard/page.tsx classifies the same read and throws
+    // to its error boundary; every deeper route is sent to the home for that same honest screen,
+    // instead of opening as though this gate had passed.
     const profileRead = classifyProfileRead(
       await supabase.from("profiles").select("onboarding_done").eq("id", user.id).maybeSingle(),
     );
+    const gate = onboardingGate({ read: profileRead, pathname: request.nextUrl.pathname });
     if (profileRead.kind === "failed") {
-      console.error("[PROFILE-READ] profile unreadable in middleware — letting the page decide", {
+      // Loud, because from every screen a failed read looks like nothing at all.
+      console.error("[PROFILE-READ] profile unreadable in middleware", {
         path: request.nextUrl.pathname,
         code: profileRead.code,
         error: profileRead.message,
+        action: gate.action === "allow" ? "home page decides" : `redirect ${gate.to}`,
       });
-    } else if (profileRead.kind === "row" && !profileRead.row.onboarding_done) {
-      return withRefreshedCookies(response, NextResponse.redirect(new URL("/onboarding", request.url)));
+    }
+    if (gate.action === "redirect") {
+      return withRefreshedCookies(response, NextResponse.redirect(new URL(gate.to, request.url)));
     }
 
     // [ACTING-FOR] Een verkoopmedewerker hoort op zijn eigen scherm, niet in de bank of de aangifte
