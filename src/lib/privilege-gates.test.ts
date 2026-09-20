@@ -19,8 +19,8 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
 import {
-  ACKNOWLEDGED_PRODUCTION_MIGRATIONS, EXPECTED_FUNCTION_DEFAULT_ACL, GRANTEES, PLATFORM_CLASSES, REGISTRY,
-  acceptedDeviationCount, liveEntries, nameOf, unknownCount, type FunctionEntry,
+  ACKNOWLEDGED_PRODUCTION_MIGRATIONS, EXPECTED_FUNCTION_DEFAULT_ACL, GRANTEES, IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT,
+  PLATFORM_CLASSES, REGISTRY, acceptedDeviationCount, liveEntries, nameOf, unknownCount, type FunctionEntry,
 } from "../../scripts/privilege-registry";
 import {
   INTENT_SQL_PATH, MIGRATIONS_DIR, ORACLE_SQL_PATH,
@@ -231,6 +231,31 @@ test("[PRIVILEGE-REGISTRY] the settled decisions stay settled", () => {
     "anon and PUBLIC still have EXECUTE in production; recorded as deviations until a separate hardening step");
   const client = by("public.is_my_accountant_client(uuid)");
   assert.equal(client.intent.anon, "ALLOW", "five policies are TO public; revoking anon broke production once");
+  // [PRIVILEGE-BEWIJS] batch 2: PUBLIC resolved to DENY. Effective anon EXECUTE is required; the
+  // PUBLIC entry is not what provides it (the named grants are). The revoke is a later, bound step.
+  assert.deepEqual(client.intent, { anon: "ALLOW", authenticated: "ALLOW", serviceRole: "ALLOW", public: "DENY" });
+  assert.ok(client.acceptedDeviations?.public, "the PUBLIC entry is still there in production; recorded, not hidden");
+  assert.ok(client.evidence.includes(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT),
+    "the hardening invariant (assert the named grants explicitly when PUBLIC is revoked) must travel with the row");
+  assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /named EXECUTE grants .* must be asserted explicitly/);
+  assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /must not be assumed from default privileges/);
+  // The invariant must not overstate the evidence: only anon and authenticated evaluate the RLS
+  // paths; service_role bypasses RLS and is kept ALLOW as the compatibility boundary, not for RLS.
+  assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /anon and authenticated because the RLS policy paths/);
+  assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /service_role because it remains explicitly ALLOW .* not because of RLS/);
+  // [PRIVILEGE-BEWIJS] batch 2: the accountant-status door trigger is fully decided: DENY for every
+  // role, all four current grants recorded as inert deviations. Written explicitly, not via the
+  // trigger helper, so the other trigger rows keep their undecided service_role/PUBLIC.
+  const door = by("public.accountant_status_door_only()");
+  assert.equal(door.kind, "trigger");
+  assert.deepEqual(door.intent, { anon: "DENY", authenticated: "DENY", serviceRole: "DENY", public: "DENY" });
+  assert.deepEqual(Object.keys(door.acceptedDeviations ?? {}).sort(), ["anon", "authenticated", "public", "serviceRole"]);
+  // [PRIVILEGE-BEWIJS] batch 2: grant_welcome_plus is obsolete / no live caller found: production
+  // dropped its trigger on 17 September and nothing references it. Kept, not dropped.
+  const welcome = by("public.grant_welcome_plus()");
+  assert.equal(welcome.kind, "obsolete");
+  assert.deepEqual(welcome.intent, { anon: "DENY", authenticated: "DENY", serviceRole: "DENY", public: "DENY" });
+  assert.deepEqual(Object.keys(welcome.acceptedDeviations ?? {}).sort(), ["anon", "authenticated", "public", "serviceRole"]);
   // [PRIVILEGE-BEWIJS] get_accountant_for_zzper: obsolete / no live caller found. DENY for every
   // role is the boundary; the four current ALLOWs are legacy default exposure, each recorded.
   const zzper = by("public.get_accountant_for_zzper(uuid)");
@@ -244,9 +269,12 @@ test("[PRIVILEGE-REGISTRY] the counts are pinned, so changing an UNKNOWN or a de
   assert.equal(liveEntries().filter((e) => e.definer).length, 36);
   // 40 → 33: the 2026-09-20 evidence pass resolved seven (answer_mollie_refund authenticated;
   // acting_for_owner anon + public; get_accountant_for_zzper all four).
-  assert.equal(unknownCount(), 33);
+  // 33 → 28: batch 2 resolved five (is_my_accountant_client public; accountant_status_door_only
+  // serviceRole + public; grant_welcome_plus serviceRole + public).
+  assert.equal(unknownCount(), 28);
   // 22 → 29: the same seven, recorded as deviations because production was deliberately not changed.
-  assert.equal(acceptedDeviationCount(), 29);
+  // 29 → 34: the five of batch 2, for the same reason.
+  assert.equal(acceptedDeviationCount(), 34);
   assert.equal(PLATFORM_CLASSES.length, 1);
   assert.equal(EXPECTED_FUNCTION_DEFAULT_ACL.length, 8, "eight function-type rows in pg_default_acl were measured");
 });

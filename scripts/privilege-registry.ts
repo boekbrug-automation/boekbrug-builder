@@ -152,6 +152,31 @@ const EVIDENCE_PASS_1 = "resolved by the 2026-09-20 evidence pass; production pr
 const OBSOLETE_LEGACY_GRANT =
   EVIDENCE_PASS_1 + "; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP";
 
+// The second pass (accepted 2026-09-20) resolved five more, the same way: intent decided, reality
+// recorded as a deviation, no privilege touched.
+const EVIDENCE_PASS_2 = "resolved by the 2026-09-20 evidence pass (batch 2); production privilege deliberately unchanged in that PR";
+// A trigger function fires with whatever EXECUTE its ACL carries or lacks: PostgreSQL checks no
+// EXECUTE for the role whose INSERT or UPDATE fired it (proven on a real PostgreSQL for the admit
+// and the refuse branch), and a RETURNS trigger function cannot be called directly by anyone,
+// owner included ("trigger functions can only be called as triggers"). So every grant on one is
+// inert, and DENY for every role costs nothing.
+const TRIGGER_GRANT_INERT =
+  EVIDENCE_PASS_2 + "; a trigger function needs no EXECUTE for any role to fire, and cannot be called directly; this grant is inert default exposure, left in place until a separate hardening step";
+/**
+ * [PRIVILEGE-BEWIJS] Recorded invariant for the day PUBLIC is closed on is_my_accountant_client.
+ * Be exact about who needs EXECUTE by NAME and why: anon and authenticated because the RLS policy
+ * paths evaluate the function as those roles (only they can read the protected tables while
+ * subject to RLS); service_role NOT because of RLS — it bypasses RLS — but because it stays
+ * explicitly ALLOW as the server-side compatibility boundary. Today all three hold the grant,
+ * through the creation-time default grants and the explicit re-grant of 12 September 2026, but a
+ * hardening migration must assert the grants the intended boundary requires itself and never
+ * assume them from default privileges. That migration, the PUBLIC revoke, the [ANON-ORAKEL] gate
+ * update and a SQL seam proof move together, in one owner-approved change. Exported so a gate can
+ * pin it.
+ */
+export const IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT =
+  "HARDENING INVARIANT: if PUBLIC is ever revoked from is_my_accountant_client, the named EXECUTE grants the intended boundary requires must be asserted explicitly in the same migration and must not be assumed from default privileges: anon and authenticated because the RLS policy paths evaluate the function as those roles; service_role because it remains explicitly ALLOW as the server-side compatibility boundary, not because of RLS, which it bypasses";
+
 // ── client_rpc: called through the session client, so authenticated must be able to execute ────
 
 const clientRpc = (
@@ -220,12 +245,26 @@ export const REGISTRY: readonly FunctionEntry[] = [
     // anon ALLOW is REQUIRED, not tolerated: five policies are `TO public`, and revoking anon from
     // this function broke anonymous reads in production ("permission denied for function"). The
     // [ANON-ORAKEL] gate in lifecycle-gates.test.ts refuses any migration that revokes it.
-    intent: intent(A, A, A, U),
+    //
+    // PUBLIC is DENY (evidence pass batch 2, accepted 2026-09-20). Two separate facts: anon needs
+    // EFFECTIVE EXECUTE; the PUBLIC ENTRY is not what provides it. Production carries named grants
+    // to anon, authenticated and service_role beside the PUBLIC entry, and on a real PostgreSQL a
+    // TO public policy kept working with PUBLIC revoked and the named grants in place. No other
+    // role can both read the protected tables and be subject to RLS. The PUBLIC entry stays until
+    // the owner-approved hardening step described by IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT.
+    intent: intent(A, A, A, D),
     current: m(true, true, true, true, ACL.publicAndThreeReordered),
+    acceptedDeviations: {
+      public: EVIDENCE_PASS_2 + "; the PUBLIC entry is not the capability the TO public policies need (the named grants are); revoking it is a separate hardening step bound by IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT",
+    },
     evidence: [
       "production incident: revoking anon produced 'permission denied for function' on anonymous reads",
       "policies TO public: invoices_accountant_read, invoices_accountant_update_v2, invoice_lines_select_accountant, documents_accountant_read, acc_status_owner_write",
       "policies TO authenticated: assets_accountant_read, folders_accountant_read",
+      "production ACL carries the PUBLIC entry AND named grants to anon, authenticated and service_role (the 12 September rollback re-granted both), so effective anon EXECUTE does not depend on PUBLIC",
+      "of every database role, only anon and authenticated can read the protected tables while subject to RLS; postgres, service_role, supabase_admin and the platform readers bypass RLS, authenticator holds no table privilege",
+      "throwaway-PostgreSQL proof: with PUBLIC revoked and the three named grants kept, anon reads return zero rows without error, the accountant sees the client's rows, a stranger sees none, and a role with table access but no named grant gets 'permission denied for function'",
+      IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT,
     ],
     callers: ["7 RLS policies (5 TO public, 2 TO authenticated)"],
     provenance: DASHBOARD_ERA, verified: VERIFIED,
@@ -321,12 +360,48 @@ export const REGISTRY: readonly FunctionEntry[] = [
     ["rpc_anon_revoke.sql revokes PUBLIC, anon, authenticated; grants service_role"]),
   triggerFn("public.prevent_verwerkt_invoice_changes()", true, ["invoices"], CLOSED_TO_ALL_BUT_SERVICE,
     ["revoke_execute_on_trigger_functions.sql"]),
-  triggerFn("public.accountant_status_door_only()", true, ["invoices"], OPEN_TO_ALL,
-    ["created under the default grants; no migration revokes anything on it"], REPO,
-    { anon: LATER_HARDENING_TRIGGER, authenticated: LATER_HARDENING_TRIGGER }),
-  triggerFn("public.grant_welcome_plus()", true, ["profiles (retired path, see welcome_grant_retired.sql)"], OPEN_TO_ALL,
-    ["created under the default grants; no migration revokes anything on it"], REPO,
-    { anon: LATER_HARDENING_TRIGGER, authenticated: LATER_HARDENING_TRIGGER }),
+  // Written out rather than through triggerFn: that helper still carries the undecided
+  // service_role/PUBLIC assumption for the other trigger functions, and this one is fully decided
+  // (evidence pass batch 2, accepted 2026-09-20). The helper is deliberately left as it is.
+  {
+    signature: "public.accountant_status_door_only()", kind: "trigger", managedBy: "boekbrug", owner: "postgres",
+    definer: true, status: "live",
+    intent: intent(D, D, D, D), current: OPEN_TO_ALL,
+    acceptedDeviations: {
+      anon: TRIGGER_GRANT_INERT, authenticated: TRIGGER_GRANT_INERT, serviceRole: TRIGGER_GRANT_INERT, public: TRIGGER_GRANT_INERT,
+    },
+    evidence: [
+      "live trigger invoices_accountant_door: BEFORE INSERT OR UPDATE ON public.invoices FOR EACH ROW, enabled, created by 20260915082757 invoice_accountant_attribution (same-named repo file)",
+      "SECURITY DEFINER, owner postgres, search_path=public; admits when auth.uid() IS NULL (the service-role door), refuses any change to accountant_status or accountant_id otherwise with 42501",
+      "no direct caller: src/lib/accountant-status-door.ts writes the column through the service-role client and never calls the function; no RPC, view, policy or other function references it",
+      "throwaway-PostgreSQL proof with EXECUTE revoked from PUBLIC, anon, authenticated and service_role: an authenticated ordinary UPDATE passes, an UPDATE of accountant_status is refused 42501, an INSERT carrying accountant_id is refused, a service_role UPDATE is admitted; direct invocation fails with 'trigger functions can only be called as triggers' for postgres and for a granted role alike",
+      "created under the default grants; no migration revokes anything on it",
+    ],
+    callers: ["trigger on invoices"], provenance: REPO, verified: VERIFIED,
+  },
+  {
+    signature: "public.grant_welcome_plus()", kind: "obsolete", managedBy: "boekbrug", owner: "postgres",
+    definer: true, status: "live",
+    // obsolete / no live caller found as of verification (evidence pass batch 2, accepted
+    // 2026-09-20). Production dropped its trigger on 17 September; the repository keeps the function
+    // on purpose so a welcome period can be re-armed with one CREATE TRIGGER. That retention does not
+    // make it a live trigger today, and re-arming would need no EXECUTE for any role (proven). Kept,
+    // not dropped: a DROP is a separate owner-approved decision.
+    intent: intent(D, D, D, D), current: OPEN_TO_ALL,
+    acceptedDeviations: {
+      anon: TRIGGER_GRANT_INERT, authenticated: TRIGGER_GRANT_INERT, serviceRole: TRIGGER_GRANT_INERT, public: TRIGGER_GRANT_INERT,
+    },
+    evidence: [
+      "production: no trigger references it; the only trigger on profiles is profiles_billing_guard; production migration 20260917083115 welcome_grant_retired dropped profiles_welcome_plus and set the RETIRED comment the function carries today",
+      "production data: 8 welcome grants, the last started 2026-09-16; 2 profiles created after the retirement, 0 of them granted",
+      "no live application or dependency caller found as of 2026-09-20: no function, view, policy, pg_depend row, RPC or job references it",
+      "SECURITY DEFINER, owner postgres, search_path=public; body inserts a 90-day Plus row into plan_grants for a non-accountant profile",
+      "throwaway-PostgreSQL proof: re-armed on scratch with zero EXECUTE grants, an authenticated INSERT into profiles still produced the plan_grants row; direct invocation fails as a trigger function",
+      "created under the default grants; no migration revokes anything on it",
+    ],
+    callers: ["none found as of 2026-09-20; the retired path was trigger profiles_welcome_plus on profiles, dropped by welcome_grant_retired.sql"],
+    provenance: REPO, verified: VERIFIED,
+  },
 
   // ── the refund pair, SECURITY DEFINER financial writers (2) ────────────────────────────────
   {
