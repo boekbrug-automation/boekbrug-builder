@@ -230,14 +230,56 @@ export function bouwAntwoordBericht(documentName: string | null, antwoord: strin
 }
 
 /**
+ * [VRAGEN-TELLING] One head-count as supabase-js returns it: `count` is null when nothing was
+ * counted, and `error` is the only shape a failure has — it never throws.
+ */
+export interface CountRead {
+  count: number | null
+  error: unknown
+}
+
+/** How many questions wait — or the honest admission that we could not count them. */
+export type OpenQuestionCount = { known: true; count: number } | { known: false }
+
+/**
+ * [VRAGEN-TELLING] How many questions wait for the owner, over BOTH kinds /dashboard/vragen lists.
+ *
+ * The home counted subject_type='document' only, while the questions page has read document AND
+ * invoice questions since [FACTUURVRAAG] — so an accountant's question about an invoice reached the
+ * owner through a notification and nowhere on the home, the one screen that says "someone is
+ * waiting for you".
+ *
+ * Two reads in, one answer out — and they STAY two reads. The rows arrive through two RLS policies
+ * (acc_status_client_read_document, acc_status_client_read_invoice), and one query that needs both
+ * fails whole the moment the second policy is not rolled out; the questions page says the same in
+ * its own words. This function only adds up what the two reads returned.
+ *
+ * [NO-SILENT-EMPTY] A failed half makes the WHOLE answer unknown. A count that quietly omits the
+ * half that failed is a smaller number presented as the truth — worse than no number, because the
+ * banner then stays away from a home that has a question waiting on it. A count that arrived as
+ * null without an error is not a count either.
+ */
+export function openQuestionCount(documents: CountRead, invoices: CountRead): OpenQuestionCount {
+  if (documents.error || invoices.error) return { known: false }
+  if (typeof documents.count !== 'number' || typeof invoices.count !== 'number') return { known: false }
+  return { known: true, count: documents.count + invoices.count }
+}
+
+/**
  * De regel die het dashboard toont zodra er vragen openstaan.
  *
- * Enkelvoud/meervoud klopt, en er staat nooit een getal bij nul — bij nul hoort de balk
- * helemaal niet te verschijnen.
+ * [TAAL] A KEY and its parameters, not a sentence: the component renders them in the owner's own
+ * language. This module held the Dutch itself, which made the banner the one line on the home
+ * no translation could reach. Singular and plural are two keys, and there is never a number beside
+ * zero — at zero the banner does not appear at all.
  */
-export function vragenBannerTekst(aantal: number): string | null {
-  if (aantal <= 0) return null
+export type VragenBannerRegel =
+  | { key: 'start.vragen.een'; params: Record<string, never> }
+  | { key: 'start.vragen.meer'; params: { n: number } }
+
+export function vragenBannerRegel(aantal: number): VragenBannerRegel | null {
+  if (!Number.isFinite(aantal) || aantal <= 0) return null
   return aantal === 1
-    ? 'Je boekhouder heeft een vraag'
-    : `Je boekhouder heeft ${aantal} vragen`
+    ? { key: 'start.vragen.een', params: {} }
+    : { key: 'start.vragen.meer', params: { n: aantal } }
 }
