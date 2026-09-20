@@ -54,8 +54,16 @@ export type Kind =
   | "invoker_rpc"; // SECURITY INVOKER function called as an RPC; RLS applies to the caller
 
 export type Status =
-  | "live"               // exists in production today
-  | "not_in_production"; // a repo migration creates it, production does not have it
+  | "live"               // exists in production today, measured; an EXISTING identity
+  | "planned"            // declared for a repo migration not yet applied to production; a NEW identity
+  | "not_in_production"; // a repo migration creates it, production does not have it; a NEW identity
+
+// A function is an existing identity only while its row says `live`. A migration that CREATE OR
+// REPLACEs a live function is a body replacement and owes no privilege SQL (the ACL survives). A
+// migration that creates a `planned` or `not_in_production` function introduces a new identity
+// and must decide all four default grant paths explicitly. `planned` becomes `live` once the
+// function has been applied and measured in production; until then the production oracle reports
+// it as UNREGISTERED, which is the reminder.
 
 export interface Measured {
   /** Effective EXECUTE per role, measured with has_function_privilege on production. */

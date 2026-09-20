@@ -5,12 +5,14 @@
 // What this file can and cannot promise, stated once so nobody reads it as more than it is:
 //
 //   · It reads migration TEXT and the registry. It can require that every function a migration
-//     creates has a registry row, that a NEW migration names all four default grant paths, that
-//     the registry is internally consistent, and that the two generated artefacts are current.
+//     creates has a registry row, that a NEW identity decides all four default grant paths, that
+//     an explicit GRANT/REVOKE does not contradict a decided intent, that the registry is
+//     internally consistent, and that the two generated artefacts are current.
 //   · It cannot see the database. CREATE OR REPLACE keeps an old ACL, a migration applied through
-//     the MCP path has no file here, and a REVOKE inside a DO block is a string until it runs.
-//     That is what tests/sql/privilege-check.sql (real PostgreSQL) and docs/PRIVILEGE_ORACLE.sql
-//     (production catalog) are for. This file is the early warning, not the oracle.
+//     the MCP path has no file here, and privilege SQL built at run time is a string until it
+//     runs — the reader marks that UNPROVEN rather than correct. tests/sql/privilege-check.sql
+//     (real PostgreSQL) and docs/PRIVILEGE_ORACLE.sql (production catalog) are the oracles.
+//     This file is the early warning, not the oracle.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -22,20 +24,24 @@ import {
 } from "../../scripts/privilege-registry";
 import {
   INTENT_SQL_PATH, MIGRATIONS_DIR, ORACLE_SQL_PATH,
-  checkMigration, functionsCreatedBy, functionsDroppedBy, grantPathsHandled, identityTypeOfArgument, indexMigrations,
-  migrationFiles, normaliseType, renderIntentSql, renderOracleSql,
+  checkMigration, finalDecisions, functionsCreatedBy, functionsDroppedBy, grantPathsHandled, identityTypeOfArgument,
+  indexMigrations, isExistingIdentity, migrationFiles, normaliseType, readPrivilegeStatements, renderIntentSql,
+  renderOracleSql, splitStatements, type MigrationFinding,
 } from "../../scripts/privilege-oracle";
 
 const index = indexMigrations();
 const files = migrationFiles();
 const read = (f: string) => readFileSync(`${MIGRATIONS_DIR}/${f}`, "utf8");
+const dropped = new Set(index.droppedIn.keys());
 
 // ── The grandfather list: migrations that predate the four-path rule ───────────────────────────
 //
-// Frozen. Every file here is only required to have its functions registered. A file NOT on this
-// list that creates a `public` function must name PUBLIC, anon, authenticated and service_role.
-// The list may shrink (a file is deleted or brought up to the rule); the ratchet below forbids it
-// from growing, because growing it is how a rule quietly stops applying.
+// Frozen. A file here is only required to have its functions registered and its privilege SQL
+// provable; a contradiction it carries is HISTORICAL (a later file superseded it) and is pinned
+// below rather than enforced. A file NOT on this list that creates a `public` function must
+// decide PUBLIC, anon, authenticated and service_role for every NEW identity, and every
+// GRANT/REVOKE it contains must agree with the registry. The list may shrink; the ratchet below
+// forbids it from growing, because growing it is how a rule quietly stops applying.
 const GRANDFATHERED = new Set([
   "account_purpose_archief.sql", "accountant_amount_guard_restore.sql", "accountant_confirm_mandate.sql",
   "accountant_discount_guard.sql", "accountant_invoice_mandate.sql", "accountant_vat_deduction_guard.sql",
@@ -53,33 +59,70 @@ const GRANDFATHERED = new Set([
 ]);
 const GRANDFATHERED_CEILING = 44;
 
+const allFindings: MigrationFinding[] = files.flatMap((f) =>
+  checkMigration(f, read(f), REGISTRY, { grandfathered: GRANDFATHERED.has(f), dropped }));
+const findingsOf = (problem: MigrationFinding["problem"]) => allFindings.filter((x) => x.problem === problem);
+const describe = (x: MigrationFinding) =>
+  `${x.file}: ${x.fn ?? x.signature ?? ""}${x.role ? " " + x.role : ""}${x.missing ? " does not decide " + x.missing.join(", ") : ""}${x.detail ? " — " + x.detail : ""}`;
+
 test("[PRIVILEGE-REGISTRY] the grandfather list is a ratchet: it may shrink, never grow", () => {
   assert.ok(GRANDFATHERED.size <= GRANDFATHERED_CEILING,
-    `the grandfather list grew to ${GRANDFATHERED.size}; a new function-creating migration must name all four grant paths instead`);
+    `the grandfather list grew to ${GRANDFATHERED.size}; a new function-creating migration must decide all four grant paths instead`);
   for (const f of GRANDFATHERED) assert.ok(files.includes(f), `${f} is grandfathered but no longer on disk — remove it from the list`);
 });
 
-// ── Gate 1: every function a migration creates has a registry row; new files name four paths ──
+// ── Gate 1: registration, the four paths for new identities, and direction ────────────────────
 
 test("[PRIVILEGE-REGISTRY] every public function a migration creates or replaces has a registry row", () => {
-  const dropped = new Set(index.droppedIn.keys());
-  const findings = files.flatMap((f) =>
-    checkMigration(f, read(f), REGISTRY, { grandfathered: GRANDFATHERED.has(f), dropped })
-      .filter((x) => x.problem === "no_registry_entry"));
-  assert.deepEqual(findings.map((x) => `${x.file}: ${x.signature}`), [],
+  assert.deepEqual(findingsOf("no_registry_entry").map(describe), [],
     "these functions are created by a migration but have no row in scripts/privilege-registry.ts — " +
     "a function nobody has decided about is the shape that let the refund writers stay open");
 });
 
-test("[PRIVILEGE-REGISTRY] a migration outside the grandfather list names all four default grant paths per function", () => {
-  const findings = files.flatMap((f) =>
-    checkMigration(f, read(f), REGISTRY, { grandfathered: GRANDFATHERED.has(f) })
-      .filter((x) => x.problem === "default_paths_not_handled"));
-  assert.deepEqual(findings.map((x) => `${x.file}: ${x.signature} does not name ${x.missing!.join(", ")}`), [],
+test("[PRIVILEGE-REGISTRY] a NEW identity outside the grandfather list decides all four default grant paths", () => {
+  assert.deepEqual(findingsOf("default_paths_not_handled").map(describe), [],
     "Supabase grants anon, authenticated and service_role BY NAME on every new function, and the built-in default " +
-    "grants PUBLIC. A REVOKE FROM PUBLIC alone leaves the three named grants standing. Name all four, " +
-    "in a REVOKE or a GRANT, for every function the migration creates. (Text check, early warning only: " +
-    "the SQL seam and docs/PRIVILEGE_ORACLE.sql ask the catalog.)");
+    "grants PUBLIC. A REVOKE FROM PUBLIC alone leaves the three named grants standing. A new function's migration " +
+    "must end with an explicit decision for all four (a body-only CREATE OR REPLACE of a LIVE function owes none). " +
+    "Text check, early warning only: the SQL seam and docs/PRIVILEGE_ORACLE.sql ask the catalog.");
+});
+
+test("[PRIVILEGE-REGISTRY] no migration outside the grandfather list contradicts a decided registry intent", () => {
+  assert.deepEqual(findingsOf("contradicts_intent").map(describe), [],
+    "a final explicit GRANT where the registry says DENY, or a final REVOKE where it says ALLOW. " +
+    "Change the registry decision first, in scripts/privilege-registry.ts, where the reason is written — never here");
+  assert.deepEqual(findingsOf("privilege_on_unregistered_function").map(describe), [],
+    "a GRANT/REVOKE on a function the registry does not know");
+});
+
+test("[PRIVILEGE-REGISTRY] privilege SQL the reader cannot prove is never called correct", () => {
+  assert.deepEqual(findingsOf("unproven_privilege_sql").map(describe), [],
+    "a role or function built at run time, or a wildcard over every function: the text gate cannot judge it, " +
+    "so write the GRANT/REVOKE by signature, or prove it in the SQL seam");
+});
+
+test("[PRIVILEGE-REGISTRY] the historical contradictions in grandfathered files are pinned, not enforced", () => {
+  // Each of these is a GRANT that a LATER migration revokes again (rpc_anon_revoke.sql revokes
+  // authenticated from seed_invoice_counter and recompute_invoice_amount_paid). A per-file reading
+  // cannot see the later file, so it is recorded here as history and the catalog judges reality.
+  // The list may shrink when an old file is brought in line; a new entry means a grandfathered
+  // file was edited to say something the registry refuses.
+  assert.deepEqual(findingsOf("historical_contradiction").map(describe).sort(), [
+    "invoice_partial_payments.sql: recompute_invoice_amount_paid authenticated — final explicit GRANT but registry intent is DENY",
+    "invoice_payment_date_rederive.sql: recompute_invoice_amount_paid authenticated — final explicit GRANT but registry intent is DENY",
+    "seed_invoice_counter.sql: seed_invoice_counter authenticated — final explicit GRANT but registry intent is DENY",
+  ]);
+  for (const x of findingsOf("historical_contradiction")) assert.ok(GRANDFATHERED.has(x.file), `${x.file} is not grandfathered`);
+});
+
+test("[PRIVILEGE-REGISTRY] an explicit decision on an UNKNOWN intent is reported, never failed and never invented", () => {
+  // rpc_anon_revoke.sql grants service_role on two trigger functions whose service_role intent is
+  // UNKNOWN. The gate says so; it does not turn UNKNOWN into ALLOW to make the row green.
+  const touched = findingsOf("unknown_intent_touched").map(describe).sort();
+  assert.deepEqual(touched, [
+    "rpc_anon_revoke.sql: assert_credit_within_original serviceRole — GRANT while intent is UNKNOWN",
+    "rpc_anon_revoke.sql: handle_new_user serviceRole — GRANT while intent is UNKNOWN",
+  ]);
 });
 
 // ── Gate 2: the registry is internally consistent ─────────────────────────────────────────────
@@ -101,6 +144,12 @@ test("[PRIVILEGE-REGISTRY] signatures are unique, normalised, and every value is
       assert.ok(e.current, `${e.signature}: a live function must carry its measured privileges`);
       assert.ok(e.verified, `${e.signature}: a live function must say when and where it was measured`);
       assert.match(e.current!.aclMd5, /^[0-9a-f]{32}$/);
+    } else {
+      // planned / not_in_production: nothing has been measured, and the row must not pretend otherwise.
+      assert.equal(e.current, null, `${e.signature}: a ${e.status} function has no measured privileges`);
+      assert.equal(e.verified, null, `${e.signature}: a ${e.status} function has not been verified`);
+      assert.equal(e.provenance.inRepo, true, `${e.signature}: a ${e.status} function can only come from a repo migration`);
+      assert.equal(e.acceptedDeviations, undefined, `${e.signature}: a deviation needs a measured reality to deviate from`);
     }
     // A deviation is only meaningful where reality differs from a DECISION.
     for (const [g, reason] of Object.entries(e.acceptedDeviations ?? {})) {
@@ -239,47 +288,152 @@ test("[PRIVILEGE-REGISTRY] the seam check runs between the migrations and the te
 
 // ── Mutations: the gates must bite ─────────────────────────────────────────────────────────────
 
-const FAKE: FunctionEntry = {
+/** An EXISTING identity: live and measured, service_role only. */
+const LIVE_FN: FunctionEntry = {
   signature: "public.known_fn(uuid, integer)", kind: "server_rpc", managedBy: "boekbrug", owner: "postgres", definer: true,
   status: "live", intent: { anon: "DENY", authenticated: "DENY", serviceRole: "ALLOW", public: "DENY" },
   current: { anon: false, authenticated: false, serviceRole: true, publicEntry: false, aclMd5: "0".repeat(32) },
   evidence: ["synthetic"], callers: ["synthetic"], provenance: { inRepo: true, productionVersions: [] }, verified: { at: "2026-01-01", source: "synthetic" },
 };
+/** A NEW identity: declared, not yet applied or measured. */
+const PLANNED_FN: FunctionEntry = {
+  ...LIVE_FN, signature: "public.new_fn(uuid)", status: "planned", current: null, verified: null,
+};
+/** An existing identity a session may call, with one UNKNOWN. */
+const LIVE_CLIENT_FN: FunctionEntry = {
+  ...LIVE_FN, signature: "public.client_fn(uuid)", kind: "client_rpc",
+  intent: { anon: "DENY", authenticated: "ALLOW", serviceRole: "ALLOW", public: "UNKNOWN" },
+  current: { anon: false, authenticated: true, serviceRole: true, publicEntry: false, aclMd5: "0".repeat(32) },
+};
+const FAKES = [LIVE_FN, PLANNED_FN, LIVE_CLIENT_FN];
+const problems = (f: MigrationFinding[]) => f.map((x) => x.problem).sort();
+const NEW = { grandfathered: false } as const;
+
+test("[PRIVILEGE-REGISTRY][MUTATION] identity is decided by registry status, not by the words OR REPLACE", () => {
+  assert.equal(isExistingIdentity(LIVE_FN), true);
+  assert.equal(isExistingIdentity(PLANNED_FN), false);
+  assert.equal(isExistingIdentity({ ...LIVE_FN, status: "not_in_production", current: null, verified: null }), false);
+  assert.equal(isExistingIdentity(undefined), false);
+});
 
 test("[PRIVILEGE-REGISTRY][MUTATION] a migration creating an unregistered function is caught", () => {
   const sql = `CREATE OR REPLACE FUNCTION public.brand_new(p_user_id uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
     REVOKE ALL ON FUNCTION public.brand_new(uuid) FROM PUBLIC, anon, authenticated, service_role;`;
-  const f = checkMigration("x.sql", sql, [FAKE], { grandfathered: false });
-  assert.deepEqual(f.map((x) => x.problem), ["no_registry_entry"]);
+  const f = checkMigration("x.sql", sql, FAKES, NEW);
+  assert.deepEqual(problems(f), ["no_registry_entry"]);
   assert.equal(f[0].signature, "public.brand_new(uuid)");
 });
 
-test("[PRIVILEGE-REGISTRY][MUTATION] the refund-writer shape — REVOKE FROM PUBLIC alone — is caught on a new migration", () => {
-  const sql = `CREATE FUNCTION public.known_fn(p_user_id uuid, p_n int) RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$;
-    REVOKE ALL ON FUNCTION public.known_fn(uuid, int) FROM PUBLIC;
-    GRANT EXECUTE ON FUNCTION public.known_fn(uuid, int) TO service_role;`;
-  const f = checkMigration("x.sql", sql, [FAKE], { grandfathered: false });
-  assert.deepEqual(f.map((x) => x.problem), ["default_paths_not_handled"]);
-  assert.deepEqual(f[0].missing, ["anon", "authenticated"], "PUBLIC and service_role were named; anon and authenticated were not");
-  // …and the same file is accepted once it names them.
-  const fixed = sql + "\n    REVOKE ALL ON FUNCTION public.known_fn(uuid, int) FROM anon, authenticated;";
-  assert.deepEqual(checkMigration("x.sql", fixed, [FAKE], { grandfathered: false }), []);
-  // …and the rule is suspended, but registration is not, for a grandfathered file.
-  assert.deepEqual(checkMigration("x.sql", sql, [FAKE], { grandfathered: true }), []);
-  assert.equal(checkMigration("x.sql", sql, [], { grandfathered: true }).length, 1);
+test("[PRIVILEGE-REGISTRY][MUTATION] NEW identity + missing four-path decision → fail (the refund-writer shape)", () => {
+  // CREATE OR REPLACE is how new functions are usually introduced, so the words prove nothing:
+  // new_fn is new because its registry row is `planned`.
+  const sql = `CREATE OR REPLACE FUNCTION public.new_fn(p_user_id uuid) RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$;
+    REVOKE ALL ON FUNCTION public.new_fn(uuid) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.new_fn(uuid) TO service_role;`;
+  const f = checkMigration("x.sql", sql, FAKES, NEW);
+  assert.deepEqual(problems(f), ["default_paths_not_handled"]);
+  assert.deepEqual(f[0].missing, ["anon", "authenticated"], "PUBLIC and service_role were decided; anon and authenticated were not");
+  // …accepted once the two are decided in the registry's direction…
+  const fixed = sql + "\n    REVOKE ALL ON FUNCTION public.new_fn(uuid) FROM anon, authenticated;";
+  assert.deepEqual(checkMigration("x.sql", fixed, FAKES, NEW), []);
+  // …and a plain CREATE with no privilege SQL at all is the worst case: all four undecided.
+  const bare = `CREATE FUNCTION public.new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`;
+  assert.deepEqual(checkMigration("x.sql", bare, FAKES, NEW)[0]?.missing, ["anon", "authenticated", "serviceRole", "public"]);
+  // The rule is suspended, but registration is not, for a grandfathered file.
+  assert.deepEqual(checkMigration("x.sql", sql, FAKES, { grandfathered: true }), []);
+  assert.deepEqual(problems(checkMigration("x.sql", sql, [], { grandfathered: true })), ["no_registry_entry"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] EXISTING identity + body-only CREATE OR REPLACE → pass without any privilege SQL", () => {
+  const sql = `CREATE OR REPLACE FUNCTION public.known_fn(p_user_id uuid, p_n integer) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$ BEGIN PERFORM 2; END $$;`;
+  assert.deepEqual(checkMigration("x.sql", sql, FAKES, NEW), [],
+    "the ACL survives a CREATE OR REPLACE; forcing a body-only migration to rewrite privileges is the wrong invariant");
+  // Same for a plain CREATE of a live function (a re-creation after a DROP in another file).
+  const plain = `CREATE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`;
+  assert.deepEqual(checkMigration("x.sql", plain, FAKES, NEW), []);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] EXISTING identity + explicit privilege change → validated against intent", () => {
+  const body = `CREATE OR REPLACE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`;
+  // registry DENY + final explicit GRANT → fail
+  const wrongGrant = checkMigration("x.sql", body + `\n GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon;`, FAKES, NEW);
+  assert.deepEqual(problems(wrongGrant), ["contradicts_intent"]);
+  assert.equal(wrongGrant[0].role, "anon");
+  assert.match(wrongGrant[0].detail!, /final explicit GRANT but registry intent is DENY/);
+  // registry ALLOW + final explicit REVOKE without a later GRANT → fail
+  const wrongRevoke = checkMigration("x.sql", body + `\n REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM service_role;`, FAKES, NEW);
+  assert.deepEqual(problems(wrongRevoke), ["contradicts_intent"]);
+  assert.equal(wrongRevoke[0].role, "serviceRole");
+  // a consistent explicit change passes
+  const fine = body + `\n REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM PUBLIC, anon, authenticated;
+    GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO service_role;`;
+  assert.deepEqual(checkMigration("x.sql", fine, FAKES, NEW), []);
+  // the same wrong decision without any CREATE in the file (a privilege-only migration) is caught too
+  assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO authenticated;`, FAKES, NEW)),
+    ["contradicts_intent"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] the FINAL statement decides: order matters both ways", () => {
+  const grantThenRevoke = `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon;
+    REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM anon;`;
+  assert.deepEqual(checkMigration("x.sql", grantThenRevoke, FAKES, NEW), [], "a GRANT that is revoked again in the same file ends as DENY");
+  const revokeThenGrant = `REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM anon;
+    GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon;`;
+  assert.deepEqual(problems(checkMigration("x.sql", revokeThenGrant, FAKES, NEW)), ["contradicts_intent"]);
+  // "registry ALLOW + REVOKE" is fine when a later GRANT restores it
+  const revokeThenRegrant = `REVOKE ALL ON FUNCTION public.client_fn(uuid) FROM PUBLIC, authenticated;
+    GRANT EXECUTE ON FUNCTION public.client_fn(uuid) TO authenticated;`;
+  assert.deepEqual(problems(checkMigration("x.sql", revokeThenRegrant, FAKES, NEW)), ["unknown_intent_touched"], "PUBLIC is UNKNOWN on client_fn: reported, not failed");
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] UNKNOWN is reported, never decided", () => {
+  const sql = `GRANT EXECUTE ON FUNCTION public.client_fn(uuid) TO PUBLIC;`;
+  const f = checkMigration("x.sql", sql, FAKES, NEW);
+  assert.deepEqual(problems(f), ["unknown_intent_touched"]);
+  assert.equal(f[0].role, "public");
+  // …and the opposite direction on the same UNKNOWN is equally only a report.
+  assert.deepEqual(problems(checkMigration("x.sql", `REVOKE ALL ON FUNCTION public.client_fn(uuid) FROM PUBLIC;`, FAKES, NEW)), ["unknown_intent_touched"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] privilege SQL the reader cannot prove is surfaced as unproven, not blessed", () => {
+  const dynamicRole = `DO $$ DECLARE r text := 'anon'; BEGIN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO %I', r);
+    END $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", dynamicRole, FAKES, NEW)), ["unproven_privilege_sql"]);
+  const dynamicFunction = `DO $$ DECLARE sig text; BEGIN
+      FOR sig IN SELECT oid::regprocedure::text FROM pg_proc WHERE pronamespace = 'public'::regnamespace LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM anon', sig);
+      END LOOP; END $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", dynamicFunction, FAKES, NEW)), ["unproven_privilege_sql"],
+    "no name literal identifies the target; the loop could be revoking anon from is_my_accountant_client");
+  const wildcard = `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon;`;
+  assert.deepEqual(problems(checkMigration("x.sql", wildcard, FAKES, NEW)), ["unproven_privilege_sql"]);
+  // A new identity cannot satisfy the four paths through unproven SQL either.
+  const newViaDynamic = `CREATE FUNCTION public.new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
+    DO $$ DECLARE sig text; BEGIN FOR sig IN SELECT 'x' LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated, service_role', sig); END LOOP; END $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", newViaDynamic, FAKES, NEW)), ["default_paths_not_handled", "unproven_privilege_sql"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] a GRANT/REVOKE on a function the registry does not know is caught", () => {
+  assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON FUNCTION public.stranger(uuid) TO anon;`, FAKES, NEW)),
+    ["privilege_on_unregistered_function"]);
+  // …unless some migration drops it, which is the created-then-dropped case.
+  assert.deepEqual(checkMigration("x.sql", `REVOKE ALL ON FUNCTION public.stranger(uuid) FROM anon;`, FAKES, { grandfathered: false, dropped: new Set(["stranger"]) }), []);
 });
 
 test("[PRIVILEGE-REGISTRY][MUTATION] a REVOKE written in a comment counts for nothing", () => {
-  const sql = `CREATE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
-    -- REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM PUBLIC, anon, authenticated, service_role;
-    /* GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon; */`;
-  const f = checkMigration("x.sql", sql, [FAKE], { grandfathered: false });
-  assert.deepEqual(f[0]?.missing, ["anon", "authenticated", "serviceRole", "public"]);
+  const sql = `CREATE FUNCTION public.new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
+    -- REVOKE ALL ON FUNCTION public.new_fn(uuid) FROM PUBLIC, anon, authenticated, service_role;
+    /* GRANT EXECUTE ON FUNCTION public.new_fn(uuid) TO anon; */`;
+  const f = checkMigration("x.sql", sql, FAKES, NEW);
+  assert.deepEqual(problems(f), ["default_paths_not_handled"]);
+  assert.deepEqual(f[0].missing, ["anon", "authenticated", "serviceRole", "public"]);
 });
 
-test("[PRIVILEGE-REGISTRY][MUTATION] the DO-loop shape (rpc_anon_revoke.sql) is recognised, and only with a format('REVOKE …')", () => {
-  const loop = `CREATE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
-    DO $$ DECLARE fn text; sig text; BEGIN
+test("[PRIVILEGE-REGISTRY][MUTATION] the DO-loop shape (rpc_anon_revoke.sql) is read with direction and per block", () => {
+  const loop = `DO $$ DECLARE fn text; sig text; BEGIN
       FOREACH fn IN ARRAY ARRAY['known_fn'] LOOP
         FOR sig IN SELECT format('public.%I(%s)', p.proname, pg_get_function_identity_arguments(p.oid)) FROM pg_proc p WHERE p.proname = fn LOOP
           EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', sig);
@@ -287,10 +441,37 @@ test("[PRIVILEGE-REGISTRY][MUTATION] the DO-loop shape (rpc_anon_revoke.sql) is 
           EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', sig);
         END LOOP; END LOOP; END $$;`;
   assert.deepEqual([...grantPathsHandled(loop, "known_fn")].sort(), ["anon", "authenticated", "public", "serviceRole"]);
+  assert.deepEqual(checkMigration("x.sql", loop, FAKES, NEW), [], "consistent with known_fn's intent");
+  // The same block granting anon is a contradiction, found through the block's name literal.
+  const wrong = loop.replace("REVOKE ALL ON FUNCTION %s FROM anon, authenticated", "GRANT EXECUTE ON FUNCTION %s TO anon");
+  assert.deepEqual(problems(checkMigration("x.sql", wrong, FAKES, NEW)), ["contradicts_intent"]);
+  // A second block with its own array does not leak its effects into the first block's functions.
+  const two = loop + `\nDO $$ DECLARE fn text; sig text; BEGIN FOREACH fn IN ARRAY ARRAY['client_fn'] LOOP
+      FOR sig IN SELECT 'public.client_fn(uuid)' LOOP EXECUTE format('REVOKE ALL ON FUNCTION %s FROM authenticated', sig); END LOOP; END LOOP; END $$;`;
+  const f = checkMigration("x.sql", two, FAKES, NEW);
+  assert.deepEqual(f.map((x) => `${x.problem}:${x.fn}:${x.role}`), ["contradicts_intent:client_fn:authenticated"], "known_fn keeps its own block's decisions");
   // The name in a string literal without any format('REVOKE …') is just a string.
   assert.equal(grantPathsHandled(`SELECT 'known_fn'; REVOKE ALL ON FUNCTION public.other(uuid) FROM anon;`, "known_fn").size, 0);
   // A REVOKE on ANOTHER function does not count for this one.
   assert.equal(grantPathsHandled(`REVOKE ALL ON FUNCTION public.other_fn(uuid) FROM PUBLIC, anon, authenticated, service_role;`, "known_fn").size, 0);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] the statement splitter respects dollar-quoted bodies and strings", () => {
+  const sql = `CREATE FUNCTION public.a() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM 1; PERFORM 2; END $$;
+    DO $body$ BEGIN EXECUTE 'GRANT EXECUTE ON FUNCTION public.a() TO anon; -- not a boundary'; END $body$;
+    SELECT 'a;b';
+    GRANT EXECUTE ON FUNCTION public.a() TO service_role`;
+  const parts = splitStatements(sql);
+  assert.equal(parts.length, 4);
+  assert.match(parts[0].sql, /^CREATE FUNCTION/);
+  assert.match(parts[1].sql, /^DO \$body\$/);
+  assert.equal(parts[2].sql, "SELECT 'a;b'");
+  assert.match(parts[3].sql, /^GRANT/);
+  // …and the string inside the DO body is not read as a statement of its own.
+  const reading = readPrivilegeStatements(sql, new Set(["a"]));
+  assert.deepEqual(reading.effects.map((e) => `${e.fn}:${e.role}:${e.action}:${e.via}`), ["a:serviceRole:GRANT:direct"]);
+  assert.deepEqual(reading.unproven, []);
+  assert.deepEqual([...finalDecisions(reading).get("a")!], [["serviceRole", "GRANT"]]);
 });
 
 test("[PRIVILEGE-REGISTRY][MUTATION] signature parsing meets PostgreSQL's identity form", () => {
@@ -333,7 +514,7 @@ test("[PRIVILEGE-REGISTRY][MUTATION] the intent SQL carries UNKNOWN as a value, 
   const sql = renderIntentSql(index);
   assert.match(sql, /'UNKNOWN'/);
   assert.match(sql, /CHECK \(i_anon IN \('ALLOW','DENY','UNKNOWN'\)\)/);
-  // Every live function is present, and a function is present once.
+  // Every registry function is present, and a function is present once.
   for (const e of REGISTRY) assert.equal(sql.split(`('${e.signature}',`).length - 1, 1, e.signature);
   // The ACL-shaping files are real files: a made-up name would make every comparison PARTIAL forever.
   for (const m of sql.matchAll(/ARRAY\[([^\]]+)\]::text\[\]/g)) {
@@ -343,7 +524,7 @@ test("[PRIVILEGE-REGISTRY][MUTATION] the intent SQL carries UNKNOWN as a value, 
 
 test("[PRIVILEGE-REGISTRY][MUTATION] an entry whose repo provenance is wrong is caught either way", () => {
   // Says "in repo" for a function no file creates…
-  const ghost: FunctionEntry = { ...FAKE, signature: "public.nobody_creates_me()" };
+  const ghost: FunctionEntry = { ...LIVE_FN, signature: "public.nobody_creates_me()" };
   assert.equal((index.createdIn.get(nameOf(ghost.signature)) ?? []).length, 0);
   // …and says "not in repo" for one a file does create.
   const real = REGISTRY.find((e) => e.signature === "public.allocate_bank_payment(uuid, uuid, uuid, numeric, date)")!;

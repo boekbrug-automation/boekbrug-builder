@@ -33,9 +33,47 @@ export const ORACLE_SQL_PATH = "docs/PRIVILEGE_ORACLE.sql";
 
 // ── SQL text helpers ───────────────────────────────────────────────────────────────────────────
 
-/** SQL comments removed. Commented-out DDL is not DDL, and a marker inside a comment is not a bound. */
+/**
+ * SQL comments removed. Commented-out DDL is not DDL, and a marker inside a comment is not a
+ * bound. Quote-aware: a `--` or a `/*` inside a string literal or a quoted identifier is text, not
+ * a comment — stripping it would cut the string open and swallow the rest of the line, including
+ * the closing quote of a dollar-quoted body. Comments INSIDE a dollar-quoted body are stripped
+ * like any other, which is what reading a DO block statement by statement needs.
+ */
 export function stripSql(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+  let out = "", i = 0, quote: string | null = null, escapes = false;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (quote) {
+      out += ch;
+      if (escapes && ch === "\\" && i + 1 < sql.length) { out += sql[i + 1]; i += 2; continue; }
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") { out += "'"; i += 2; continue; }   // '' inside a string
+        quote = null;
+      }
+      i += 1; continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      const nl = sql.indexOf("\n", i);
+      out += " ";
+      i = nl === -1 ? sql.length : nl;
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      out += " ";
+      i = end === -1 ? sql.length : end + 2;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      // E'…' strings honour backslash escapes; ordinary strings do not (standard_conforming_strings).
+      escapes = ch === "'" && /[eE]$/.test(out) && !/[a-z0-9_]/i.test(out.slice(-2, -1));
+      out += ch; i += 1; continue;
+    }
+    out += ch; i += 1;
+  }
+  return out;
 }
 
 /**
@@ -161,76 +199,278 @@ export function functionsDroppedBy(sql: string): string[] {
   return out;
 }
 
-// ── The four default grant paths ───────────────────────────────────────────────────────────────
+// ── Reading GRANT / REVOKE statements, in order, with their direction ──────────────────────────
+//
+// The first version of this gate asked only whether a migration MENTIONED each of the four roles.
+// That blesses `GRANT EXECUTE … TO anon` on a function whose registry intent is DENY, which is the
+// exact decision the whole programme exists to refuse. So the statements are read in order, and
+// what is compared with the registry is each role's FINAL explicit decision in the file.
+//
+// What the reader can prove, it reports as an effect. What it cannot prove — a role or a function
+// built at run time, a wildcard over every function in a schema — it reports as UNPROVEN, and the
+// gate refuses to call that correct. The real PostgreSQL seam and the production catalog remain
+// the oracles; this reader only stops the text gate from approving a provably wrong decision.
 
 /** The grantee spellings a GRANT/REVOKE names, mapped onto the registry's four. */
 const GRANTEE_WORDS: Record<string, Grantee> = {
   public: "public", anon: "anon", authenticated: "authenticated", service_role: "serviceRole",
 };
 
+export type PrivilegeAction = "GRANT" | "REVOKE";
+
+export interface PrivilegeEffect {
+  /** function name (overloads share it; the registry is keyed by signature, effects by name) */
+  fn: string;
+  role: Grantee;
+  action: PrivilegeAction;
+  /** position in the file, so "final" is well defined */
+  at: number;
+  via: "direct" | "do-block";
+}
+
+export interface PrivilegeReading {
+  effects: PrivilegeEffect[];
+  /** privilege SQL the reader could not reduce to (function, role, action) triples */
+  unproven: string[];
+}
+
 /**
- * Which of the four default grant paths a piece of SQL explicitly handles for a function, by
- * naming that role in a GRANT or REVOKE on that function. Two shapes are recognised:
- *
- *   REVOKE ALL ON FUNCTION public.f(uuid) FROM PUBLIC, anon;           -- direct
- *   … 'f' … EXECUTE format('REVOKE ALL ON FUNCTION %s FROM anon', sig)  -- the DO-loop shape
- *
- * The second is how rpc_anon_revoke.sql revokes by looked-up signature. A file that mentions the
- * function name only in a string literal but carries no format('GRANT|REVOKE …') is not counted.
+ * Split SQL into top-level statements. Semicolons inside single quotes, double quotes and
+ * dollar-quoted bodies (`$$ … $$`, `$tag$ … $tag$`) do not split, so a DO block or a function
+ * body is one statement. Returns each statement with its offset in the input.
+ */
+export function splitStatements(text: string): { sql: string; at: number }[] {
+  const out: { sql: string; at: number }[] = [];
+  let i = 0, start = 0, quote: string | null = null, dollar: string | null = null;
+  while (i < text.length) {
+    const ch = text[i];
+    if (dollar) {
+      if (text.startsWith(dollar, i)) { i += dollar.length; dollar = null; continue; }
+      i += 1; continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      i += 1; continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; i += 1; continue; }
+    if (ch === "$") {
+      const m = /^\$[a-z_][a-z0-9_]*\$|^\$\$/i.exec(text.slice(i));
+      if (m) { dollar = m[0]; i += m[0].length; continue; }
+    }
+    if (ch === ";") {
+      const sql = text.slice(start, i).trim();
+      if (sql) out.push({ sql, at: start });
+      start = i + 1;
+    }
+    i += 1;
+  }
+  const tail = text.slice(start).trim();
+  if (tail) out.push({ sql: tail, at: start });
+  return out;
+}
+
+const roleWords = (list: string): { roles: Grantee[]; unknown: string[] } => {
+  const roles: Grantee[] = [], unknown: string[] = [];
+  for (const raw of list.split(",")) {
+    const word = raw.trim().toLowerCase().replace(/^"|"$/g, "");
+    if (!word) continue;
+    const g = GRANTEE_WORDS[word];
+    if (g) roles.push(g); else unknown.push(word);
+  }
+  return { roles, unknown };
+};
+
+// `GRANT EXECUTE ON FUNCTION public.f(uuid), public.g() TO a, b [WITH GRANT OPTION]`
+const DIRECT_RE = new RegExp(
+  String.raw`^(grant|revoke)\s+(?:(grant\s+option\s+for)\s+)?(all(?:\s+privileges)?|execute)\s+on\s+` +
+  String.raw`(?:(all\s+functions\s+in\s+schema\s+[a-z0-9_"]+)|(?:function|procedure|routine)\s+(%[si](?:\s*\([^)]*\))?|(?:"?[a-z0-9_]+"?\.)?"?[a-z0-9_]+"?\s*\([^)]*\)(?:\s*,\s*(?:"?[a-z0-9_]+"?\.)?"?[a-z0-9_]+"?\s*\([^)]*\))*))` +
+  String.raw`\s+(to|from)\s+(.+?)(?:\s+(?:with\s+grant\s+option|cascade|restrict|granted\s+by\s+.+))?$`, "i");
+
+/** Parse one plain GRANT/REVOKE statement. `%s`-style placeholders come from format() templates. */
+function readDirect(
+  statement: string, at: number, via: PrivilegeEffect["via"], placeholderNames: readonly string[] | null,
+  reading: PrivilegeReading,
+): void {
+  const s = statement.replace(/\s+/g, " ").trim();
+  if (!/^(grant|revoke)\b/i.test(s)) return;
+  if (!/\bon\s+(all\s+functions|function|procedure|routine)\b/i.test(s)) return;   // table/schema grants are not ours
+  const m = DIRECT_RE.exec(s);
+  if (!m) { reading.unproven.push(`cannot parse: ${s.slice(0, 120)}`); return; }
+  const [, verb, grantOption, , wildcard, fnList, , roleList] = m;
+  if (grantOption) { reading.unproven.push(`GRANT OPTION FOR is not a privilege decision this gate reads: ${s.slice(0, 120)}`); return; }
+  if (wildcard) { reading.unproven.push(`a wildcard over every function is decided by the catalog at run time, not by this file: ${s.slice(0, 120)}`); return; }
+  if (/%/.test(roleList)) { reading.unproven.push(`role built at run time: ${s.slice(0, 120)}`); return; }
+  const { roles, unknown } = roleWords(roleList);
+  if (unknown.some((w) => /%/.test(w))) { reading.unproven.push(`role built at run time: ${s.slice(0, 120)}`); return; }
+  let names: string[];
+  if (/%[si]/i.test(fnList)) {
+    if (!placeholderNames) { reading.unproven.push(`function built at run time: ${s.slice(0, 120)}`); return; }
+    if (placeholderNames.length === 0) { reading.unproven.push(`function built at run time and no name literal identifies it: ${s.slice(0, 120)}`); return; }
+    names = [...placeholderNames];
+  } else {
+    names = [];
+    for (const part of fnList.split(/\)\s*,\s*/)) {
+      const nm = /^(?:"?([a-z0-9_]+)"?\.)?"?([a-z0-9_]+)"?\s*\(/i.exec(part.trim() + (part.trim().endsWith(")") ? "" : ")"));
+      if (!nm) { reading.unproven.push(`cannot read function in: ${s.slice(0, 120)}`); return; }
+      if ((nm[1] ?? "public").toLowerCase() !== "public") continue;
+      names.push(nm[2].toLowerCase());
+    }
+  }
+  const action: PrivilegeAction = verb.toLowerCase() === "grant" ? "GRANT" : "REVOKE";
+  for (const fn of names) for (const role of roles) reading.effects.push({ fn, role, action, at, via });
+}
+
+/**
+ * Every function-privilege effect in a piece of SQL, in file order, plus everything the reader
+ * could not prove. `knownNames` are the function names a DO block may be talking about: inside
+ * such a block the target of `format('REVOKE … ON FUNCTION %s …', sig)` is taken to be every
+ * known name that appears as a string literal in the block — the two shapes in this repository
+ * (`ARRAY['a','b']` and `p.proname = 'a'`). A block with a format('GRANT|REVOKE …') and no such
+ * literal is unproven.
+ */
+export function readPrivilegeStatements(sql: string, knownNames: ReadonlySet<string>): PrivilegeReading {
+  const text = stripSql(sql);
+  const reading: PrivilegeReading = { effects: [], unproven: [] };
+  for (const st of splitStatements(text)) {
+    const doBlock = /^do\s+(?:language\s+\w+\s+)?(\$[a-z0-9_]*\$)([\s\S]*)\1/i.exec(st.sql);
+    if (!doBlock) { readDirect(st.sql, st.at, "direct", null, reading); continue; }
+    const body = doBlock[2];
+    const bodyAt = st.at + st.sql.indexOf(body);
+    const literals = new Set<string>();
+    for (const m of body.matchAll(/'([a-z0-9_]+)'/gi)) if (knownNames.has(m[1].toLowerCase())) literals.add(m[1].toLowerCase());
+    const names = [...literals];
+    // plain statements written inside the block
+    for (const inner of splitStatements(body)) {
+      if (/^(grant|revoke)\b/i.test(inner.sql)) readDirect(inner.sql, bodyAt + inner.at, "do-block", null, reading);
+    }
+    // statements built with format(): the template is read as if it were the statement
+    for (const m of body.matchAll(/format\(\s*'((?:grant|revoke)\b[^']*)'/gi)) {
+      readDirect(m[1], bodyAt + m.index!, "do-block", names, reading);
+    }
+  }
+  reading.effects.sort((a, b) => a.at - b.at);
+  return reading;
+}
+
+/** The final explicit decision per (function, role) in a file: last statement wins. */
+export function finalDecisions(reading: PrivilegeReading): Map<string, Map<Grantee, PrivilegeAction>> {
+  const out = new Map<string, Map<Grantee, PrivilegeAction>>();
+  for (const e of reading.effects) {
+    const per = out.get(e.fn) ?? new Map<Grantee, PrivilegeAction>();
+    per.set(e.role, e.action);
+    out.set(e.fn, per);
+  }
+  return out;
+}
+
+/**
+ * Which of the four default grant paths a piece of SQL explicitly decides for a function, in
+ * either direction. Used to derive which repo files shape a function's ACL.
  */
 export function grantPathsHandled(sql: string, functionName: string): Set<Grantee> {
-  const text = stripSql(sql);
-  const handled = new Set<Grantee>();
   const fn = functionName.toLowerCase();
-
-  const direct = new RegExp(
-    String.raw`\b(grant|revoke)\b[^;]*?\bon\s+function\s+(?:"?public"?\.)?"?${fn}"?\s*\([^)]*\)\s*(?:to|from)\s+([^;]+);`, "gi");
-  for (const m of text.matchAll(direct)) {
-    for (const word of m[2].split(",")) {
-      const g = GRANTEE_WORDS[word.trim().toLowerCase().replace(/^"|"$/g, "")];
-      if (g) handled.add(g);
-    }
-  }
-
-  if (new RegExp(String.raw`'${fn}'`, "i").test(text)) {
-    for (const m of text.matchAll(/format\(\s*'(grant|revoke)\b[^']*?\b(?:to|from)\s+([a-z_, ]+)'/gi)) {
-      for (const word of m[2].split(",")) {
-        const g = GRANTEE_WORDS[word.trim().toLowerCase()];
-        if (g) handled.add(g);
-      }
-    }
-  }
-  return handled;
+  const reading = readPrivilegeStatements(sql, new Set([fn]));
+  return new Set(reading.effects.filter((e) => e.fn === fn).map((e) => e.role));
 }
 
 export const ALL_GRANTEES: readonly Grantee[] = GRANTEES;
 
+export type FindingProblem =
+  | "no_registry_entry"                  // a created function has no registry row (always enforced)
+  | "default_paths_not_handled"          // a NEW identity leaves one of the four paths undecided
+  | "contradicts_intent"                 // a final explicit GRANT/REVOKE contradicts a decided intent
+  | "historical_contradiction"           // the same, in a grandfathered file: pinned, not enforced
+  | "unknown_intent_touched"             // an explicit decision on an UNKNOWN intent: reported, never failed
+  | "unproven_privilege_sql"             // privilege SQL the reader cannot prove (always enforced)
+  | "privilege_on_unregistered_function"; // GRANT/REVOKE on a function with no registry row
+
 export interface MigrationFinding {
   file: string;
-  signature: string;
-  problem: "no_registry_entry" | "default_paths_not_handled";
+  problem: FindingProblem;
+  signature?: string;
+  fn?: string;
+  role?: Grantee;
   missing?: Grantee[];
+  detail?: string;
+}
+
+/** `live` in the registry means the identity exists in production; anything else is new here. */
+export function isExistingIdentity(entry: FunctionEntry | undefined): boolean {
+  return entry?.status === "live";
 }
 
 /**
- * The repo gate over one migration's text. `grandfathered` files predate the four-path rule and
- * are only required to be registered; every other file must handle all four paths per function
- * it creates. `dropped` names functions some migration drops, so a created-then-dropped function
- * needs no registry row.
+ * The repo gate over one migration's text.
+ *
+ *   · Every function it creates or replaces must have a registry row.
+ *   · A NEW identity (registry status other than `live`) must, outside the grandfather list,
+ *     carry a final explicit decision for all four default grant paths — until the deny-by-default
+ *     boundary in the database is live, a new function arrives open to three roles and PUBLIC.
+ *   · A body-only CREATE OR REPLACE of an EXISTING identity needs no privilege SQL at all. The
+ *     ACL survives the replacement; forcing a rewrite would be the wrong invariant.
+ *   · Any GRANT/REVOKE the file does contain is validated by direction: a final GRANT where the
+ *     registry says DENY, or a final REVOKE where it says ALLOW, is a finding. UNKNOWN is
+ *     reported, never decided here. On a grandfathered file the contradiction is historical
+ *     (later files supersede it) and is pinned by the test rather than enforced.
+ *   · Privilege SQL the reader cannot prove is a finding everywhere.
+ *
+ * `dropped` names functions some migration drops, so a created-then-dropped function needs no row.
  */
 export function checkMigration(
   file: string, sql: string, registry: readonly FunctionEntry[], opts: { grandfathered: boolean; dropped?: ReadonlySet<string> },
 ): MigrationFinding[] {
-  const known = new Set(registry.map((e) => e.signature));
+  const bySignature = new Map(registry.map((e) => [e.signature, e] as const));
+  const byName = new Map<string, FunctionEntry[]>();
+  for (const e of registry) {
+    const n = nameOf(e.signature);
+    byName.set(n, [...(byName.get(n) ?? []), e]);
+  }
   const findings: MigrationFinding[] = [];
-  for (const f of functionsCreatedBy(sql)) {
-    if (!known.has(f.signature) && !opts.dropped?.has(f.name)) {
+  const created = functionsCreatedBy(sql);
+  const knownNames = new Set([...byName.keys(), ...created.map((c) => c.name)]);
+  const reading = readPrivilegeStatements(sql, knownNames);
+  const finals = finalDecisions(reading);
+
+  for (const f of created) {
+    const entry = bySignature.get(f.signature);
+    if (!entry && !opts.dropped?.has(f.name)) {
       findings.push({ file, signature: f.signature, problem: "no_registry_entry" });
+      continue;
     }
-    if (!opts.grandfathered) {
-      const handled = grantPathsHandled(sql, f.name);
-      const missing = ALL_GRANTEES.filter((g) => !handled.has(g));
-      if (missing.length) findings.push({ file, signature: f.signature, problem: "default_paths_not_handled", missing });
+    if (opts.grandfathered || !entry || isExistingIdentity(entry)) continue;
+    const decided = finals.get(f.name) ?? new Map<Grantee, PrivilegeAction>();
+    const missing = ALL_GRANTEES.filter((g) => !decided.has(g));
+    if (missing.length) findings.push({ file, signature: f.signature, problem: "default_paths_not_handled", missing });
+  }
+
+  for (const u of reading.unproven) findings.push({ file, problem: "unproven_privilege_sql", detail: u });
+
+  const createdHere = new Set(created.map((c) => c.name));
+  for (const [fn, per] of finals) {
+    const entries = byName.get(fn) ?? [];
+    if (entries.length === 0) {
+      // A function created in this very file already carries `no_registry_entry`; saying it twice
+      // would only bury the message.
+      if (!opts.dropped?.has(fn) && !opts.grandfathered && !createdHere.has(fn)) {
+        findings.push({ file, fn, problem: "privilege_on_unregistered_function" });
+      }
+      continue;
+    }
+    for (const entry of entries) {
+      for (const [role, action] of per) {
+        const intent = entry.intent[role];
+        if (intent === "UNKNOWN") {
+          findings.push({ file, fn, role, signature: entry.signature, problem: "unknown_intent_touched", detail: `${action} while intent is UNKNOWN` });
+          continue;
+        }
+        if ((intent === "ALLOW") !== (action === "GRANT")) {
+          findings.push({
+            file, fn, role, signature: entry.signature,
+            problem: opts.grandfathered ? "historical_contradiction" : "contradicts_intent",
+            detail: `final explicit ${action} but registry intent is ${intent}`,
+          });
+        }
+      }
     }
   }
   return findings;
