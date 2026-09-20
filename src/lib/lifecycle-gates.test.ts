@@ -33386,6 +33386,33 @@ test("[VAST-IN-DE-DB] a paid outgoing invoice's money cannot be rewritten, by an
 // false for every input. Verified on production after the rollback: anon reads 0 rows from
 // invoices, documents and invoice_lines, with no error and no data. The linter finding is a
 // false positive for these two, and it is cheaper to record that here than to re-derive it.
+//
+// ── TWO MECHANISMS, TWO REVOKES ──
+// Step 1 above taught a rule that this gate then applied to EVERY anon revoke: "the role alone is
+// a no-op, you must revoke PUBLIC". That rule is true for exactly one of the two ways a function
+// becomes anon-executable, and it was measured against the wrong one for [DEFINER-ANON]:
+//
+//   A. PostgreSQL's own default — CREATE FUNCTION grants EXECUTE to PUBLIC. The ACL reads
+//      `=X/postgres`. Revoking anon changes nothing; PUBLIC must go. The four oldest definer
+//      functions in production carry this entry.
+//   B. Supabase's default privileges — `ALTER DEFAULT PRIVILEGES … GRANT EXECUTE ON FUNCTIONS TO
+//      anon, authenticated, service_role`, run by the platform for role postgres in schema
+//      public (pg_default_acl, no PUBLIC grantee anywhere). The ACL reads `anon=X/postgres`.
+//      Revoking PUBLIC is the no-op here; the NAMED grant must go. The other thirty-two carry
+//      this shape, and reverse_invoice_payment / answer_mollie_refund were closed exactly so:
+//      ACL before `postgres=X | anon=X | authenticated=X | service_role=X`, after the same
+//      without anon, linter 0028 from six findings to four.
+//
+// A unit test cannot see the ACL, so it cannot say which revoke is the right one for a given
+// line. What it CAN insist on is that the migration measures its own effect: every migration that
+// creates nothing carries a state check in docs/WELKE_MIGRATIES_STAAN_ER.sql (see
+// [MIGRATIE-JOURNAAL]), and that check asks has_function_privilege — which is true or false
+// regardless of which mechanism granted the right. That is where "did the revoke take" is
+// answered. This gate keeps the two oracles safe and stops claiming the rest.
+//
+// acting_for_owner is protected here on the strength of the incident above. The catalog today
+// shows it used only by policies declared TO authenticated, so anon may not need it — that is a
+// separate, explicit test to write before anything changes, not a reason to loosen this one.
 test("[ANON-ORAKEL] nothing revokes the two oracles that TO-public policies need", () => {
   const dir = "supabase/migrations";
   const bestanden = readdirSync(dir).filter((f) => f.endsWith(".sql"));
@@ -33407,14 +33434,13 @@ test("[ANON-ORAKEL] nothing revokes the two oracles that TO-public policies need
           "zero rows. Tried on production once; see the note above this test.");
       }
 
-      // 2. The lesson that still stands for every OTHER function: revoking the role alone is a
-      //    no-op, because the grant comes from PUBLIC.
-      if (/\banon\b/.test(kaal)) {
-        revokes += 1;
-        assert.match(kaal, /FROM\s+PUBLIC/i,
-          `${f}: "${kaal}" revokes from anon without revoking from PUBLIC — anon inherits EXECUTE ` +
-          "from PUBLIC, so this line applies cleanly and changes nothing");
-      }
+      // 2. Count every other anon revoke, and assert nothing about its shape. This used to demand
+      //    `FROM PUBLIC` on each of them, which is right for mechanism A and a no-op for mechanism
+      //    B (see the header) — and a gate that rejects the correct revoke for half the functions
+      //    is not protecting anything, it is teaching the next reader the wrong fix. Whether a
+      //    given line actually took is answered where it can be: by that migration's own
+      //    has_function_privilege state check in the generated inventory.
+      if (/\banon\b/.test(kaal)) revokes += 1;
     }
   }
   assert.ok(revokes >= 2, `only ${revokes} anon revokes found — the scan broke, and a broken scan passes`);
@@ -33424,6 +33450,70 @@ test("[ANON-ORAKEL] nothing revokes the two oracles that TO-public policies need
   assert.match(readFileSync("scripts/migration-inventory.ts", "utf8"),
     /has_function_privilege\('anon', 'public\.is_my_accountant_client\(uuid\)', 'EXECUTE'\)/,
     "the state check that records anon SHOULD still reach is_my_accountant_client is gone");
+});
+
+// ─── [DEFINER-ANON] The refund-writer revoke: two signatures, one role, nothing else ───────────
+//
+// The migration that closed the anonymous path to reverse_invoice_payment and answer_mollie_refund
+// is deliberately narrow, and narrowness is the property worth guarding. It is the kind of file
+// the next hardening pass reaches for first — "while we are in here, PUBLIC too, and authenticated
+// off the one nobody calls" — and each of those additions is a different change with a different
+// blast radius: authenticated is what the session client runs as, service_role is what cron and
+// the Mollie webhook run as. This pins the executable content to exactly what was reviewed.
+//
+// It tests the MIGRATION, not production. Whether the revoke took on the live ACL is the job of
+// the state check under DEEL 2 of docs/WELKE_MIGRATIES_STAAN_ER.sql, which asks
+// has_function_privilege for all three roles on both signatures.
+test("[DEFINER-ANON] anon_revoke_refund_writers.sql revokes anon from the two refund writers, and does nothing else", () => {
+  const raw = readFileSync("supabase/migrations/anon_revoke_refund_writers.sql", "utf8");
+
+  // Statements, not text. The file's commentary names PUBLIC, authenticated, service_role, GRANT
+  // and ALTER DEFAULT PRIVILEGES while explaining why none of them is touched — the AGENTS.md trap
+  // in its plainest form. Strip comments first, then split on the statement terminator.
+  const statements = raw
+    .split("\n")
+    .map((line) => line.replace(/--.*$/, "").trim())
+    .filter((line) => line.length > 0)
+    .join(" ")
+    .split(";")
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter((s) => s.length > 0);
+
+  // The whole executable content, in order. deepEqual on the full list is the assertion; the ones
+  // below it only exist to name WHICH promise broke when it does.
+  assert.deepEqual(statements, [
+    "REVOKE ALL ON FUNCTION public.reverse_invoice_payment(uuid, uuid) FROM anon",
+    "REVOKE ALL ON FUNCTION public.answer_mollie_refund(uuid, text, text, numeric) FROM anon",
+  ], "the migration's executable content is not the two reviewed statements");
+
+  assert.equal(statements.length, 2, "a third statement is a third change — it needs its own file and its own review");
+  for (const s of statements) {
+    assert.match(s, /^REVOKE ALL ON FUNCTION public\.(reverse_invoice_payment|answer_mollie_refund)\(/,
+      `"${s}" is not a revoke on one of the two refund writers`);
+    assert.doesNotMatch(s, /^(GRANT|ALTER|CREATE|DROP)\b/i, `"${s}" is not a REVOKE — the bodies, defaults and definer flag are out of scope here`);
+
+    // The ROLE LIST, not the whole statement: `public.` is the schema qualifier on every
+    // statement here, and a case-insensitive search for PUBLIC over the full text finds it every
+    // time. The grantees are whatever follows FROM, and that list must be the one word `anon`.
+    const fromAt = s.lastIndexOf(" FROM ");
+    assert.ok(fromAt > -1, `"${s}" has no FROM clause — a REVOKE without grantees revokes from nobody`);
+    const grantees = s.slice(fromAt + " FROM ".length).split(",").map((r) => r.trim().toLowerCase());
+    assert.deepEqual(grantees, ["anon"],
+      `"${s}" revokes from [${grantees.join(", ")}] — authenticated is the session client, service_role is cron, ` +
+      "and PUBLIC is the other mechanism; this migration removes the named anon grant only");
+  }
+
+  // On signature, as reviewed — a revoke by bare name would silently miss a future overload.
+  assert.ok(statements.some((s) => s.includes("reverse_invoice_payment(uuid, uuid)")));
+  assert.ok(statements.some((s) => s.includes("answer_mollie_refund(uuid, text, text, numeric)")));
+
+  // And the file says how to prove it landed, in the place the journal expects.
+  const inventory = readFileSync("docs/WELKE_MIGRATIES_STAAN_ER.sql", "utf8");
+  assert.match(inventory, /select 'anon_revoke_refund_writers\.sql'::text/, "the migration has no state check in the generated inventory");
+  for (const role of ["anon", "authenticated", "service_role"]) {
+    assert.match(inventory, new RegExp(`has_function_privilege\\('${role}', 'public\\.reverse_invoice_payment\\(uuid,uuid\\)', 'EXECUTE'\\)`),
+      `the state check does not measure ${role} on reverse_invoice_payment — the contract is "anon off, the other two still on", all three must be asked`);
+  }
 });
 
 // ─── [WERK-GEDAAN-DEUR] "En wat levert het mij op?" was answered behind the login ──────────────
