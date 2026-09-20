@@ -22,7 +22,7 @@
 -- The acl_md5 column is forensic only: it changes when ACL entries are reordered, which is not a
 -- privilege change. Never read it as pass or fail.
 --
--- Registry at generation time: 52 live functions, 28 UNKNOWN decisions, 34 accepted deviations.
+-- Registry at generation time: 53 live functions, 28 UNKNOWN decisions, 34 accepted deviations.
 
 -- ═══ 1. PER FUNCTION: registry intent ↔ effective privileges ═══════════════════════════════════
 
@@ -78,7 +78,8 @@ WITH intent(sig, kind, status, definer, i_anon, i_authenticated, i_service_role,
   ('public.assert_bookkeeping_date_sane()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.guard_paid_when_verwerkt()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.invoices_search_vector_update()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
-  ('public.prevent_accountant_amount_changes()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[])
+  ('public.prevent_accountant_amount_changes()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
+  ('public.accountant_set_invoice_status(uuid, uuid, uuid, text, text)', 'server_rpc', 'live', false, 'DENY', 'DENY', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[])
 ),
 live AS (
   SELECT format('public.%I(%s)', p.proname, oidvectortypes(p.proargtypes)) AS sig,
@@ -212,7 +213,8 @@ registered(sig) AS (VALUES
   ('public.assert_bookkeeping_date_sane()'),
   ('public.guard_paid_when_verwerkt()'),
   ('public.invoices_search_vector_update()'),
-  ('public.prevent_accountant_amount_changes()')
+  ('public.prevent_accountant_amount_changes()'),
+  ('public.accountant_set_invoice_status(uuid, uuid, uuid, text, text)')
 ),
 platform_class(owner, extension) AS (VALUES
   ('supabase_admin', 'pg_trgm')
@@ -324,7 +326,8 @@ findings AS (
       ('public.assert_bookkeeping_date_sane()', NULL),
       ('public.guard_paid_when_verwerkt()', NULL),
       ('public.invoices_search_vector_update()', NULL),
-      ('public.prevent_accountant_amount_changes()', NULL)
+      ('public.prevent_accountant_amount_changes()', NULL),
+      ('public.accountant_set_invoice_status(uuid, uuid, uuid, text, text)', NULL)
     ) AS deny(sig, deviation) ON deny.sig = l.sig
    WHERE l.definer AND l.anon_x
 )
@@ -640,3 +643,4 @@ SELECT version, name,
 --   public.guard_paid_when_verwerkt() | false | false | true | false | db23e67d6fad77fdfa003856d807d6af
 --   public.invoices_search_vector_update() | false | false | true | false | db23e67d6fad77fdfa003856d807d6af
 --   public.prevent_accountant_amount_changes() | false | false | true | false | db23e67d6fad77fdfa003856d807d6af
+--   public.accountant_set_invoice_status(uuid, uuid, uuid, text, text) | false | false | true | false | db23e67d6fad77fdfa003856d807d6af
