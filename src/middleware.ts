@@ -5,6 +5,8 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { canAccessScreen } from "@/lib/acting-for";
+// [PROFILE-READ] A failed read is not a missing row — see the header of src/lib/profile-read.ts.
+import { classifyProfileRead } from "@/lib/profile-read";
 
 // [PUBLIC-SURFACE] The public path list moved to src/lib/public-paths.ts so the smoke test can
 // assert against the SAME array this guard enforces. It was unreachable from anywhere else, which
@@ -247,13 +249,22 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith("/dashboard") &&
     !request.nextUrl.pathname.startsWith("/onboarding")
   ) {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("onboarding_done")
-      .eq("id", user.id)
-      .single();
-
-    if (profile && !profile.onboarding_done) {
+    // [PROFILE-READ] Three answers, kept apart. This used to look at `data` alone, so a read that
+    // FAILED was the same null as a row that is missing, and the three readers on this path each
+    // drew their own conclusion from it. This one falls through on both: a missing row is the
+    // wizard's to create, and a failed read is the page's to refuse honestly (dashboard/page.tsx
+    // throws to its error boundary). What it must never do is decide anything on a null it cannot
+    // explain — and it says so in the log, because from every screen that null looks like nothing.
+    const profileRead = classifyProfileRead(
+      await supabase.from("profiles").select("onboarding_done").eq("id", user.id).maybeSingle(),
+    );
+    if (profileRead.kind === "failed") {
+      console.error("[PROFILE-READ] profile unreadable in middleware — letting the page decide", {
+        path: request.nextUrl.pathname,
+        code: profileRead.code,
+        error: profileRead.message,
+      });
+    } else if (profileRead.kind === "row" && !profileRead.row.onboarding_done) {
       return withRefreshedCookies(response, NextResponse.redirect(new URL("/onboarding", request.url)));
     }
 

@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { getSessionUser } from "@/lib/session-user";
 import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
+// [PROFILE-READ] A failed read is not a missing row — see the header of src/lib/profile-read.ts.
+import { classifyProfileRead } from "@/lib/profile-read";
 
 export default async function OnboardingPage() {
   const supabase = await createServerSupabaseClient();
@@ -14,11 +16,29 @@ export default async function OnboardingPage() {
   // [HERVATTEN] Mét de bedrijfsgegevens die er al staan. Ze werden hier niet gelezen en dus ook
   // niet meegegeven, terwijl de wizard zijn formulier leeg begon — zie de toelichting bij
   // initialCompany in OnboardingWizard.
-  let { data: profile } = await supabase
-    .from("profiles")
-    .select("full_name, onboarding_done, onboarding_step, role, email, company_name, kvk_number, btw_number, iban, address")
-    .eq("id", user.id)
-    .single();
+  const readProfile = async () =>
+    classifyProfileRead(
+      await supabase
+        .from("profiles")
+        .select("full_name, onboarding_done, onboarding_step, role, email, company_name, kvk_number, btw_number, iban, address")
+        .eq("id", user.id)
+        .maybeSingle(),
+    );
+
+  // [PROFILE-READ] Three answers, and only one of them may create a row. This used to insert a
+  // fresh step-1 profile whenever `data` was null — which is also what a refused or timed-out read
+  // looks like. A completed owner then met the wizard from the start, over a profile that exists.
+  // A failed read stops here, loudly: a wizard that does not know whom it is for must not guess.
+  const firstRead = await readProfile();
+  if (firstRead.kind === "failed") {
+    console.error("[PROFILE-READ] profile unreadable on the wizard — refusing to guess", {
+      userId: user.id,
+      code: firstRead.code,
+      error: firstRead.message,
+    });
+    throw new Error("[PROFILE-READ] profile unreadable");
+  }
+  let profile = firstRead.kind === "row" ? firstRead.row : null;
 
   // [KLUIS] Een archiefaccount heeft hier niets te zoeken: deze wizard vraagt om
   // bedrijfsgegevens, een mailboxkoppeling en een eerste factuur, en wie zijn gestopte zaak
@@ -44,7 +64,9 @@ export default async function OnboardingPage() {
   if (isArchief) redirect("/dashboard/kluis");
 
   if (!profile) {
-    await supabase.from("profiles").insert({
+    // Genuinely no row — the read succeeded and found none — so the trigger did not fire for this
+    // account. The one case in which creating a profile here is right.
+    const { error: insertError } = await supabase.from("profiles").insert({
       id: user.id,
       email: user.email,
       full_name: user.user_metadata?.full_name ?? null,
@@ -52,14 +74,27 @@ export default async function OnboardingPage() {
       onboarding_done: false,
       role: "zzper",
     });
+    if (insertError) {
+      // Not fatal on its own: the re-read below is the truth, and a conflict means the row
+      // arrived in the meantime. Logged, because a silent insert failure is how a wizard renders
+      // for nobody.
+      console.error("[PROFILE-READ] creating the missing profile failed", {
+        userId: user.id,
+        code: insertError.code,
+        error: insertError.message,
+      });
+    }
 
-    const { data: fresh } = await supabase
-      .from("profiles")
-      .select("full_name, onboarding_done, onboarding_step, role, email, company_name, kvk_number, btw_number, iban, address")
-      .eq("id", user.id)
-      .single();
-
-    profile = fresh;
+    const secondRead = await readProfile();
+    if (secondRead.kind === "failed") {
+      console.error("[PROFILE-READ] profile unreadable after creating it — refusing to guess", {
+        userId: user.id,
+        code: secondRead.code,
+        error: secondRead.message,
+      });
+      throw new Error("[PROFILE-READ] profile unreadable");
+    }
+    profile = secondRead.kind === "row" ? secondRead.row : null;
   }
 
   if (profile?.onboarding_done) redirect("/dashboard");
