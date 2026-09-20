@@ -5,17 +5,21 @@
 // password. The recovery link gives this browser a temporary session, which
 // updateUser() then uses to set the new password.
 
-import { useState, useEffect } from 'react'
+import { Suspense, useState, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
+// [BESTEMMING] The destination the visitor brought to /login travels through the whole reset chain.
+import { withRedirect } from '@/lib/safe-redirect'
 import { ErrorMessage } from '@/components/ui/Feedback'
 import { wachtwoordOpslaanFout } from '@/lib/auth-errors'
 // [2FA] Zie het blok bij `tweedeStap` hieronder: dit is de ene plek waar de middleware niet komt.
 import { asAalLevel, owesSecondStep } from '@/lib/mfa'
-// [TAAL] De rest van dit scherm is nog hard-gecodeerd Nederlands van vóór de vertaling. De twee
-// nieuwe zinnen hieronder zijn dat niet: 2FA-taal hoort in de taal die de eigenaar heeft gekozen,
-// en één zin uit de catalogus is er één minder die vastzit.
+// [TAAL] Every word on this screen comes from the catalogue: it sits one click behind the
+// translated door, and a Dutch reset screen after an Arabic login is the half-translated state the
+// gate exists to forbid. The screen is on the gate's list now.
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
+import type { MessageKey } from '@/lib/i18n/messages'
 
 /**
  * [2FA] Does this recovery session still owe the second step?
@@ -59,17 +63,26 @@ async function tweedeStapNodig(supabase: ReturnType<typeof createClient>): Promi
   }
 }
 
-export default function WachtwoordHerstellenPage() {
+function WachtwoordHerstellenContent() {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  // [TAAL] A KEY, not a sentence: a Dutch string in the state is unreachable in any other language.
+  const [error, setError] = useState<MessageKey | null>(null)
   const [done, setDone] = useState(false)
   // Of deze link ons daadwerkelijk een sessie heeft opgeleverd. 'bezig' tot we het weten.
   // [2FA] 'tweedeStap' is de vierde uitkomst: de link werkt, maar dit account vraagt eerst om de
   // code uit de app. Zie tweedeStapNodig() hieronder.
   const [linkStatus, setLinkStatus] = useState<'bezig' | 'goed' | 'verlopen' | 'tweedeStap'>('bezig')
   const t = translator(useLocale())
+  const searchParams = useSearchParams()
+
+  // [BESTEMMING] Where the visitor was going when the password got in the way. It arrived on the
+  // reset mail's link (see wachtwoord-vergeten) and leaves on every door out of this screen: the
+  // login after a saved password, a new link when this one is spent, and the second step when the
+  // account asks for one — nested there, because this screen is then itself the destination.
+  const gewenst = searchParams.get('redirect')
+  const loginHref = withRedirect('/login', gewenst)
 
   // [BUILD-NO-SECRETS] The client is built where it is USED, never during render.
   //
@@ -110,16 +123,16 @@ export default function WachtwoordHerstellenPage() {
     if (loading) return
 
     if (password.length < 6) {
-      setError('Kies een wachtwoord van minstens 6 tekens')
+      setError('auth.herstel.teKort')
       return
     }
     if (password !== confirm) {
-      setError('De wachtwoorden zijn niet gelijk')
+      setError('auth.herstel.nietGelijk')
       return
     }
 
     setLoading(true)
-    setError('')
+    setError(null)
 
     const { error: updateError } = await getSupabase().auth.updateUser({ password })
 
@@ -133,7 +146,7 @@ export default function WachtwoordHerstellenPage() {
         status: updateError.status,
         message: updateError.message,
       })
-      setError(fout.tekst)
+      setError(fout.sleutel)
       if (fout.linkVerlopen) setLinkStatus('verlopen')
       setLoading(false)
       return
@@ -148,13 +161,13 @@ export default function WachtwoordHerstellenPage() {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
         <div className="bg-white p-8 rounded-2xl shadow-sm w-full max-w-md text-center">
           <div aria-hidden="true" style={{ fontSize: '48px', marginBottom: '16px' }}>✅</div>
-          <h1 className="text-2xl font-bold text-gray-900">Wachtwoord opgeslagen</h1>
-          <p className="text-gray-500 text-sm mt-2">Je kunt nu inloggen met je nieuwe wachtwoord.</p>
+          <h1 className="text-2xl font-bold text-gray-900">{t('auth.herstel.opgeslagen')}</h1>
+          <p className="text-gray-500 text-sm mt-2">{t('auth.herstel.nuInloggen')}</p>
           <a
-            href="/login"
+            href={loginHref}
             className="inline-block mt-6 px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700"
           >
-            Naar inloggen
+            {t('reg.naarInloggen')}
           </a>
         </div>
       </div>
@@ -173,19 +186,18 @@ export default function WachtwoordHerstellenPage() {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
         <div className="bg-white p-8 rounded-2xl shadow-sm w-full max-w-md text-center">
           <div aria-hidden="true" style={{ fontSize: '48px', marginBottom: '16px' }}>⏳</div>
-          <h1 className="text-2xl font-bold text-gray-900">Deze link werkt niet meer</h1>
+          <h1 className="text-2xl font-bold text-gray-900">{t('auth.herstel.linkWeg')}</h1>
           <p className="text-gray-500 text-sm mt-2">
-            Een herstellink is kort geldig en kan maar één keer gebruikt worden. Open hem ook in
-            dezelfde browser waarin je hem hebt aangevraagd.
+            {t('auth.herstel.linkWegUitleg')}
           </p>
           <a
-            href="/wachtwoord-vergeten"
+            href={withRedirect('/wachtwoord-vergeten', gewenst)}
             className="inline-block mt-6 px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700"
           >
-            Vraag een nieuwe link aan
+            {t('auth.herstel.nieuweLink')}
           </a>
-          <a href="/login" className="block mt-4 text-sm text-gray-500 hover:text-gray-700">
-            Terug naar inloggen
+          <a href={loginHref} className="block mt-4 text-sm text-gray-500 hover:text-gray-700">
+            {t('auth.terugNaarInloggen')}
           </a>
         </div>
       </div>
@@ -210,7 +222,7 @@ export default function WachtwoordHerstellenPage() {
             {t('mfa.herstel.uitleg')}
           </p>
           <a
-            href="/verificatie?redirect=%2Fwachtwoord-herstellen"
+            href={withRedirect('/verificatie', withRedirect('/wachtwoord-herstellen', gewenst))}
             className="inline-block mt-6 px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700"
           >
             {t('mfa.verifieer')}
@@ -225,13 +237,13 @@ export default function WachtwoordHerstellenPage() {
       <div className="bg-white p-8 rounded-2xl shadow-sm w-full max-w-md">
 
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-gray-900">Nieuw wachtwoord</h1>
-          <p className="text-gray-500 text-sm mt-2">Kies een nieuw wachtwoord voor je account.</p>
+          <h1 className="text-2xl font-bold text-gray-900">{t('auth.herstel.nieuw')}</h1>
+          <p className="text-gray-500 text-sm mt-2">{t('auth.herstel.uitleg')}</p>
         </div>
 
         <form onSubmit={e => { e.preventDefault(); handleUpdate() }} className="space-y-4">
             <div>
-              <label htmlFor="new-password" className="block text-sm font-medium text-gray-700 mb-1">Nieuw wachtwoord</label>
+              <label htmlFor="new-password" className="block text-sm font-medium text-gray-700 mb-1">{t('auth.herstel.nieuw')}</label>
               <input
                 id="new-password"
                 type="password"
@@ -245,7 +257,7 @@ export default function WachtwoordHerstellenPage() {
             </div>
 
             <div>
-              <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 mb-1">Herhaal wachtwoord</label>
+              <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 mb-1">{t('auth.herstel.herhaal')}</label>
               <input
                 id="confirm-password"
                 type="password"
@@ -259,18 +271,33 @@ export default function WachtwoordHerstellenPage() {
               />
             </div>
 
-            <ErrorMessage message={error} />
+            <ErrorMessage message={error ? t(error) : ''} />
 
             <button
               type="submit"
               disabled={loading || linkStatus === 'bezig' || !password || !confirm}
               className="w-full bg-blue-600 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-blue-700 active:scale-[0.98] transition-all disabled:opacity-50"
             >
-              {loading ? 'Bezig...' : 'Wachtwoord opslaan'}
+              {loading ? t('auth.bezig') : t('auth.herstel.opslaan')}
             </button>
         </form>
 
       </div>
     </div>
+  )
+}
+
+export default function WachtwoordHerstellenPage() {
+  // [BESTEMMING] useSearchParams needs a Suspense boundary on a page Next prerenders statically —
+  // the same shape as /login. [TAAL] The one word in the fallback comes from the catalogue.
+  const t = translator(useLocale())
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <p className="text-gray-400 text-sm">{t('auth.laden')}</p>
+      </div>
+    }>
+      <WachtwoordHerstellenContent />
+    </Suspense>
   )
 }

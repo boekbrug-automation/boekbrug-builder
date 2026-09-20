@@ -103,6 +103,12 @@ waarschuwing weg voor iedereen.
   http://localhost:3000/wachtwoord-herstellen
   https://*.vercel.app/api/auth/callback      ← preview-deploys (optioneel)
   ```
+  [BESTEMMING] Both `/api/auth/callback` and `/wachtwoord-herstellen` are called WITH a query string
+  (`?next=…` on the confirmation mail, `?redirect=…` on the reset mail, so a visitor lands where they
+  were going). That needs no extra entry on the Site URL's own host: GoTrue accepts any redirect
+  whose hostname equals the Site URL's. A preview host is matched by glob against the FULL URL, so
+  an entry there must end in `**` (e.g. `https://*.vercel.app/api/auth/callback**`) or the query
+  string makes it fall back to the Site URL.
   (Draait de site ook op `www.boekbrug.nl`? Zet dan beide paden er óók met `www.` bij — de
   code bouwt zijn redirect uit `window.location.origin`, dus uit het adres waarop de bezoeker
   binnenkwam.)

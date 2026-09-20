@@ -67,3 +67,23 @@ export function isSafeRedirect(raw: string | null | undefined): raw is string {
 export function safeRedirect(raw: string | null | undefined, fallback: string): string {
   return isSafeRedirect(raw) ? raw : fallback;
 }
+
+/**
+ * [BESTEMMING] A path with the visitor's destination attached — or the bare path when there is
+ * nothing worth carrying.
+ *
+ * The password-reset chain lost the destination at its first link: /login carried ?redirect= and
+ * the "Wachtwoord vergeten?" anchor was a bare href, so an invited accountant who reset a password
+ * on the way came back to a bare /login and landed on a dashboard with the invitation nowhere in
+ * sight. Every link in that chain now goes through this one function.
+ *
+ * [SEC-REDIRECT] The value is checked HERE, before it travels: a link may only ever carry what the
+ * receiving screen would accept, and an unsafe value is dropped rather than passed along for the
+ * receiver to throw away. Encoded once, with encodeURIComponent, so a destination that itself
+ * carries a query string ("/invite/accept?token=…") survives the trip intact — and so a nested
+ * carrier ("/verificatie?redirect=/wachtwoord-herstellen?redirect=…") unpacks one layer per hop.
+ */
+export function withRedirect(path: string, raw: string | null | undefined): string {
+  if (!isSafeRedirect(raw)) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}redirect=${encodeURIComponent(raw)}`;
+}

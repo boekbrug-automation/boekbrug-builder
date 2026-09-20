@@ -7,7 +7,7 @@ import { Suspense, useState, useEffect } from 'react'
 import { getBrowserClient } from '@/lib/supabase'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { ErrorMessage } from '@/components/ui/Feedback'
-import { isSafeRedirect, safeRedirect } from '@/lib/safe-redirect'
+import { isSafeRedirect, safeRedirect, withRedirect } from '@/lib/safe-redirect'
 import { callbackFoutSleutel, herstelmailFout, inlogFout } from '@/lib/auth-errors'
 // [TAAL-POORT] De deur sprak maar één taal. Zie AuthLanguageSwitch voor waarom dat juist HIER het
 // duurst was: de knop die je uit het Nederlands haalt stond zelf achter het Nederlands.
@@ -250,7 +250,10 @@ function LoginContent() {
                 style={{ fontSize: '16px' }} // prevent iOS zoom
               />
               <div className="text-end mt-1">
-                <a href="/wachtwoord-vergeten" className="text-sm text-blue-600 hover:underline">
+                {/* [BESTEMMING] Mét de bestemming: dit was een kale href, en daarmee verloor wie
+                    onderweg zijn wachtwoord herstelde de uitnodiging of de deeplink waarvoor hij
+                    kwam — de keten eindigde op een kaal /login en dus op /dashboard. */}
+                <a href={withRedirect('/wachtwoord-vergeten', gewenst)} className="text-sm text-blue-600 hover:underline">
                   {t('auth.wachtwoordVergeten')}
                 </a>
               </div>
