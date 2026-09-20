@@ -519,6 +519,23 @@ export const REGISTRY: readonly FunctionEntry[] = [
   triggerFn("public.prevent_accountant_amount_changes()", false, ["invoices"], CLOSED_TO_ALL_BUT_SERVICE,
     ["revoke_execute_on_trigger_functions.sql"]),
 
+  // ── [VRAAG-SYNC] the one write path for (invoices.accountant_status, the accountant's own
+  //    invoice question row); server door only. Live since 20 September 2026: the repo migration
+  //    was applied to production as 20260920185242 (Phase 2 rollout, Step 1) and measured there
+  //    the same day, so this row went `planned` → `live`. The intent did not move, and production
+  //    matches it, so there is no deviation to record.
+  {
+    signature: "public.accountant_set_invoice_status(uuid, uuid, uuid, text, text)", kind: "server_rpc", managedBy: "boekbrug", owner: "postgres",
+    definer: false, status: "live", intent: intent(D, D, A, D), current: CLOSED_TO_ALL_BUT_SERVICE,
+    evidence: [
+      "accountant_invoice_status_sync.sql revokes PUBLIC, anon, authenticated; grants service_role",
+      "production migration 20260920185242 accountant_invoice_status_sync (applied 2026-09-20); the stored statement is byte-identical to the repo file",
+      "measured after the apply: SECURITY INVOKER (prosecdef=false), owner postgres, search_path=public, pg_temp, proacl {postgres=X/postgres,service_role=X/postgres}; EXECUTE anon false, authenticated false, service_role true, no PUBLIC entry",
+    ],
+    callers: ["src/lib/accountant-status-door.ts (pipeline client)"],
+    provenance: { inRepo: true, productionVersions: ["20260920185242"] }, verified: VERIFIED,
+  },
+
   // ── created by a repo migration, absent from production ────────────────────────────────────
   {
     signature: "public.document_is_referenced(uuid)", kind: "invoker_rpc", managedBy: "boekbrug", owner: "postgres",

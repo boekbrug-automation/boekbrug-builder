@@ -33,8 +33,11 @@ export function klaarPath(period: YearQuarter): string {
   return `/dashboard/klaar?year=${period.year}&quarter=${period.quarter}`;
 }
 
-/** The three verdicts readiness produces, plus the honest fourth: we have not measured yet. */
-export type KlaarStand = "ready" | "almost" | "attention" | "unknown";
+/**
+ * The three verdicts readiness produces, plus two honest ones: we have not measured yet (unknown),
+ * and we measured but could not read everything (incomplete — [READINESS-DEGRADE]).
+ */
+export type KlaarStand = "ready" | "almost" | "attention" | "unknown" | "incomplete";
 
 /**
  * The four keys this module may name. A union, not `string`: the renderer's `t()` is typed on the
@@ -45,7 +48,8 @@ export type KlaarKey =
   | "start.waarheid.sub"
   | "start.klaar.ready"
   | "start.klaar.almost"
-  | "start.klaar.attention";
+  | "start.klaar.attention"
+  | "start.klaar.onvolledig";
 
 /** What the button shows: a dot, a message key, and the count that key needs. */
 export interface KlaarRegel {
@@ -63,6 +67,8 @@ export interface KlaarBron {
   status?: unknown;
   missing?: unknown;
   risks?: unknown;
+  /** [READINESS-DEGRADE] false when a read the verdict needed did not happen. */
+  verified?: unknown;
 }
 
 const KLEUR: Record<KlaarStand, string> = {
@@ -71,6 +77,8 @@ const KLEUR: Record<KlaarStand, string> = {
   attention: "#B3261E",
   // The question is not a warning: an unmeasured quarter is rendered in the button's own colour.
   unknown: "#5F6368",
+  // Measured, but not everything could be read: amber, never green — see readiness.ts.
+  incomplete: "#7C5800",
 };
 
 const isStand = (v: unknown): v is Exclude<KlaarStand, "unknown"> =>
@@ -86,6 +94,12 @@ export function klaarRegel(report: KlaarBron | null | undefined): KlaarRegel {
   const status = report?.status;
   if (!isStand(status)) {
     return { stand: "unknown", key: "start.waarheid.sub", params: {}, kleur: KLEUR.unknown };
+  }
+  // [READINESS-DEGRADE] Checked BEFORE "ready": a report that says ready and unverified at once
+  // cannot come out of buildReadiness, but a stale cache or a hand-made object could, and unknown
+  // may never become green here either.
+  if (report?.verified === false) {
+    return { stand: "incomplete", key: "start.klaar.onvolledig", params: {}, kleur: KLEUR.incomplete };
   }
   if (status === "ready") {
     return { stand: "ready", key: "start.klaar.ready", params: {}, kleur: KLEUR.ready };

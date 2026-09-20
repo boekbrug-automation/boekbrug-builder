@@ -8,8 +8,10 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
-import { quarterFromParams } from '@/lib/quarter'
+import { useSearchParams, useRouter } from 'next/navigation'
+import { quarterFromParams, currentQuarter, isPeriodStarted, type QuarterNo as PeriodQuarter } from '@/lib/quarter'
+// [KLAAR-URL] The period lives in the URL; the picker writes it there and reads it back.
+import { klaarPath } from '@/lib/klaar-stand'
 import { M3, FONT, FONT_NUM, COLUMN } from '@/lib/design/tokens'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
@@ -52,6 +54,9 @@ interface Report {
   missing: Item[]
   risks: Item[]
   notes: string[]
+  /** [READINESS-DEGRADE] false when a read the verdict needed did not happen — then never green. */
+  verified?: boolean
+  unverified?: { key: string; label: string }[]
 }
 interface ApiResponse {
   ok: boolean
@@ -76,21 +81,33 @@ const DIM_ICON: Record<DimensionKey, string> = {
 export default function KlaarClient() {
   const t = translator(useLocale())
   const searchParams = useSearchParams()
+  const router = useRouter()
   // [KLAAR-KWARTAAL] The period in the URL first — the home's door carries the quarter its verdict
   // was measured for (klaarPath) — and otherwise the app-wide default, from the same function the
   // home uses. Both surfaces therefore name ONE quarter, whichever way this screen was opened.
+  //
+  // [KLAAR-URL] And the URL is the ONLY place the period lives. It used to be copied into state
+  // once and changed there, so the picker moved the screen while the address bar stayed on the
+  // quarter the page was opened with: a refresh, a copied link, back/forward and a deep link all
+  // named a different period than the one on the screen (audit KL-03). The picker now navigates —
+  // klaarPath() writes the period, quarterFromParams() reads it back — and there is no second copy.
   const init = quarterFromParams((k) => searchParams.get(k))
-  const [year, setYear] = useState(init.year)
-  // Typed number (not the lib's 1|2|3|4) so the quarter picker's setQuarter(q) accepts it.
-  const [quarter, setQuarter] = useState<number>(init.quarter)
+  const year = init.year
+  // Typed number (not the lib's 1|2|3|4) so the picker's comparisons and the deadline accept it.
+  const quarter: number = init.quarter
+  const gaNaar = (y: number, q: number) => router.push(klaarPath({ year: y, quarter: q as PeriodQuarter }), { scroll: false })
   const [data, setData] = useState<ApiResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   // [TZ] Amsterdam, not the device's zone: around New Year those differ, and "which years may I
   // pick" would then be answered by whichever side of midnight the viewer happens to be on.
   const todayNl = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-  const curYear = Number(todayNl.slice(0, 4))
-  const curQuarter = Math.floor((Number(todayNl.slice(5, 7)) - 1) / 3) + 1
+  // [KLAAR-TOEKOMST] The same Amsterdam rule as the route and the home (quarter.ts): a period that
+  // has not begun is not assessed, whether the picker or the address bar names it.
+  const nu = currentQuarter()
+  const curYear = nu.year
+  const curQuarter: number = nu.quarter
+  const begonnen = isPeriodStarted({ year, quarter: quarter as PeriodQuarter })
   // [DEADLINE] Op dezelfde Amsterdamse dag als de rest van dit scherm — todayNl is er al, en een
   // tweede bron voor "vandaag" is precies hoe twee regels op één scherm een andere dag tellen.
   const deadline = deadlineNotice(year, quarter as QuarterNo, todayNl)
@@ -203,6 +220,8 @@ export default function KlaarClient() {
       // Reset binnen de async-wikkel, vóór de eerste await: dezelfde tick als voorheen,
       // maar zonder synchrone setState in de effect-body (cascaderende renders).
       setLoading(true); setError(false); setData(null)
+      // [KLAAR-TOEKOMST] Nothing to fetch about a period that has not begun; the screen says so.
+      if (!begonnen) { setLoading(false); return }
       try {
         const r = await fetch(`/api/readiness?year=${year}&quarter=${quarter}`)
         if (!r.ok) throw new Error('readiness')
@@ -215,7 +234,7 @@ export default function KlaarClient() {
       }
     })()
     return () => { cancelled = true }
-  }, [year, quarter, reloadKey])
+  }, [year, quarter, reloadKey, begonnen])
 
   const report = data?.report ?? null
   const meta = report ? STATUS_META[report.status] : STATUS_META.attention
@@ -261,27 +280,34 @@ export default function KlaarClient() {
             const active = quarter === q
             const future = year > curYear || (year === curYear && q > curQuarter)
             return (
-              <button key={q} onClick={() => !future && setQuarter(q)} disabled={future} title={future ? t('klr.kwartaalNietBegonnen') : undefined} style={{ flex: 1, padding: '9px 0', borderRadius: 10, cursor: future ? 'default' : 'pointer', fontFamily: FONT, fontSize: 14, fontWeight: 600, border: `1px solid ${active ? M3.primary : M3.outlineVariant}`, background: active ? M3.primary : M3.surface, color: active ? '#fff' : M3.onSurface, opacity: future ? 0.4 : 1 }}>Q{q}</button>
+              <button key={q} onClick={() => !future && gaNaar(year, q)} disabled={future} title={future ? t('klr.kwartaalNietBegonnen') : undefined} style={{ flex: 1, padding: '9px 0', borderRadius: 10, cursor: future ? 'default' : 'pointer', fontFamily: FONT, fontSize: 14, fontWeight: 600, border: `1px solid ${active ? M3.primary : M3.outlineVariant}`, background: active ? M3.primary : M3.surface, color: active ? '#fff' : M3.onSurface, opacity: future ? 0.4 : 1 }}>Q{q}</button>
             )
           })}
           <div style={{ display: 'flex', alignItems: 'center', gap: 2, paddingInlineStart: 6 }}>
-            <button onClick={() => setYear((y) => Math.max(2000, y - 1))} title={t('wh.vorigJaar')} style={{ width: 28, height: 28, borderRadius: 8, border: 'none', background: 'none', cursor: 'pointer', color: M3.primary }}>
+            <button onClick={() => gaNaar(Math.max(2000, year - 1), quarter)} title={t('wh.vorigJaar')} style={{ width: 28, height: 28, borderRadius: 8, border: 'none', background: 'none', cursor: 'pointer', color: M3.primary }}>
               <span className="material-symbols-outlined icon-dir" style={{ fontSize: 20 }} aria-hidden>chevron_left</span>
             </button>
             <span style={{ fontSize: 14, fontWeight: 700, color: M3.onSurface, minWidth: 40, textAlign: 'center' }}>{year}</span>
             {/* Stepping INTO the current year can strand the selection on a quarter that has not
                 started (Q4 2025 → 2026 in January), so the quarter is clamped with the year. */}
-            <button onClick={() => { const next = Math.min(year + 1, curYear); setYear(next); if (next === curYear && quarter > curQuarter) setQuarter(curQuarter) }} disabled={year >= curYear} title={t('wh.volgendJaar')} style={{ width: 28, height: 28, borderRadius: 8, border: 'none', background: 'none', cursor: year >= curYear ? 'default' : 'pointer', color: year >= curYear ? M3.outlineVariant : M3.primary, opacity: year >= curYear ? 0.5 : 1 }}>
+            <button onClick={() => { const next = Math.min(year + 1, curYear); gaNaar(next, next === curYear && quarter > curQuarter ? curQuarter : quarter) }} disabled={year >= curYear} title={t('wh.volgendJaar')} style={{ width: 28, height: 28, borderRadius: 8, border: 'none', background: 'none', cursor: year >= curYear ? 'default' : 'pointer', color: year >= curYear ? M3.outlineVariant : M3.primary, opacity: year >= curYear ? 0.5 : 1 }}>
               <span className="material-symbols-outlined icon-dir" style={{ fontSize: 20 }} aria-hidden>chevron_right</span>
             </button>
           </div>
         </div>
 
         {loading && <div style={{ color: M3.neutral, fontSize: 14, padding: '32px 0', textAlign: 'center' }}>{t('ss.controleren')}</div>}
+        {/* [KLAAR-TOEKOMST] A period that has not begun: a clear non-verdict, not a confident red. */}
+        {!loading && !begonnen && (
+          <div style={{ background: M3.surfaceVariant, borderRadius: 14, padding: '18px 20px', textAlign: 'center', margin: '12px 0' }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M3.onSurface }}>{t('klr.kwartaalNietBegonnen')}</div>
+            <div style={{ fontSize: 13, color: M3.neutral, marginTop: 4, lineHeight: 1.5 }}>{t('klr.periode.nietBegonnen')}</div>
+          </div>
+        )}
         {/* A bare sentence on the screen that decides whether the quarter may be handed over is a
             dead end — and the retry it needed was already sitting in setReloadKey, driving the
             "Vernieuwen" link above. Say what it does NOT mean, and offer the way out. */}
-        {!loading && (error || !report) && (
+        {!loading && begonnen && (error || !report) && (
           <div style={{ background: M3.errorContainer, borderRadius: 14, padding: '18px 20px', textAlign: 'center', margin: '12px 0' }}>
             <div style={{ fontSize: 14.5, fontWeight: 700, color: M3.error }}>{t('klr.fout.status')}</div>
             <div style={{ fontSize: 13, color: M3.onSurface, marginTop: 4, lineHeight: 1.5 }}>
@@ -298,6 +324,26 @@ export default function KlaarClient() {
 
         {report && (
           <>
+            {/* [READINESS-DEGRADE] Above the verdict, when a read it needed did not happen: the
+                measured dimensions stay measured below, but the conclusion is withheld — never
+                green, never "klaar" — and the owner reads WHAT was not read, with the way to retry. */}
+            {report.verified === false && (
+              <div role="status" style={{ background: M3.warningContainer, borderRadius: 14, padding: '16px 18px', marginBottom: 12 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: '#7a4f00' }}>{t('klr.onvolledig.kop')}</div>
+                <div style={{ fontSize: 13.5, color: '#7a4f00', marginTop: 4, lineHeight: 1.5 }}>{t('klr.onvolledig.uitleg')}</div>
+                {(report.unverified ?? []).length > 0 && (
+                  <div style={{ fontSize: 13, color: '#7a4f00', marginTop: 4, lineHeight: 1.5 }}>
+                    {t('klr.onvolledig.nietGelezen', { onderdelen: (report.unverified ?? []).map((u) => u.label).join(', ') })}
+                  </div>
+                )}
+                <button
+                  onClick={() => setReloadKey((k) => k + 1)}
+                  style={{ marginTop: 10, background: '#7a4f00', color: '#fff', border: 'none', borderRadius: 980, padding: '8px 18px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}
+                >
+                  {t('inkoop.opnieuwProberen')}
+                </button>
+              </div>
+            )}
             {/* ── The verdict hero ── */}
             <div style={{ background: meta.bg, borderRadius: 18, padding: '22px 20px', marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

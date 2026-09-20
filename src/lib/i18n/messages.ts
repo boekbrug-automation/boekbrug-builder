@@ -11264,11 +11264,6 @@ export const MESSAGES = {
     ar: 'تبحث عن محاسب؟ اطّلع على المكاتب التي تعمل مع BoekBrug.',
     en: 'Looking for one? See the offices that work with BoekBrug.',
   },
-  'vr.geenKoppeling': {
-    nl: 'Er is op dit moment geen boekhouder aan je account gekoppeld, dus we kunnen je antwoord nergens naartoe sturen.',
-    ar: 'لا يوجد حاليًا محاسب مرتبط بحسابك، لذا لا يمكننا إرسال جوابك إلى أي جهة.',
-    en: 'No accountant is linked to your account right now, so we have nowhere to send your answer.',
-  },
   'vr.geenToelichting': {
     nl: 'Je boekhouder heeft dit bestand als vraag gemarkeerd, maar er geen toelichting bij geschreven. Vraag gerust wat hij precies nodig heeft.',
     ar: 'علّم المحاسب هذا الملف كسؤال، لكنه لم يكتب توضيحًا. لا تتردد في سؤاله عمّا يحتاجه بالضبط.',
@@ -15945,6 +15940,42 @@ export const MESSAGES = {
   'beh.vast.vooralBij': { nl: 'Vooral bij', ar: 'غالبًا عند', en: 'Mostly at' },
   'beh.vast.verspreid': { nl: 'verspreid', ar: 'متفرّق', en: 'spread out' },
   'beh.vast.geen': { nl: 'Geen enkele vastgelegde reden in deze periode.', ar: 'لا أسباب مسجّلة في هذه الفترة.', en: 'No recorded reason at all in this period.' },
+
+  // [VRAAG-EIGENAAR] Two offices, one owner: every card names its asker and answers that asker.
+  'vr.gevraagdDoor': { nl: 'Gevraagd door {naam}', en: 'Asked by {naam}' },
+  'vr.nietMeerGekoppeld': {
+    nl: 'Deze vraag is gesteld door een boekhouder die niet meer aan je account gekoppeld is. Antwoorden kan hier niet meer.',
+    en: 'This question was asked by an accountant who is no longer linked to your account. It can no longer be answered here.',
+  },
+  'vr.koppelingOnbekend': {
+    nl: 'We konden niet controleren of deze boekhouder nog aan je account gekoppeld is.',
+    en: 'We could not check whether this accountant is still linked to your account.',
+  },
+  'vr.geen.koppelingOnbekend': {
+    nl: 'We konden je koppeling met een boekhouder nu niet controleren.',
+    en: 'We could not check your link with an accountant just now.',
+  },
+  // [GESPREK-GRENS] A thread with someone you are not linked to is not a conversation.
+  'gesprek.nietGekoppeld': {
+    nl: 'Je bent niet gekoppeld aan deze gebruiker. Berichten sturen is hier niet mogelijk.',
+    en: 'You are not linked to this user. Sending messages is not possible here.',
+  },
+  'gesprek.koppelingWeg': {
+    nl: 'Deze gebruiker is niet meer aan je account gekoppeld. Je kunt de berichten lezen, maar geen nieuwe sturen.',
+    en: 'This user is no longer linked to your account. You can read the messages, but not send new ones.',
+  },
+  // [READINESS-DEGRADE] A verdict that could not check everything says so, and is never green.
+  'klr.onvolledig.kop': { nl: 'Niet alles kon worden gecontroleerd', en: 'Not everything could be checked' },
+  'klr.onvolledig.uitleg': {
+    nl: 'Dit oordeel is onvolledig en telt niet als groen licht.',
+    en: 'This verdict is incomplete and does not count as a green light.',
+  },
+  'klr.onvolledig.nietGelezen': { nl: 'Niet gelezen: {onderdelen}.', en: 'Not read: {onderdelen}.' },
+  'klr.periode.nietBegonnen': {
+    nl: 'Dit kwartaal is nog niet begonnen, dus er valt nog niets te beoordelen. Kies een ander kwartaal.',
+    en: 'This quarter has not started yet, so there is nothing to assess. Choose another quarter.',
+  },
+  'start.klaar.onvolledig': { nl: 'Nog niet alles gecontroleerd', en: 'Not everything checked yet' },
 
 } satisfies Record<string, Message>
 

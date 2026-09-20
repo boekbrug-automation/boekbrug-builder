@@ -12,11 +12,18 @@
 // het niet toe, en het hoort ook niet: een status is diens bewering). Daarom staat er na
 // het versturen géén "afgehandeld", maar precies wat er is gebeurd: je antwoord is verstuurd,
 // en de vraag blijft staan tot je boekhouder hem zelf afvinkt.
+//
+// [VRAAG-EIGENAAR] Every card answers ITS asker. An owner may have two offices linked, and each
+// question carries the accountant who asked it; the answer is posted to that id, never to "the"
+// accountant. A question whose asker is no longer linked stays visible and says so — with no
+// composer that would pretend the relationship exists (the server refuses that send anyway). A
+// link read that failed says that too, rather than guessing either way.
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { FONT, M3, R, COLUMN } from '@/lib/design/tokens'
 import { bouwAntwoordBericht, type OpenVraag } from '@/lib/vragen'
+import { answerTargetFor, type AccountantLinks } from '@/lib/accountant-links'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
 import { failureText } from '@/lib/server-message'
@@ -29,6 +36,13 @@ const EL1 = '0 1px 2px rgba(0,0,0,0.08)'
 export interface VraagView extends OpenVraag {
   /** Ondertekende URL naar het bestand, of null als er niets te openen valt. */
   fileUrl: string | null
+  /**
+   * [VRAAG-DEUR] The screen that shows this invoice — Inkomend for a purchase invoice, the invoice
+   * page for a sales invoice — decided on the server from the invoice's own direction and
+   * ownership (invoiceQuestionHref). Null for a document question, for an invoice we could not
+   * read, and for one whose direction the records do not settle: no door to a guess.
+   */
+  invoiceHref?: string | null
 }
 
 /** [VOORSTEL] One open correction proposal from the accountant, as the card shows it. */
@@ -53,19 +67,26 @@ function datumNL(iso: string | null): string | null {
 export default function VragenClient({
   vragen,
   voorstellen = [],
-  accountantId,
+  links,
+  accountantNames = {},
   accountantNaam,
   loadFailed,
 }: {
   vragen: VraagView[]
   voorstellen?: VoorstelView[]
-  accountantId: string | null
+  /** [VRAAG-EIGENAAR] The owner's current links, as a collection: failed / zero / one / many. */
+  links: AccountantLinks
+  /** Names for the accountant ids the server could prove — display only. */
+  accountantNames?: Record<string, string>
+  /** The one linked accountant's name, only when exactly one is linked; otherwise null. */
   accountantNaam: string | null
   loadFailed: boolean
 }) {
   const t = translator(useLocale())
   const router = useRouter()
   const nietsOpen = vragen.length === 0 && voorstellen.length === 0
+  const linksKnown = links.state === 'known'
+  const heeftBoekhouder = linksKnown && links.ids.length > 0
 
   return (
     <div style={{ minHeight: '100vh', background: M3.bg, fontFamily: FONT }}>
@@ -102,12 +123,15 @@ export default function VragenClient({
           <div style={{ background: M3.successContainer, borderRadius: R.lg, padding: '20px 18px', boxShadow: EL1 }}>
             <div style={{ fontSize: 15.5, fontWeight: 600, color: '#0B5345' }}>{t('vr.geen')}</div>
             <div style={{ fontSize: 13.5, color: '#0B5345', marginTop: 4, lineHeight: 1.55 }}>
-              {accountantId
-                ? t('vr.geen.metBoekhouder')
-                : t('vr.geen.zonderBoekhouder')}
+              {/* [NO-SILENT-EMPTY] A link read that failed is not "no accountant linked". */}
+              {!linksKnown
+                ? t('vr.geen.koppelingOnbekend')
+                : heeftBoekhouder
+                  ? t('vr.geen.metBoekhouder')
+                  : t('vr.geen.zonderBoekhouder')}
             </div>
             {/* [KANTOORGIDS] Alleen zonder boekhouder: wie er al een heeft, hoeft geen lijst. */}
-            {!accountantId && (
+            {linksKnown && !heeftBoekhouder && (
               <div style={{ fontSize: 13.5, marginTop: 8, lineHeight: 1.55 }}>
                 <a href="/boekhouders" style={{ color: '#0B5345', fontWeight: 600 }}>
                   {t('vr.geen.zoekBoekhouder')}
@@ -121,8 +145,9 @@ export default function VragenClient({
             {voorstellen.map((v) => (
               <VoorstelKaart key={v.id} voorstel={v} />
             ))}
+            {/* [VRAAG-EIGENAAR] Keyed on asker AND subject: two offices may ask about one invoice. */}
             {vragen.map((v) => (
-              <VraagKaart key={v.documentId} vraag={v} accountantId={accountantId} />
+              <VraagKaart key={`${v.accountantId ?? 'niemand'}:${v.documentId}`} vraag={v} links={links} askerName={v.accountantId ? accountantNames[v.accountantId] ?? null : null} />
             ))}
           </div>
         )}
@@ -151,8 +176,9 @@ export default function VragenClient({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function VraagKaart({ vraag, accountantId }: { vraag: VraagView; accountantId: string | null }) {
+function VraagKaart({ vraag, links, askerName }: { vraag: VraagView; links: AccountantLinks; askerName: string | null }) {
   const t = translator(useLocale())
+  const router = useRouter()
   const [antwoord, setAntwoord] = useState('')
   const [bezig, setBezig] = useState(false)
   const [verstuurd, setVerstuurd] = useState(false)
@@ -168,22 +194,23 @@ function VraagKaart({ vraag, accountantId }: { vraag: VraagView; accountantId: s
       ? (vraag.documentMissing ? t('vr.naam.factuurWeg') : t('nieuw.type.factuur'))
       : (vraag.documentMissing ? t('vr.naam.bestandWeg') : t('vr.naam.naamloos'))
   )
-  // De factuur zelf, met ?focus= — dezelfde deep-link die een melding gebruikt: hij klapt de rij
-  // open, scrollt hem in beeld en licht hem even op. Alleen wanneer wij de factuur ook echt konden
-  // lezen; een link naar een rij die er niet is, is erger dan geen link.
-  const factuurHref = isFactuur && !vraag.documentMissing
-    ? `/dashboard/incoming/manage?focus=${encodeURIComponent(vraag.documentId)}`
-    : null
+  // [VRAAG-DEUR] The invoice itself, on the screen that shows it — decided on the server from the
+  // invoice's direction (see invoiceQuestionHref). Only when we could read the invoice; a link to a
+  // row that is not there is worse than no link.
+  const factuurHref = vraag.invoiceHref ?? null
+  // [VRAAG-EIGENAAR] Who the answer goes to: the asker, if they are still linked.
+  const target = answerTargetFor(vraag.accountantId, links)
+  const antwoordId = `antwoord-${vraag.accountantId ?? 'niemand'}-${vraag.documentId}`
 
   async function verstuur() {
     const bericht = bouwAntwoordBericht(vraag.documentName, antwoord)
-    if (!bericht || !accountantId) return
+    if (!bericht || !target.ok) return
     setBezig(true); setFout(null)
     try {
       const res = await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiver_id: accountantId, content: bericht }),
+        body: JSON.stringify({ receiver_id: target.accountantId, content: bericht }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -210,6 +237,9 @@ function VraagKaart({ vraag, accountantId }: { vraag: VraagView; accountantId: s
             <div style={{ fontSize: 12.5, color: M3.neutral, marginTop: 2 }}>
               {datum ? t('vr.gevraagdOp', { datum }) : t('vr.datumOnbekend')}
               {vraag.documentTrashed && ` · ${t('vr.inPrullenbak')}`}
+              {/* [VRAAG-EIGENAAR] With two offices the owner has to know WHO is asking. Only a
+                  name the server could prove; never a placeholder that reads like one. */}
+              {askerName && ` · ${t('vr.gevraagdDoor', { naam: askerName })}`}
             </div>
           </div>
           {vraag.fileUrl && (
@@ -251,10 +281,22 @@ function VraagKaart({ vraag, accountantId }: { vraag: VraagView; accountantId: s
 
       {/* Antwoorden */}
       <div style={{ padding: '0 16px 16px' }}>
-        {!accountantId ? (
-          <p style={{ margin: 0, fontSize: 13, color: M3.neutral, lineHeight: 1.5 }}>
-            {t('vr.geenKoppeling')}
-          </p>
+        {!target.ok ? (
+          // [VRAAG-EIGENAAR] No composer that pretends: the asker is no longer linked (their
+          // question stays, the answer can no longer go to them here), or we could not check.
+          <div>
+            <p style={{ margin: 0, fontSize: 13, color: M3.neutral, lineHeight: 1.5 }}>
+              {target.reason === 'unknown' ? t('vr.koppelingOnbekend') : t('vr.nietMeerGekoppeld')}
+            </p>
+            {target.reason === 'unknown' && (
+              <button
+                onClick={() => router.refresh()}
+                style={{ marginTop: 8, background: 'none', border: `1px solid ${M3.outlineVariant}`, borderRadius: 980, padding: '6px 14px', fontSize: 13, fontWeight: 600, color: M3.primary, cursor: 'pointer', fontFamily: FONT }}
+              >
+                {t('inkoop.opnieuwProberen')}
+              </button>
+            )}
+          </div>
         ) : verstuurd ? (
           <div style={{ background: M3.successContainer, borderRadius: R.md, padding: '12px 14px' }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: '#0B5345' }}>{t('vr.verstuurd')}</div>
@@ -264,11 +306,11 @@ function VraagKaart({ vraag, accountantId }: { vraag: VraagView; accountantId: s
           </div>
         ) : (
           <>
-            <label htmlFor={`antwoord-${vraag.documentId}`} style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: M3.neutral, marginBottom: 6 }}>
+            <label htmlFor={antwoordId} style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: M3.neutral, marginBottom: 6 }}>
               {t('vr.jouwAntwoord')}
             </label>
             <textarea
-              id={`antwoord-${vraag.documentId}`}
+              id={antwoordId}
               value={antwoord}
               onChange={(e) => setAntwoord(e.target.value)}
               rows={3}
@@ -334,7 +376,9 @@ export function VoorstelKaart({ voorstel, onDecided }: { voorstel: VoorstelView;
     ? `${inv.invoice_number ? `${t('nieuw.type.factuur')} ${inv.invoice_number}` : t('nieuw.type.factuur')}${inv.client_name ? ` · ${inv.client_name}` : ''}`
     : t('vr.naam.factuurWeg')
   const datum = datumNL(voorstel.askedAt)
-  const factuurHref = inv ? `/dashboard/incoming/manage?focus=${encodeURIComponent(inv.id)}` : null
+  // A proposal is only ever about a PURCHASE invoice (/api/accountant/invoice-correction refuses any
+  // other), so Inkomend is its screen; the marker sends "Terug" back here ([VRAAG-DEUR]).
+  const factuurHref = inv ? `/dashboard/incoming/manage?focus=${encodeURIComponent(inv.id)}&from=vragen` : null
 
   async function beslis(action: 'accept' | 'decline') {
     setBezig(action); setFout(null)

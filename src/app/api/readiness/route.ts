@@ -6,6 +6,32 @@
 // (computeResult + buildAangifte) — and hands them to buildReadiness for one score + the
 // short missing/risks lists. No new financial logic; every figure traces to imported data.
 // Owner-scoped (self). Read-only.
+//
+// ── [READINESS-DEGRADE] Availability may degrade. Financial truth may not. ──
+//
+// Every read below is classified, and the classification is the contract (audit KL-01):
+//
+//   A · ESSENTIAL — without it there is no verdict. The read throws (fetchAllRows, the witnesses)
+//       and this route answers 503 `readiness_unavailable`. No verdict is better than a verdict
+//       over data nobody read. Invoices, bank lines, cash, turnover, the triangle inputs, the
+//       settlement basis, the drawer witness, the KOR flag (it decides the concept's figures).
+//   B · SUPPLEMENTAL — the page may stay up, but the verdict is marked as incomplete: the read is
+//       recorded in `unverified`, buildReadiness names it as a gap, `ready` is false and the score
+//       is never 100. A failed read of a review count is not zero reviews; a failed continuity
+//       read is not "no gaps"; a failed regime read is not "no regimes". Each such site says
+//       `unread(...)` instead of falling to its zero.
+//   C · NOT APPLICABLE — a column a hand-applied migration has not created yet (schemaAbsent),
+//       and ONLY where absence proves genuine non-applicability: nothing can have been booked
+//       under `auto_match_reason`, and nothing excluded under `ignore_reason`, before those columns
+//       existed — the zero is the truth there. Absence is NOT class C where it proves nothing:
+//       a missing `bank_statement_periods` table does not mean the statements connect (they may
+//       have been imported before the evidence table existed), so that stays class B; and a
+//       missing `kor_active` column does not mean KOR is off, it means this deployment cannot
+//       determine the KOR state — class A, no verdict. Only a recognised absent-column error
+//       counts as C; a network or permission error never does.
+//
+// The three are decided per read at the read, never by a catch-all. See readiness.ts for what
+// buildReadiness does with `unverified`, and readiness-route.test.ts for each read failing alone.
 
 import { fetchAllRows } from "@/lib/supabase-paginate";
 // [STATEMENT-CONTINUITY] gaten TUSSEN de ingelezen bankafschriften (pure vergelijking).
@@ -20,14 +46,15 @@ import { buildTurnoverClosing } from "@/lib/turnover-closing";
 import { buildAangifte, type AangifteCompleteness } from "@/lib/aangifte";
 // [RUBRIEK-SPLIT] One helper, three surfaces — see the call site for why readiness needs it too.
 import { fetchRateShares } from "@/lib/btw-rate-split-fetch";
-import { readExcludedBankIds } from "@/lib/bank-ignored-excluded";
+import { readExcludedBankIdsChecked } from "@/lib/bank-ignored-excluded";
+import { columnIsAbsent } from "@/lib/column-probe";
 import { collectVatExemption } from "@/lib/vat-exemption-collect";
 import { exemptShareOf } from "@/lib/vat-exemption";
 import { needsDocument } from "@/lib/bank-identity";
 import { pnlRole } from "@/lib/bank-categories";
 import { reconcileTriangle, bankNetByDay } from "@/lib/triangle";
 import type { EftSettlement } from "@/lib/eft-parser";
-import { buildReadiness, type ReadinessSignals } from "@/lib/readiness";
+import { buildReadiness, type ReadinessSignals, type UnverifiedRead } from "@/lib/readiness";
 import { vindBestaandeDubbelen } from "@/lib/existing-duplicates";
 // [GEEN-BTW-SOORT] Welke teruggevraagde BTW misschien een andere belasting is — zie btw-soort.ts.
 import { doubtAboutInputVat } from "@/lib/btw-soort";
@@ -37,8 +64,9 @@ import { loadDrawerWitness } from "@/lib/drawer-witness";
 // [KAS-ZACHT] A removed cash movement counts in no total — one definition, see cash-live.ts.
 import { liveCashEntries } from "@/lib/cash-live";
 import { resolveQuarterOwner } from "@/lib/accountant-access";
-import { quarterFromParams } from "@/lib/quarter";
-import { collectRegimeFlags, type RegimeInvoiceRef } from "@/lib/regime-collect";
+import { quarterFromParams, isPeriodStarted } from "@/lib/quarter";
+import { collectRegimeFlagsChecked, type RegimeInvoiceRef } from "@/lib/regime-collect";
+import type { RegimeFlag } from "@/lib/regime-flags";
 import { resolveSchemeSettlements, mergeSchemeOpts } from "@/lib/kas-payment-events-fetch";
 import { collectBadDebt, collectVatClawback } from "@/lib/bad-debt-collect";
 // [ICP] Sales to EU businesses: only the PROBLEMS reach readiness — see the call site.
@@ -60,8 +88,47 @@ function shiftDays(iso: string, days: number): string {
 // EU VAT prefixes (excl. NL) — the same honest rubriek-4b signal /api/aangifte uses.
 const EU_VAT = /^(AT|BE|BG|CY|CZ|DE|DK|EE|ES|FI|FR|GR|EL|HR|HU|IE|IT|LT|LU|LV|MT|PL|PT|RO|SE|SI|SK)/i;
 
+/**
+ * [READINESS-DEGRADE] Class C: the schema does not have this COLUMN yet (hand-applied migration
+ * lag), for the two columns whose absence proves non-applicability — see the header. Anything
+ * else — a timeout, a permission refusal, a broken connection, or a column named elsewhere — is a
+ * failed read, never a missing schema.
+ */
+function schemaAbsent(e: unknown, column: "auto_match_reason" | "ignore_reason"): boolean {
+  const err = (e && typeof e === "object" ? e : { message: String(e) }) as { code?: string | null; message?: string | null };
+  return columnIsAbsent(err, column);
+}
+
+/** What the route needs from outside: the caller's session and a way to make the service client. */
+export interface ReadinessDeps {
+  session: Awaited<ReturnType<typeof createServerSupabaseClient>>;
+  pipeline: () => ReturnType<typeof createPipelineClient>;
+}
+
 export async function GET(req: NextRequest) {
-  const supabase = await createServerSupabaseClient();
+  return readinessResponse(req, {
+    session: await createServerSupabaseClient(),
+    pipeline: () => createPipelineClient(),
+  });
+}
+
+/**
+ * The route with its two clients injected — so readiness-route.test.ts can fail every read on its
+ * own and prove what each failure does to the verdict. Class A failures throw out of
+ * readinessVerdict; this is where they become a 503 instead of a verdict.
+ */
+export async function readinessResponse(req: NextRequest, deps: ReadinessDeps): Promise<NextResponse> {
+  try {
+    return await readinessVerdict(req, deps);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("[READINESS-DEGRADE] an essential read failed — no verdict", { message });
+    return NextResponse.json({ error: "readiness_unavailable", detail: message }, { status: 503 });
+  }
+}
+
+async function readinessVerdict(req: NextRequest, deps: ReadinessDeps): Promise<NextResponse> {
+  const supabase = deps.session;
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
@@ -70,6 +137,20 @@ export async function GET(req: NextRequest) {
   // the app-wide default (quarter.ts). Absent/absurd input can never yield the open quarter
   // or a nonsense year; a bare hit returns the same quarter the UI shows.
   const { year, quarter } = quarterFromParams((k) => sp.get(k));
+  // [KLAAR-TOEKOMST] A period that has not begun (on the Amsterdam day, like the picker) has
+  // nothing to assess: no verdict, not even a red one (audit KL-02).
+  if (!isPeriodStarted({ year, quarter })) {
+    return NextResponse.json({ error: "period_not_started", year, quarter }, { status: 400 });
+  }
+
+  // [READINESS-DEGRADE] Class B reads that did not happen, named for the owner.
+  const unverified: UnverifiedRead[] = [];
+  const unread = (key: string, label: string, e: unknown) => {
+    console.error("[READINESS-DEGRADE] a read failed — the verdict is marked incomplete", {
+      ownerId: user.id, year, quarter, key, error: e instanceof Error ? e.message : e == null ? null : String(e),
+    });
+    unverified.push({ key, label });
+  };
 
   const startMonth = (quarter - 1) * 3;
   const start = `${year}-${pad(startMonth + 1)}-01`;
@@ -86,16 +167,13 @@ export async function GET(req: NextRequest) {
   const ownerId = owner.ownerId;
 
   // service_role, every query scoped to ownerId (the same dual-path shape as /api/closing-package).
-  const pipeline = createPipelineClient();
+  const pipeline = deps.pipeline();
 
   // ── 1) Invoice evidence — REUSE summarizeClosingPackage (single source of truth) ──
-  let summary;
-  try {
-    summary = await summarizeClosingPackage({ ownerId: ownerId, year, quarter, supabase: pipeline });
-  } catch (e) {
-    const message = e instanceof Error ? e.message : "readiness summary failed";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  // Class A: its invoice read throws, and readinessResponse turns that into a 503. What it could
+  // not check on its own (the evidence lookup, the dateless check) it carries out as numbers.
+  const summary = await summarizeClosingPackage({ ownerId: ownerId, year, quarter, supabase: pipeline });
+  if (summary.datelessChecked === false) unread("dateless_invoices", "de facturen zonder datum", null);
   const verifiedInvoiceCount = summary.outgoingCount + summary.incomingCount;
   // [READINESS-EVIDENCE] Use the invoices-with-PDF count, NOT filesIncluded — the latter also
   // counts bank-statement + shared files, which let the invoice-evidence dimension hit a false 100%
@@ -134,12 +212,10 @@ export async function GET(req: NextRequest) {
     );
     amountOnlyBookingCount = flagged.length;
   } catch (e) {
-    // Pre-migration (no column) → no flags, which is correct. Any other failure also degrades to 0
-    // rather than breaking the board: this is a REVIEW nudge, and a readiness page that fails to
-    // render helps nobody. Logged so a persistent failure is findable.
-    console.warn("[KAS-AUTO-BOOK] flagged-booking count unavailable for readiness", {
-      ownerId, error: e instanceof Error ? e.message : String(e),
-    });
+    // Class C: pre-migration (no column) → no flags, which is the true answer there. Class B for
+    // anything else: a review count that could not be read is not zero reviews — the page stays
+    // up, the verdict is marked incomplete and can never be green over it.
+    if (!schemaAbsent(e, "auto_match_reason")) unread("amount_only_bookings", "de automatisch geboekte bankregels", e);
   }
 
   let undocumentedCount = 0;
@@ -198,19 +274,23 @@ export async function GET(req: NextRequest) {
   // er NIET is: januari en maart geüpload, februari vergeten — beide bestanden kloppen intern, er
   // zijn transacties genoeg, en toch mist er een maand aan betalingen. We halen de periodes op met
   // een marge van een maand rond het kwartaal (het gat zit vaak op de grens) en melden alleen de
-  // gaten die het kwartaal zelf raken. Fail-soft: bestaat de tabel nog niet (migratie niet
-  // gedraaid) of gaat de query mis, dan vervalt alleen deze extra controle.
+  // gaten die het kwartaal zelf raken. Class B, ook als de tabel nog niet bestaat: afschriften
+  // kunnen zijn ingelezen vóór deze bewijstabel bestond, dus "geen tabel" bewijst niet dat ze op
+  // elkaar aansluiten — alleen dat het niet te controleren was. Een mislukte aansluitingscontrole
+  // is niet "geen gaten", en het oordeel zegt dat hij niet is uitgevoerd.
   let bankGapMessages: string[] = [];
   try {
     const marginStart = new Date(Date.parse(`${start}T00:00:00Z`) - 45 * 86_400_000).toISOString().slice(0, 10);
     const marginEnd = new Date(Date.parse(`${end}T00:00:00Z`) + 45 * 86_400_000).toISOString().slice(0, 10);
-    const { data: periods } = await pipeline
+    const { data: periods, error: periodsErr } = await pipeline
       .from("bank_statement_periods")
       .select("document_id, iban, period_start, period_end, opening_balance, closing_balance")
       .eq("user_id", ownerId)
       .gte("period_start", marginStart)
       .lte("period_start", marginEnd)
       .order("period_start", { ascending: true });
+    // supabase-js reports a failure as a value, not a throw — read it, or the catch below never sees it.
+    if (periodsErr) throw periodsErr;
 
     const rows = (periods ?? []).filter((p) => p.period_start && p.period_end);
     if (rows.length >= 2) {
@@ -233,8 +313,8 @@ export async function GET(req: NextRequest) {
         .map((i) => i.message)
         .slice(0, 5);
     }
-  } catch {
-    /* fail-soft — zonder deze controle blijft de rest van de readiness precies zoals hij was */
+  } catch (e) {
+    unread("bank_continuity", "de aansluiting tussen je bankafschriften", e);
   }
 
   // [DEKKING] En de vraag waar de controle hierboven structureel blind voor is: beslaan de
@@ -252,7 +332,7 @@ export async function GET(req: NextRequest) {
   // die marge vallen. Dan zouden we een compleet kwartaal als ontbrekend melden, en een vals gat
   // is precies hoe een controle het vertrouwen verliest dat ze nodig heeft.
   try {
-    const { data: overlapping } = await pipeline
+    const { data: overlapping, error: overlapErr } = await pipeline
       .from("bank_statement_periods")
       .select("document_id, iban, period_start, period_end, opening_balance, closing_balance")
       .eq("user_id", ownerId)
@@ -260,6 +340,7 @@ export async function GET(req: NextRequest) {
       .lte("period_start", end)
       .gte("period_end", start)
       .order("period_start", { ascending: true });
+    if (overlapErr) throw overlapErr;
 
     const rows = (overlapping ?? []).filter((p) => p.period_start && p.period_end);
     const coverage = coverageOfPeriod(
@@ -283,8 +364,10 @@ export async function GET(req: NextRequest) {
         ...bankGapMessages,
       ].slice(0, 5);
     }
-  } catch {
-    /* fail-soft, om dezelfde reden als hierboven */
+  } catch (e) {
+    // Class B, same reason — and an absent evidence table is the same class: a coverage check
+    // that did not run is not "the quarter is covered".
+    unread("bank_coverage", "de dekking van het kwartaal door je bankafschriften", e);
   }
 
   // ── 3) Invoices + cash for the VAT engine (same inputs as /api/aangifte) ──
@@ -320,11 +403,15 @@ export async function GET(req: NextRequest) {
     periodStart: start,
     incomingInvoiceIds: invRaw.filter((i) => effDir(i) === "incoming").map((i) => i.id).filter((id): id is string => !!id),
   });
-  const { rateShares: rateSharesByInvoice, exemptExByInvoice } = await fetchRateShares(
+  // Class B: both collectors degrade on a failed read and SAY so; here that becomes an unread
+  // input rather than a note nobody reads. A failed regime read is not "regime off".
+  if (exemption.degraded) unread("vat_exemption", "de vrijgestelde-omzetregeling (btw)", null);
+  const { rateShares: rateSharesByInvoice, exemptExByInvoice, degraded: rateSharesDegraded } = await fetchRateShares(
     pipeline,
     invRaw.filter((i) => effDir(i) === "outgoing"),
     { exemptRegime: exemption.active },
   );
+  if (rateSharesDegraded) unread("rate_split", "de btw-tariefverdeling van je verkoopfacturen", null);
   const invoices: ResultInvoice[] = invRaw.map((i) => ({
     id: i.id,
     direction: effDir(i),
@@ -506,8 +593,11 @@ export async function GET(req: NextRequest) {
   // as 'omzet' so readiness agrees exactly with /api/result and /api/aangifte.
   // [GENEGEERD-TELT] Zie aangifte: de reden komt uit een eigen, wegvallende lezing, en de pijl is
   // expliciet omdat `.map(toResultBankTx)` de index als verzameling zou doorgeven.
-  const excludedBankIds = await readExcludedBankIds({ client: pipeline, userId: ownerId, start, end });
-  const bankTx: ResultBankTx[] = bank.map((b) => toResultBankTx(b, excludedBankIds));
+  const excluded = await readExcludedBankIdsChecked({ client: pipeline, userId: ownerId, start, end });
+  // Class B: the figures keep the known error standing (nothing excluded on a failed read, by that
+  // helper's own rule), and the verdict says the read did not happen.
+  if (excluded.failed) unread("excluded_bank_lines", "de genegeerde bankregels", null);
+  const bankTx: ResultBankTx[] = bank.map((b) => toResultBankTx(b, excluded.ids));
   const coveredBudget = new Map(
     allTurnover
       .filter((t) => turnoverNetOmzet(t) > 0 || (t.total_incl ?? 0) > 0)
@@ -572,7 +662,8 @@ export async function GET(req: NextRequest) {
   // pure reconcileTriangle) and add the disagreeing days as RISKS, so the readiness verdict never
   // hides a card mismatch. Only gross-mismatch days (a genuine discrepancy) are surfaced — an
   // 'incomplete' day is just a payout not yet settled (normal near quarter-end), not an error.
-  // Witness-only + best-effort: a fetch hiccup must never fail the readiness verdict.
+  // Witness-only, class B: a fetch hiccup does not fail the readiness page — but a witness that
+  // did not testify is not a witness that agreed, so the verdict is marked incomplete.
   if (turnover.length > 0) {
     try {
       const endBuffer = shiftDays(end, 5);
@@ -612,7 +703,7 @@ export async function GET(req: NextRequest) {
         // [PAGE-KEY] ledger_date is unique per (user, date, KIND) — up to four rows a day — so a
         // .range() page boundary is not stable over it alone: ties may come back in a different
         // order per query, repeating some days and dropping others. The id makes the order total.
-        .order("ledger_date", { ascending: true }).order("id", { ascending: true }).range(from, to)).catch(() => []);
+        .order("ledger_date", { ascending: true }).order("id", { ascending: true }).range(from, to));
       const pinLedgerByDay = new Map<string, number>();
       for (const r of pinLedgerRows) if (r.ledger_date) pinLedgerByDay.set(r.ledger_date, (Number(r.received) || 0) - (Number(r.spent) || 0));
       const triangle = reconcileTriangle({ turnover, eftSettlements, bankNetByDay: netByDay, pinLedgerByDay });
@@ -650,8 +741,8 @@ export async function GET(req: NextRequest) {
           diff: feeApprox,
         });
       }
-    } catch {
-      /* triangle is a witness; never let it fail the readiness verdict */
+    } catch (e) {
+      unread("card_triangle", "de pin-aansluiting (kassa · terminal · bank)", e);
     }
   }
 
@@ -683,12 +774,21 @@ export async function GET(req: NextRequest) {
   // figures this route exposes — so the two concepts are identical here, and rebuilding the ICP
   // just to reach the same numbers would be work that proves nothing.
   // [DEPLOY-SAFE] kor_active is fetched in its OWN query — never folded into the kas_opening_balance
-  // select above — so if the regime_kor.sql migration lags this deploy, a missing column only nulls
-  // korActive (→ no flags), and can NEVER collaterally drop the opening balance (a wrong number).
+  // select above — so if the regime_kor.sql migration lags this deploy, a missing column can NEVER
+  // collaterally drop the opening balance (a wrong number). What it does instead is decided below:
+  // it withholds the verdict.
   // [KOR-AANGIFTE-UIT] Read BEFORE the concept: under the KOR the concept owes only what was
   // shifted to the owner, and this route hands its 5a/5b/5g to the readiness board.
-  const { data: korProfile } = await pipeline
+  // [READINESS-DEGRADE] Class A, with no class-C exception: the KOR flag decides the concept's
+  // figures and the clawback, so a read that failed is not "KOR off" — it is no verdict (the throw
+  // becomes a 503 above). An absent column is the same case, not a smaller one: it does not prove
+  // KOR is off, it proves this deployment cannot determine the KOR state — exactly the way an
+  // undeterminable exemption regime is surfaced rather than read as inactive.
+  const { data: korProfile, error: korErr } = await pipeline
     .from("profiles").select("kor_active").eq("id", ownerId).maybeSingle();
+  if (korErr) {
+    throw new Error(`[READINESS-DEGRADE] kor_active read failed: ${korErr.message}`);
+  }
   const korActive = !!(korProfile as { kor_active?: boolean | null } | null)?.kor_active;
   const aangifte = buildAangifte({ ...result, korActive }, completeness, quarterLabel);
   const hasUndecidableRate = aangifte.rows.some((r) => r.code === "1c");
@@ -728,12 +828,16 @@ export async function GET(req: NextRequest) {
     result.salesByRate.reduce((sum, r) => sum + (r.omzet ?? 0), 0)
     + (result.cashOmzetZonderBtw ?? 0)
     + (result.vrijgesteldeOmzet ?? 0);
-  const regimeFlags = await collectRegimeFlags({
-    client: pipeline,
-    korActive,
-    omzetForKorCheck,
-    invoices: regimeInvoices,
-  }).catch(() => []);
+  // Class B: the KOR flag needs no lines and is decided regardless; a failed LINE read leaves the
+  // phrase flags (verlegd, marge) unread, which is not "none" — the verdict says so.
+  let regimeFlags: RegimeFlag[] = [];
+  try {
+    const regime = await collectRegimeFlagsChecked({ client: pipeline, korActive, omzetForKorCheck, invoices: regimeInvoices });
+    regimeFlags = regime.flags;
+    if (!regime.linesRead) unread("regime_lines", "de btw-regimes op je factuurregels (verlegd, marge)", null);
+  } catch (e) {
+    unread("regime_lines", "de btw-regimes op je factuurregels (verlegd, marge)", e);
+  }
 
   // [BAD-DEBT] Reclaimable BTW on sales invoices >1 year past due (factuur only; kas → none).
   const badDebt = await collectBadDebt(pipeline, ownerId, sr.scheme, end);
@@ -741,6 +845,10 @@ export async function GET(req: NextRequest) {
   // becomes payable again. korActive short-circuits it (nothing was deducted, so nothing goes
   // back), which is why it is read after the KOR profile above.
   const vatClawback = await collectVatClawback(pipeline, ownerId, sr.scheme, end, korActive);
+  // Class B: both collectors degrade to "none" on a failed read and say so (readFailed). "None"
+  // must not reach the verdict as a fact.
+  if (badDebt.readFailed) unread("bad_debt", "de te lang onbetaalde verkoopfacturen (btw terugvragen)", null);
+  if (vatClawback.readFailed) unread("vat_clawback", "de te lang onbetaalde inkoopfacturen (voorbelasting)", null);
 
   // [ICP] The ICP-opgaaf itself belongs on the aangifte screen and in the accountant's ZIP, not
   // in a readiness score. What DOES belong here is the part that cannot be filed as it stands: an
@@ -784,6 +892,8 @@ export async function GET(req: NextRequest) {
     // Gevolg: de eigenaar las "4 facturen missen het originele document" en kon alleen nog
     // álle facturen openen om te vinden welke vier. Nu is het een zin die hij doorstuurt.
     missingEvidence: summary.missingEvidence ?? [],
+    // [READINESS-DEGRADE] Invoices whose evidence lookup failed: unknown, not missing.
+    evidenceUncheckedCount: summary.evidenceUnknown ?? 0,
     bankTxCount: bank.length,
     undocumentedCount,
     unmatchedIncomeCount,
@@ -813,7 +923,9 @@ export async function GET(req: NextRequest) {
     // 'invoice_no_date'); dit scherm las het alleen niet. Geen extra query, geen nieuw veld —
     // we lezen de waarschuwing die er toch al is, en tellen het aantal uit haar tekst niet mee
     // maar uit de aanwezigheid: één risico volstaat om "stil 100% klaar" onmogelijk te maken.
-    datelessInvoiceCount: summary.warnings.some((w) => w.code === "invoice_no_date") ? 1 : 0,
+    // [READINESS-DEGRADE] …but only when the check RAN: a failed check is an unread input (above),
+    // not a risk row claiming a dateless invoice exists.
+    datelessInvoiceCount: summary.datelessChecked !== false && summary.warnings.some((w) => w.code === "invoice_no_date") ? 1 : 0,
     badDebt: badDebt.eligible.length > 0
       ? { count: badDebt.eligible.length, reclaimableBtw: badDebt.totalReclaimableBtw }
       : undefined, // [BAD-DEBT] reclaimable BTW on >1yr-unpaid sales → risk, never a block
@@ -822,6 +934,7 @@ export async function GET(req: NextRequest) {
       : undefined, // [BAD-DEBT] repayable voorbelasting on >1yr-unpaid purchases → risk, never a block
     icpProblems, // [ICP] EU sales that cannot go on the opgaaf as they stand → risk
     datelessVerifiedCount, // [DATE-GAP] verified invoices with no date → they count nowhere
+    unverified, // [READINESS-DEGRADE] the class B reads that did not happen → never green
   };
   const report = buildReadiness(signals);
 

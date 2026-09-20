@@ -226,6 +226,13 @@ export interface ClosingPackageSummary {
   // Begrensd op 50 namen: daarboven is het geen zin meer maar een muur tekst, en de
   // telling in invoicesWithPdf blijft hoe dan ook exact.
   missingEvidence: string[];
+  // [READINESS-DEGRADE] Purchase invoices whose evidence lookup FAILED: neither documented nor
+  // missing — unknown, and warned about (evidence_unchecked). Carried as a number so readiness can
+  // keep them out of the "missen het originele document" accusation and off the green verdict.
+  evidenceUnknown?: number;
+  // [READINESS-DEGRADE] Whether the dateless-invoice check ran. false = the read failed, and the
+  // invoice_no_date warning then says "we could not check", not "there are none".
+  datelessChecked?: boolean;
   bankStatementIncluded: boolean;
   warnings: ClosingPackageWarning[];
   // [COM-IN-DE-REGEL] The acquirer commission this quarter's bank lines stated outright, or null
@@ -1915,7 +1922,8 @@ export async function summarizeClosingPackage(args: {
     });
   }
   // [DATE-GAP] Verified invoices with no date never enter any quarter — warn, don't lose.
-  const dateless = datelessWarning(await datelessVerifiedInvoices(supabase, ownerId));
+  const datelessRead = await datelessVerifiedInvoices(supabase, ownerId);
+  const dateless = datelessWarning(datelessRead);
   if (dateless) warnings.push(dateless);
   // Bank: mirror the ZIP's two-tier truth exactly. No data at all vs. data present but the
   // statement file isn't attached — the latter used to be invisible to the preview.
@@ -1959,6 +1967,8 @@ export async function summarizeClosingPackage(args: {
     invoicesWithPdf: withPdf, // [READINESS-EVIDENCE] invoice-evidence count only
     // [EVIDENCE] Doorgeven in plaats van weggooien. Zie de toelichting bij het type.
     missingEvidence: missingPdf.slice(0, 50),
+    evidenceUnknown,
+    datelessChecked: datelessRead.checked,
     bankStatementIncluded,
     warnings,
     cardStatedCommission,

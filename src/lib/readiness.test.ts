@@ -424,5 +424,40 @@ console.log("\n— [DATE-GAP] een factuur zonder datum maakt 'stil 100% klaar' o
   check("nul dateloos → gewoon 100", schoon.score === 100);
 }
 
+console.log("\n— [READINESS-DEGRADE] a check that did not run is not a check that passed —");
+{
+  // The baseline is READY. One unread input must take that away, whatever the score says.
+  const r = buildReadiness(perfect({ unverified: [{ key: "bank_continuity", label: "de aansluiting van je bankafschriften" }] }));
+  check("not ready when a read did not happen", r.ready === false && r.status !== "ready");
+  check("verified is false", r.verified === false);
+  check("the unread input is listed by key", r.unverified.some((u) => u.key === "bank_continuity"));
+  check("…and named as a GAP, first in the list", r.missing[0]?.title === "Niet alles kon worden gecontroleerd");
+  check("…with the phrase the owner reads", /aansluiting van je bankafschriften/.test(r.missing[0]?.detail ?? ""));
+  check("the score is never a perfect 100 beside it", r.score <= 99);
+  check("the measured dimensions stay measured (all four still applicable)", r.dimensions.every((d) => d.applicable));
+  check("a note says the verdict is incomplete", r.notes.some((n) => /onvolledig/.test(n)));
+  const clean = buildReadiness(perfect({ unverified: [] }));
+  check("an empty list changes nothing", clean.ready === true && clean.verified === true && clean.unverified.length === 0);
+  const twice = buildReadiness(perfect({ unverified: [{ key: "x", label: "iets" }, { key: "x", label: "iets" }] }));
+  check("the same key is named once", ((twice.missing[0]?.detail ?? "").match(/iets/g) ?? []).length === 1);
+}
+
+console.log("\n— [READINESS-DEGRADE] a failed evidence lookup accuses nobody, and keeps the verdict off green —");
+{
+  // 40 verified, 30 with evidence, 10 whose lookup FAILED: nobody is missing a document that we know of.
+  const r = buildReadiness(perfect({ verifiedInvoiceCount: 40, invoicesWithEvidence: 30, evidenceUncheckedCount: 10 }));
+  check("no 'missen het originele document' gap for invoices we could not look at",
+    !r.missing.some((m) => /missen het originele document/.test(m.title)));
+  check("the unchecked invoices are an unread input", r.unverified.some((u) => u.key === "evidence" && /10 inkoopfacturen/.test(u.label)));
+  check("…so the verdict is not ready", r.ready === false && r.verified === false);
+  check("the invoices dimension earns no point for them (30 of 40)", r.dimensions[0].subscore === 0.75);
+  check("…and says so in its detail", /Van 10 kon de bijlage niet worden gecontroleerd/.test(r.dimensions[0].detail));
+  // 40 verified, 30 with evidence, 4 unchecked → 6 are genuinely missing.
+  const mixed = buildReadiness(perfect({ verifiedInvoiceCount: 40, invoicesWithEvidence: 30, evidenceUncheckedCount: 4, missingEvidence: ["a", "b", "c", "d", "e", "f"] }));
+  check("only the invoices we DID read are accused", mixed.missing.some((m) => m.title === "6 facturen missen het originele document"));
+  check("an unchecked count larger than the gap cannot go negative",
+    buildReadiness(perfect({ verifiedInvoiceCount: 40, invoicesWithEvidence: 40, evidenceUncheckedCount: 99 })).unverified.length === 0);
+}
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

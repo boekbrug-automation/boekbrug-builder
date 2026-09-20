@@ -1,65 +1,52 @@
 // src/lib/accountant-status-door.ts
-// [BOEKHOUDER-DEUR] The one write path for invoices.accountant_status and its actor.
+// [BOEKHOUDER-DEUR] The ONE application entry point for an accountant's statement about an invoice.
 //
-// ── WHY A DOOR AND NOT A RULE MODULE ─────────────────────────────────────────────────────────
+// ── WHAT IT DECIDES ──
 //
-// 'verwerkt' is the app's hardest money refusal — while it stands, eleven SQL guards and eighteen
-// TypeScript sites refuse to move the invoice's paid state. It was written by a direct UPDATE from
-// the browser, with no route, no permission check and no audit row, and nothing anywhere decided
-// who may write it: the freeze trigger deliberately skips this column, the accountant guard exempts
-// the owner, and PostgreSQL RLS cannot be scoped to a column, so admitting any UPDATE admits this
-// one.
+// Who is asking (the session), whether they may say anything about THIS invoice (linked to the
+// client, and the invoice visible to them under RLS), and what they may say (the four words of
+// invoices.accountant_status, or nothing). Only then does it write — and it writes ONE thing.
 //
-// This module is not a rule engine and holds no state machine. It is a door: the four checks that
-// must happen before the column moves, in the order they must happen, in one place that the
-// database will accept a write from and nothing else can impersonate.
+// ── [VRAAG-SYNC] ONE thing is now two facts, moved together ──
 //
-//   acting context → accountant authorization → invoice access → allowed value → atomic write
+// A question about an invoice lives in two rows: `invoices.accountant_status = 'vraag'` (what
+// the accountant's own surfaces count) and the accountant's row in `accountant_subject_status`
+// (the words, and what the client's /dashboard/vragen lists). Asking wrote both; resolving wrote
+// only the first, so the client kept seeing an open question forever (audit finding VR-01).
 //
-// ── THE TWO CLIENTS, AND WHY BOTH ────────────────────────────────────────────────────────────
+// The write is therefore a single database function, `accountant_set_invoice_status`, which
+// moves both rows in one transaction, scoped to this accountant and this invoice. Two separate
+// writes from here would put the contradiction back on the day one of them fails. The function
+// re-checks the link and the ownership on its own; the checks below stay in front of it because
+// they run under the CALLER's RLS (visibility), which a service-role call cannot see.
 //
-// `session` is the accountant's own client. It answers two questions nothing else can: WHO is
-// calling (auth.getUser, below — never a parameter, see the actor note) and WHAT MAY THEY SEE (the
-// invoice read runs through it, so the share policies decide readability once, in the database,
-// instead of twice in code).
+// ── WHY THE DOOR, NOT THE TABLE ──
 //
-// `pipeline` is the service-role client, and it is the only client the database door admits:
-// accountant_status_door_only refuses the write whenever auth.uid() is non-NULL, which is every
-// browser and every session-client route. That is what makes this module the ONLY way in rather
-// than merely the intended one.
-//
-// ── THE ACTOR IS DERIVED, NEVER PASSED ───────────────────────────────────────────────────────
-//
-// There is deliberately no accountantId parameter. A caller cannot hand this door an identity, so
-// no request body, no header and no mistake in a caller can attribute an assertion to somebody who
-// did not make it. It is read here, from the session, and written from what was read.
-//
-// ── WHAT THIS DOOR DOES NOT DO ───────────────────────────────────────────────────────────────
-//
-//   · It does not touch accountant_subject_status. No mirror, no sync.
-//   · It does not restrict undo to the accountant who set the lock. Nothing in the product says
-//     that today, and inventing it here would be a rule nobody decided.
-//   · It is not delegation. accountant_id records who performed THIS act; it is not an identity
-//     anyone may act under.
+// The database refuses this column from every session client (`invoices_accountant_door`), and
+// the function's EXECUTE is revoked from anon and authenticated. So the browser cannot set a
+// status, cannot forge who set it, and cannot resolve a question — the client answers through
+// /api/messages, and that path does not exist here. And since
+// accountant_invoice_question_door_only.sql the RLS write policy on accountant_subject_status is
+// document-only, so an accountant session cannot write an invoice question row AROUND this door
+// either: the two facts have one writer, in SQL, and this file is its one caller.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Client = SupabaseClient<any>;
 
-/**
- * The vocabulary, as the database holds it — see invoice_accountant_status_vocabulary.sql.
- * NULL is the fifth legal value and is expressed by the `| null` on the status argument.
- */
 export const ACCOUNTANT_STATUSES = ["te_verwerken", "in_behandeling", "verwerkt", "vraag"] as const;
 export type AccountantStatus = (typeof ACCOUNTANT_STATUSES)[number];
 
-/** The value that locks money. Every guard in the app compares against this literal. */
+/** The value that locks an invoice for the client: money and dates freeze under it. */
 export const LOCKED: AccountantStatus = "verwerkt";
+
+export const ACCOUNTANT_STATUS_RPC = "accountant_set_invoice_status";
 
 export type DoorRefusal =
   | "not_authenticated"
   | "unknown_status"
+  | "question_required"
   | "link_read_failed"
   | "not_linked"
   | "invoice_read_failed"
@@ -68,88 +55,141 @@ export type DoorRefusal =
   | "write_failed"
   | "nothing_written";
 
+export interface DoorWritten {
+  ok: true;
+  status: AccountantStatus | null;
+  accountantId: string | null;
+  /** invoices.accountant_status before this statement, as the database reported it. */
+  previousStatus: AccountantStatus | null;
+  /** Whether THIS accountant's question on the invoice was open ('vraag') before this statement. */
+  questionWasOpen: boolean;
+  /** The accountant's question row after this statement; null when there is no such row. */
+  questionStatus: AccountantStatus | null;
+  /** A label for the invoice, for the sentence a caller may want to say about it. */
+  invoiceLabel: string | null;
+}
+
 export type DoorResult =
-  | { ok: true; status: AccountantStatus | null; accountantId: string | null }
+  | DoorWritten
   | { ok: false; reason: DoorRefusal; detail?: string };
+
+/**
+ * Which refusals are the caller's fault and which are ours, as the HTTP status the routes in front
+ * of the door answer with. A 503 invites a retry; a 403 does not. One map, shared by
+ * /api/accountant/invoice-status and /api/accountant/invoice-question, so the two cannot drift.
+ */
+export const DOOR_REFUSAL_HTTP_STATUS: Record<DoorRefusal, number> = {
+  not_authenticated: 401,
+  unknown_status: 400,
+  question_required: 400,
+  link_read_failed: 503,
+  not_linked: 403,
+  invoice_read_failed: 503,
+  invoice_not_visible: 404,
+  invoice_not_this_client: 403,
+  write_failed: 500,
+  nothing_written: 409,
+};
 
 export function isAccountantStatus(v: unknown): v is AccountantStatus {
   return typeof v === "string" && (ACCOUNTANT_STATUSES as readonly string[]).includes(v);
 }
 
-/**
- * Attribution follows the assertion, and only the assertion.
- *
- * 'verwerkt' is the one value that is a claim by a person; the other three and NULL are not, so
- * they carry no actor. Expressed as a function because two places must agree on it — the write
- * below and the test that proves it — and a second copy of a one-line rule is how they stop.
- */
+/** Only the lock carries an actor; every other word (and the undo) clears the attribution. */
 export function attributionFor(status: AccountantStatus | null, actorId: string): string | null {
   return status === LOCKED ? actorId : null;
 }
 
+/**
+ * The refusals the database function raises by name, mapped back to the door's own vocabulary.
+ * Anything else the function says is a write failure — reported, never guessed at.
+ */
+export function refusalFromRpcError(message: string | null | undefined): DoorRefusal {
+  const m = (message ?? "").trim();
+  if (m === "not_linked") return "not_linked";
+  if (m === "invoice_not_this_client") return "invoice_not_this_client";
+  if (m === "unknown_status") return "unknown_status";
+  if (m === "question_required") return "question_required";
+  return "write_failed";
+}
+
+/** How the invoice is named to a person: supplier · number, whichever parts exist. */
+export function invoiceLabelOf(inv: { client_name?: string | null; invoice_number?: string | null } | null | undefined): string | null {
+  const parts = [inv?.client_name?.trim(), inv?.invoice_number ? `factuur ${inv.invoice_number}` : null].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export async function setAccountantStatus(args: {
-  /** The accountant's own client. Identity and visibility both come from it. */
   session: Client;
-  /** Service-role. The database door admits no other. */
   pipeline: Client;
   invoiceId: string;
-  /** The client whose books this invoice must belong to. */
   clientId: string;
   status: AccountantStatus | null;
+  /** The accountant's words. Required for 'vraag'; ignored for every other statement. */
+  question?: string | null;
 }): Promise<DoorResult> {
   const { session, pipeline, invoiceId, clientId, status } = args;
 
-  // ── 1. Acting context. Read, never received. ──
   const { data: auth } = await session.auth.getUser();
   const actorId = auth?.user?.id;
   if (!actorId) return { ok: false, reason: "not_authenticated" };
 
-  // ── 2. Allowed value. NULL is legal — undo is an operation this product has, not a hole. ──
   if (status !== null && !isAccountantStatus(status)) {
     return { ok: false, reason: "unknown_status" };
   }
 
-  // ── 3. Accountant authorization. The linkage is the boundary, and it is checked IN CODE rather
-  // than as a filter value — the same shape /api/accountant/invoice-question uses, for the same
-  // reason: a client-supplied id never reaches PostgREST's filter syntax.
+  const question = typeof args.question === "string" ? args.question.trim() : "";
+  if (status === "vraag" && !question) {
+    return { ok: false, reason: "question_required" };
+  }
+
   const { data: links, error: linkErr } = await session
     .from("accountant_clients")
     .select("accountant_id, zzper_id")
     .eq("accountant_id", actorId);
   if (linkErr) {
-    // [NO-SILENT-EMPTY] A failed read must never arrive as "not linked" — that reads like a
-    // withdrawn mandate, which is a different sentence from "try again".
     return { ok: false, reason: "link_read_failed", detail: linkErr.message };
   }
   if (!(links ?? []).some((l: { zzper_id?: string }) => l.zzper_id === clientId)) {
     return { ok: false, reason: "not_linked" };
   }
 
-  // ── 4. Invoice access, through the SESSION client so the share policies answer once. ──
+  // Under the CALLER's RLS: an invoice the accountant may not see is not theirs to talk about.
   const { data: inv, error: invErr } = await session
     .from("invoices")
-    .select("id, sender_id, receiver_id")
+    .select("id, sender_id, receiver_id, invoice_number, client_name")
     .eq("id", invoiceId)
     .maybeSingle();
   if (invErr) return { ok: false, reason: "invoice_read_failed", detail: invErr.message };
   if (!inv) return { ok: false, reason: "invoice_not_visible" };
   if (inv.sender_id !== clientId && inv.receiver_id !== clientId) {
-    // Visible is not enough: an accountant with ten clients sees ten administrations, and a status
-    // landing in the wrong one is a claim about books this act was never about.
     return { ok: false, reason: "invoice_not_this_client" };
   }
 
-  // ── 5. One atomic write, both columns together. The status and who asserted it are one fact;
-  // written apart they can disagree, and the row that says 'verwerkt' with no actor is exactly the
-  // state this door exists to end.
-  const { data: written, error: writeErr } = await pipeline
-    .from("invoices")
-    .update({ accountant_status: status, accountant_id: attributionFor(status, actorId) })
-    .eq("id", invoiceId)
-    .select("id");
-  if (writeErr) return { ok: false, reason: "write_failed", detail: writeErr.message };
-  // An honest zero-row report. The row may have moved out of reach between the read and the write.
-  if (!written || written.length === 0) return { ok: false, reason: "nothing_written" };
+  // [VRAAG-SYNC] Both facts, one transaction. The actor is the session's, never a parameter.
+  const { data, error: writeErr } = await pipeline.rpc(ACCOUNTANT_STATUS_RPC, {
+    p_accountant_id: actorId,
+    p_client_id: clientId,
+    p_invoice_id: invoiceId,
+    p_status: status,
+    p_question: status === "vraag" ? question : null,
+  });
+  if (writeErr) {
+    return { ok: false, reason: refusalFromRpcError(writeErr.message), detail: writeErr.message };
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { previous_status?: string | null; question_was_open?: boolean | null; question_status?: string | null }
+    | null
+    | undefined;
+  if (!row) return { ok: false, reason: "nothing_written" };
 
-  return { ok: true, status, accountantId: attributionFor(status, actorId) };
+  return {
+    ok: true,
+    status,
+    accountantId: attributionFor(status, actorId),
+    previousStatus: isAccountantStatus(row.previous_status) ? row.previous_status : null,
+    questionWasOpen: row.question_was_open === true,
+    questionStatus: isAccountantStatus(row.question_status) ? row.question_status : null,
+    invoiceLabel: invoiceLabelOf(inv),
+  };
 }

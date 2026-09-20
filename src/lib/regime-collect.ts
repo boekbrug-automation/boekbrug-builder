@@ -26,6 +26,22 @@ export async function collectRegimeFlags(args: {
   omzetForKorCheck: number;
   invoices: RegimeInvoiceRef[];
 }): Promise<RegimeFlag[]> {
+  return (await collectRegimeFlagsChecked(args)).flags;
+}
+
+/**
+ * [READINESS-DEGRADE] The same collection, saying whether the line read happened. `linesRead` is
+ * false when the invoice_lines fetch failed: the KOR flag is still decided (it needs no lines),
+ * the phrase flags are absent — and a caller that decides "klaar" must not read that absence as
+ * "no verlegd, no marge".
+ */
+export async function collectRegimeFlagsChecked(args: {
+  client: PipelineClient;
+  korActive: boolean;
+  omzetForKorCheck: number;
+  invoices: RegimeInvoiceRef[];
+}): Promise<{ flags: RegimeFlag[]; linesRead: boolean }> {
+  let linesRead = true;
   const refById = new Map<string, RegimeInvoiceRef>();
   for (const inv of args.invoices) if (inv.id) refById.set(inv.id, inv);
   const ids = [...refById.keys()];
@@ -54,6 +70,7 @@ export async function collectRegimeFlags(args: {
         invoiceCount: ids.length,
         error: e instanceof Error ? e.message : String(e),
       });
+      linesRead = false;
       return [] as Array<{ invoice_id: string | null; description: string | null }>;
     });
     for (const r of rows) {
@@ -64,9 +81,10 @@ export async function collectRegimeFlags(args: {
     }
   }
 
-  return detectRegimeFlags({
+  const flags = detectRegimeFlags({
     korActive: args.korActive,
     omzetForKorCheck: args.omzetForKorCheck,
     lines,
   });
+  return { flags, linesRead };
 }

@@ -265,7 +265,10 @@ test("[PRIVILEGE-REGISTRY] the settled decisions stay settled", () => {
 });
 
 test("[PRIVILEGE-REGISTRY] the counts are pinned, so changing an UNKNOWN or a deviation is a visible act", () => {
-  assert.equal(liveEntries().length, 52, "52 postgres-owned functions in public were measured: 36 SECURITY DEFINER + 16 INVOKER");
+  // 52 → 53: accountant_set_invoice_status went `planned` → `live` when production migration
+  // 20260920185242 was applied and measured (Phase 2 rollout, Step 1, 2026-09-20). A lifecycle
+  // transition, not a decision: its intent and its UNKNOWN/deviation counts did not move.
+  assert.equal(liveEntries().length, 53, "53 postgres-owned functions in public were measured: 36 SECURITY DEFINER + 17 INVOKER");
   assert.equal(liveEntries().filter((e) => e.definer).length, 36);
   // 40 → 33: the 2026-09-20 evidence pass resolved seven (answer_mollie_refund authenticated;
   // acting_for_owner anon + public; get_accountant_for_zzper all four).

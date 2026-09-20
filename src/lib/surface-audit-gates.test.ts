@@ -129,7 +129,8 @@ test("[KLAAR-KWARTAAL] the home's verdict and the readiness page name the same q
   assert.doesNotMatch(home, /router\.push\('\/dashboard\/klaar'\)/, "the bare door is back");
 
   const page = code("src/app/dashboard/klaar/KlaarClient.tsx");
-  assert.match(page, /import \{ quarterFromParams \} from '@\/lib\/quarter'/);
+  // [KLAAR-TOEKOMST] The same import now also carries the started-period rule and the current quarter.
+  assert.match(page, /import \{ quarterFromParams, currentQuarter, isPeriodStarted, type QuarterNo as PeriodQuarter \} from '@\/lib\/quarter'/);
   assert.match(page, /const init = quarterFromParams\(\(k\) => searchParams\.get\(k\)\)/,
     "the readiness page ignores the period in its URL, so the door and the page can drift again");
   assert.doesNotMatch(page, /lastCompletedQuarter\(\)/,
@@ -267,4 +268,156 @@ test("[TAAL-POORT] the reset screens and the tools block are on the translation 
   assert.match(gate, /\/> \*\(\[A-ZÉ\]\{5,\}\(\?: \[A-ZÉ\]\{2,\}\)\*\) \*<\/g,/, "the all-caps pattern is gone from the sweep");
   const register = code("src/app/register/page.tsx");
   assert.doesNotMatch(register, />Laden\.\.\.</, "the register fallback shouts Dutch again");
+});
+
+// ═══ Phase 2 (vragen · berichten · klaar) — the corrections, pinned ══════════════════════════════
+
+// ─── VR-02 [VRAAG-EIGENAAR] every question is answered to its asker; links are a collection ───
+test("[VRAAG-EIGENAAR] the questions screen carries each question's accountant and never reads 'the' accountant as one row", () => {
+  const page = code("src/app/dashboard/vragen/page.tsx");
+  assert.match(page, /\.select\('accountant_id, subject_id, status, vraag_text, updated_at'\)\s*\n\s*\.eq\('subject_type', 'document'\)/,
+    "the document questions no longer carry their asker");
+  assert.match(page, /\.select\('accountant_id, subject_id, status, vraag_text, updated_at'\)\s*\n\s*\.eq\('subject_type', 'invoice'\)/,
+    "the invoice questions no longer carry their asker");
+  assert.match(page, /from\('accountant_clients'\)\.select\('accountant_id'\)\.eq\('zzper_id', user\.id\),/,
+    "the links must be read as a collection");
+  assert.doesNotMatch(page, /accountant_clients'\)[^\n]*\.maybeSingle\(\)/, "the singular link read is back — an owner with two offices then has 'no accountant'");
+  assert.doesNotMatch(page, /accountant_clients'\)[^\n]*\.limit\(1\)/, "a link picked at random is not the accountant who asked");
+  assert.match(page, /classifyAccountantLinks\(\{ data: linkRead\.data, error: linkRead\.error \}\)/, "the read must go through the one classifier (failed / zero / one / many)");
+  assert.match(page, /provenAccountantIds\(/, "names may only be fetched for ids the owner's rows or links prove");
+  assert.match(page, /links=\{links\}/, "the collection no longer reaches the screen");
+  assert.doesNotMatch(page, /accountantId=\{accountantId\}/, "the screen is handed one accountant again");
+
+  const client = code("src/app/dashboard/vragen/VragenClient.tsx");
+  assert.match(client, /const target = answerTargetFor\(vraag\.accountantId, links\)/, "the answer's receiver must be decided from the question's own asker");
+  assert.match(client, /receiver_id: target\.accountantId/, "the answer is posted to someone other than the asker");
+  assert.doesNotMatch(client, /receiver_id: accountantId/, "the answer goes to 'the' accountant again");
+  assert.match(client, /t\('vr\.nietMeerGekoppeld'\)/, "a question whose asker is no longer linked must say so");
+  assert.match(client, /t\('vr\.koppelingOnbekend'\)/, "a failed link read must be said, not guessed either way");
+  assert.match(client, /key=\{`\$\{v\.accountantId \?\? 'niemand'\}:\$\{v\.documentId\}`\}/, "two offices asking about one invoice must be two cards");
+
+  // The home and the rail: the same collection, the same door.
+  for (const f of ["src/app/dashboard/zzp/ZzpDashboard.tsx", "src/components/nav/RailAccount.tsx"]) {
+    const src = code(f);
+    assert.doesNotMatch(src, /accountant_clients'\)[^\n]*\.maybeSingle\(\)/, `${f}: the singular link read is back`);
+    assert.doesNotMatch(src, /accountant_clients'\)[^\n]*\.limit\(1\)/, `${f}: a link picked at random`);
+    assert.match(src, /messagesDoorHref\(classifyAccountantLinks\(\{ data: linkRead\.data, error: linkRead\.error \}\)\)/,
+      `${f}: the Berichten door must be decided from the collection`);
+  }
+  const lib = code("src/lib/accountant-links.ts");
+  assert.match(lib, /if \(read\.error\) return \{ state: "failed" \}/, "a failed read must stay apart from zero links");
+  assert.match(lib, /links\.ids\.length === 1/, "only exactly one link opens a thread directly");
+});
+
+// ─── VR-03 [VRAAG-DEUR] an invoice question opens the screen that shows THAT invoice ──────────
+test("[VRAAG-DEUR] the card's door is decided from the invoice's direction on the server, and Terug returns to the questions", () => {
+  const page = code("src/app/dashboard/vragen/page.tsx");
+  assert.match(page, /select\('id, invoice_number, client_name, total_inc_btw, invoice_date, direction, sender_id, receiver_id'\)/,
+    "the invoice read no longer carries the direction and the ownership");
+  assert.match(page, /invoiceHref: v\.subjectType === 'invoice' && !v\.documentMissing \? invoiceQuestionHref\(v\.invoice, user\.id\) : null/,
+    "the door must be decided by invoiceQuestionHref, with the owner's id");
+  const client = code("src/app/dashboard/vragen/VragenClient.tsx");
+  assert.match(client, /const factuurHref = vraag\.invoiceHref \?\? null/, "the card must use the door the server decided");
+  assert.doesNotMatch(client, /manage\?focus=\$\{encodeURIComponent\(vraag\.documentId\)\}/, "every invoice question is sent to the purchase screen again");
+  const lib = code("src/lib/vragen.ts");
+  assert.match(lib, /inv\.direction === 'incoming' \|\| inv\.direction === 'outgoing'/, "the direction column decides first");
+  assert.match(lib, /inv\.receiver_id === ownerId/, "…and ownership settles a null direction, as the closing package does");
+  assert.match(lib, /if \(direction === null\) return null/, "an undecidable direction gets no door — never a guess");
+  const nav = code("src/lib/navigation.ts");
+  assert.equal((nav.match(/if \(from === 'vragen'\) return '\/dashboard\/vragen'/g) ?? []).length, 2,
+    "both invoice screens must know the way back to the questions");
+});
+
+// ─── TH-01 [GESPREK-GRENS] a thread with a stranger is not a conversation ─────────────────────
+test("[GESPREK-GRENS] the thread reports whether the pair is linked, and the screen draws no composer for a stranger", () => {
+  const route = code("src/app/api/messages/route.ts");
+  assert.match(route, /const linked = await pairIsLinked\(supabase, user\.id, otherId\)/, "the route no longer establishes the link as a fact of its own");
+  assert.match(route, /linked,\s*\n\s*\}\)/, "the link fact does not reach the screen");
+  assert.match(route, /if \(error\) \{[\s\S]{0,200}?return null/, "a failed link read must be null, never false");
+  const page = code("src/app/dashboard/messages/[id]/page.tsx");
+  assert.match(page, /const kanSturen = linked !== false/, "the composer must follow the server's answer");
+  assert.match(page, /const vreemde = linked === false && messages\.length === 0/, "a stranger's empty thread must be its own state");
+  assert.match(page, /\{kanSturen \? \(/, "the composer is drawn regardless of the link");
+  assert.match(page, /t\('gesprek\.nietGekoppeld'\)/);
+  assert.match(page, /t\('gesprek\.koppelingWeg'\)/);
+  inOrder(page, "vreemde ? (", "messages.length === 0 ? (", "src/app/dashboard/messages/[id]/page.tsx", "the stranger state must win over the 'say hello' state");
+});
+
+// ─── MS-01 / MS-02 [AG-03] [TAAL] the inbox keeps its destination and its language ────────────
+test("[AG-03] a session that expires on the message screens comes back to them; [TAAL] the inbox dates the owner's language", () => {
+  const lijst = code("src/app/dashboard/messages/page.tsx");
+  assert.match(lijst, /router\.push\(withRedirect\('\/login', '\/dashboard\/messages'\)\)/, "the inbox sends an expired session to a bare /login again");
+  assert.match(lijst, /toLocaleDateString\(LOCALE_META\[locale\]\.intl\)/, "the inbox dates in nl-NL whatever the owner's language");
+  assert.doesNotMatch(lijst, /toLocaleDateString\('nl-NL'\)/);
+  const draad = code("src/app/dashboard/messages/[id]/page.tsx");
+  assert.match(draad, /router\.push\(withRedirect\('\/login', `\/dashboard\/messages\/\$\{otherId\}`\)\)/, "the thread sends an expired session to a bare /login again");
+});
+
+// ─── KL-01 [READINESS-DEGRADE] availability may degrade, financial truth may not ──────────────
+test("[READINESS-DEGRADE] the readiness route classifies every fail-soft read, and the verdict is never green over an unread input", () => {
+  const route = code("src/app/api/readiness/route.ts");
+  assert.match(route, /export async function readinessResponse\(req: NextRequest, deps: ReadinessDeps\)/, "the route must take its clients injected, or no test can fail a read on its own");
+  assert.match(route, /return NextResponse\.json\(\{ error: "readiness_unavailable", detail: message \}, \{ status: 503 \}\)/, "an essential failure must be a 503, never a verdict");
+  assert.match(route, /const unverified: UnverifiedRead\[\] = \[\];/, "the unread inputs are no longer collected");
+  assert.match(route, /unverified, \/\/ \[READINESS-DEGRADE\]/, "…or no longer handed to the verdict");
+  // Every class B site says so; every class C site is a recognised schema absence, never a bare catch.
+  for (const key of ["dateless_invoices", "amount_only_bookings", "bank_continuity", "bank_coverage", "vat_exemption", "rate_split", "excluded_bank_lines", "card_triangle", "regime_lines", "bad_debt", "vat_clawback"]) {
+    assert.match(route, new RegExp(`unread\\("${key}"`), `the ${key} read fell back to its zero again`);
+  }
+  assert.doesNotMatch(route, /\} catch \{\s*\n\s*\/\*/, "a bare catch with a comment is a read that falls to its zero");
+  assert.doesNotMatch(route, /\.catch\(\(\) => \[\]\)/, "a swallowed read on the verdict path");
+  assert.doesNotMatch(route, /const \{ data: korProfile \} = await/, "the KOR flag is read without its error again — a failed read is not 'KOR off'");
+  assert.match(route, /if \(korErr\) \{\s*\n\s*throw/, "a failed KOR read must throw (essential) — an absent column included: it does not prove KOR is off");
+  assert.doesNotMatch(route, /schemaAbsent\(korErr/, "the KOR read grew a class-C exception again");
+  assert.doesNotMatch(route, /if \(!schemaAbsent\(e\)\) unread\("bank_(continuity|coverage)"/, "an absent evidence table is read as 'no gaps' again — that is class B");
+  assert.match(route, /function schemaAbsent\(e: unknown, column: "auto_match_reason" \| "ignore_reason"\)/, "class C must stay limited to the two columns whose absence proves non-applicability");
+  assert.match(route, /if \(periodsErr\) throw periodsErr;/, "the continuity read's error value is thrown away again");
+  assert.match(route, /if \(overlapErr\) throw overlapErr;/, "the coverage read's error value is thrown away again");
+  assert.match(route, /readExcludedBankIdsChecked\(/, "the excluded-lines read no longer says whether it happened");
+  assert.match(route, /collectRegimeFlagsChecked\(/, "the regime read no longer says whether it happened");
+
+  const model = code("src/lib/readiness.ts");
+  assert.match(model, /title: "Niet alles kon worden gecontroleerd"/, "an unread input is no longer named as a gap");
+  assert.match(model, /verified: unverifiedReads\.length === 0/, "the report no longer says whether it was fully read");
+  inOrder(model, 'title: "Niet alles kon worden gecontroleerd"', 'if (hasData && missing.length === 0 && score >= 90) status = "ready"', "src/lib/readiness.ts", "the gap must exist BEFORE the status is decided, so 'ready' cannot be reached over it");
+
+  // The screens: the page names what was not read; the home never shows green for it.
+  const page = code("src/app/dashboard/klaar/KlaarClient.tsx");
+  assert.match(page, /report\.verified === false && \(/, "the readiness page no longer shows the incomplete state");
+  assert.match(page, /t\('klr\.onvolledig\.kop'\)/);
+  assert.match(page, /t\('klr\.onvolledig\.nietGelezen', \{ onderdelen:/, "…or no longer names what was not read");
+  const stand = code("src/lib/klaar-stand.ts");
+  inOrder(stand, 'if (report?.verified === false) {', 'if (status === "ready") {', "src/lib/klaar-stand.ts", "'incomplete' must be decided before 'ready', so a stale ready can never render green");
+
+  // The summary carries what it could not check, as numbers, not only as prose.
+  const summary = code("src/lib/closing-package.ts");
+  assert.match(summary, /evidenceUnknown,\s*\n\s*datelessChecked: datelessRead\.checked,/, "the closing summary no longer reports its unread evidence and dateless check");
+});
+
+// ─── KL-02 [KLAAR-TOEKOMST] · KL-03 [KLAAR-URL] the period: not in the future, and in the URL ───
+test("[KLAAR-TOEKOMST] a period that has not begun gets no verdict, on one Amsterdam rule for the route, the page and the picker", () => {
+  const route = code("src/app/api/readiness/route.ts");
+  assert.match(route, /if \(!isPeriodStarted\(\{ year, quarter \}\)\) \{\s*\n\s*return NextResponse\.json\(\{ error: "period_not_started", year, quarter \}, \{ status: 400 \}\)/,
+    "the route answers a future period with a verdict again");
+  inOrder(route, 'if (!isPeriodStarted({ year, quarter }))', 'const owner = await resolveQuarterOwner(', "src/app/api/readiness/route.ts", "the period is refused before anything is read");
+  const page = code("src/app/dashboard/klaar/KlaarClient.tsx");
+  assert.match(page, /const begonnen = isPeriodStarted\(\{ year, quarter: quarter as PeriodQuarter \}\)/, "the page no longer asks the shared rule");
+  assert.match(page, /if \(!begonnen\) \{ setLoading\(false\); return \}/, "the page fetches a verdict for a period that has not begun");
+  assert.match(page, /t\('klr\.periode\.nietBegonnen'\)/, "the non-verdict state is gone");
+  assert.match(page, /const nu = currentQuarter\(\)/, "the picker's 'current quarter' is no longer the shared Amsterdam one");
+  assert.doesNotMatch(page, /Math\.floor\(\(Number\(todayNl\.slice\(5, 7\)\) - 1\) \/ 3\) \+ 1/, "the picker derives its own current quarter beside quarter.ts again");
+  const lib = code("src/lib/quarter.ts");
+  assert.match(lib, /export function isPeriodStarted\(period: YearQuarter, now: Date = new Date\(\)\): boolean \{\s*\n\s*const cur = amsterdamYearQuarter\(now\);/, "the rule must be decided on the Amsterdam day, like the rest of the file");
+});
+
+test("[KLAAR-URL] the readiness page keeps its period in the URL and nowhere else", () => {
+  const page = code("src/app/dashboard/klaar/KlaarClient.tsx");
+  assert.match(page, /const init = quarterFromParams\(\(k\) => searchParams\.get\(k\)\)\s*\n\s*const year = init\.year/, "the period must be read from the URL on every render");
+  assert.match(page, /const quarter: number = init\.quarter/);
+  assert.doesNotMatch(page, /useState\(init\.year\)|useState<number>\(init\.quarter\)|setYear\(|setQuarter\(/, "a second copy of the period lives in state again — the URL and the screen can drift");
+  assert.match(page, /const gaNaar = \(y: number, q: number\) => router\.push\(klaarPath\(\{ year: y, quarter: q as PeriodQuarter \}\), \{ scroll: false \}\)/,
+    "the picker must navigate to the canonical path (klaarPath), so refresh, copy, back/forward and a deep link all name the same period");
+  assert.match(page, /onClick=\{\(\) => !future && gaNaar\(year, q\)\}/, "a quarter button no longer navigates");
+  assert.match(page, /gaNaar\(Math\.max\(2000, year - 1\), quarter\)/, "the year-back button no longer navigates");
+  assert.doesNotMatch(page, /window\.history|history\.pushState|history\.replaceState/, "browser history is not business state");
 });

@@ -49,5 +49,17 @@ check("…and quarterFromParams reads exactly that back, so the page opens on th
   return q.year === 2025 && q.quarter === 4;
 })());
 
+
+console.log("\n— [READINESS-DEGRADE] a verdict that could not read everything is 'incomplete', never green —");
+check("verified:false with status almost → the incomplete key",
+  klaarRegel({ status: "almost", missing: [1], risks: [], verified: false }).key === "start.klaar.onvolledig");
+check("…and its own stand", klaarRegel({ status: "attention", verified: false }).stand === "incomplete");
+check("…in amber, not green", klaarRegel({ status: "attention", verified: false }).kleur === "#7C5800");
+check("even a report that CLAIMS ready while unverified is not rendered green",
+  klaarRegel({ status: "ready", missing: [], risks: [], verified: false }).key === "start.klaar.onvolledig");
+check("verified:true changes nothing for a ready verdict", klaarRegel({ status: "ready", verified: true }).key === "start.klaar.ready");
+check("an absent verified flag (older cache rows) is read as verified", klaarRegel({ status: "ready" }).key === "start.klaar.ready");
+check("unknown still wins over everything", klaarRegel({ verified: false }).key === "start.waarheid.sub");
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

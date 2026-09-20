@@ -20,6 +20,17 @@ import { formatEuroNL } from "./format-nl";
 // the app says a number the boekhouder can disprove, trust is gone — so we only claim what
 // the data proves, and every limit is stated in `notes`.
 
+/**
+ * [READINESS-DEGRADE] One read this verdict needed and could not perform. `key` is stable (for
+ * tests and logs); `label` is the Dutch phrase the item names it by ("de aansluiting van je
+ * bankafschriften"). The route collects these; buildReadiness turns them into a gap that keeps the
+ * verdict off green, because a check that did not run is not a check that passed.
+ */
+export interface UnverifiedRead {
+  key: string;
+  label: string;
+}
+
 export interface ReadinessSignals {
   quarterLabel: string;                 // "Q1 2026"
   // [AUTO-EXCLUDE-REVIEW] The numeric quarter, so a deep-link can scope the review list to
@@ -187,6 +198,15 @@ export interface ReadinessSignals {
   // in NONE of this quarter's figures — omzet, kosten and voorbelasting are all quietly too low.
   // /api/aangifte already warns about exactly this; readiness said nothing. Optional (→ 0).
   datelessVerifiedCount?: number;
+  // [READINESS-DEGRADE] Reads that did not happen. "Availability may degrade; financial truth may
+  // not": a failed read used to collapse into its zero — no gaps, no flags, KOR off, nothing
+  // excluded — and the quarter could go green on data nobody read (audit KL-01). Each entry keeps
+  // the verdict off "ready" and is named on the screen. Optional (undefined → everything was read).
+  unverified?: UnverifiedRead[];
+  // [READINESS-DEGRADE] Purchase invoices whose evidence lookup FAILED — neither documented nor
+  // missing, unknown. Subtracted from the "missen het originele document" gap (an accusation needs
+  // a read behind it) and added to `unverified`. Optional (undefined → 0).
+  evidenceUncheckedCount?: number;
 }
 
 export interface ReconException {
@@ -252,6 +272,10 @@ export interface ReadinessReport {
   missing: ReadinessItem[];             // fix-these — gaps
   risks: ReadinessItem[];               // eyeball-these — reconciliation differences
   notes: string[];                      // honest limits of this verdict
+  // [READINESS-DEGRADE] false when a read this verdict needed did not happen. Then `ready` is
+  // false whatever the score, `missing` names it, and `unverified` lists what was not read.
+  verified: boolean;
+  unverified: UnverifiedRead[];
 }
 
 const DIM_LABEL: Record<DimensionKey, string> = {
@@ -275,13 +299,24 @@ export function buildReadiness(s: ReadinessSignals): ReadinessReport {
   const missing: ReadinessItem[] = [];
   const risks: ReadinessItem[] = [];
   const notes: string[] = [];
+  // [READINESS-DEGRADE] What could not be read, collected first so every block may add to it.
+  const unverifiedReads: UnverifiedRead[] = [...(s.unverified ?? [])];
 
   // ── 1) Invoices & bonnen (30%) — every verified invoice must carry its source PDF ──
   {
     const applicable = s.verifiedInvoiceCount > 0;
     const withEv = Math.min(s.invoicesWithEvidence, s.verifiedInvoiceCount);
     const subscore = applicable ? clamp01(withEv / s.verifiedInvoiceCount) : 0;
-    const gap = s.verifiedInvoiceCount - withEv;
+    // [READINESS-DEGRADE] An invoice whose evidence lookup failed is unknown: it earns no point
+    // (the safe direction) and it is not accused of missing its document either.
+    const unchecked = Math.max(0, Math.min(s.evidenceUncheckedCount ?? 0, s.verifiedInvoiceCount - withEv));
+    const gap = s.verifiedInvoiceCount - withEv - unchecked;
+    if (unchecked > 0) {
+      unverifiedReads.push({
+        key: "evidence",
+        label: unchecked === 1 ? "de bijlage van 1 inkoopfactuur" : `de bijlagen van ${unchecked} inkoopfacturen`,
+      });
+    }
     dimensions.push({
       key: "invoices",
       label: DIM_LABEL.invoices,
@@ -289,7 +324,7 @@ export function buildReadiness(s: ReadinessSignals): ReadinessReport {
       applicable,
       subscore,
       detail: applicable
-        ? `${withEv} van ${s.verifiedInvoiceCount} facturen met origineel document.`
+        ? `${withEv} van ${s.verifiedInvoiceCount} facturen met origineel document.${unchecked > 0 ? ` Van ${unchecked} kon de bijlage niet worden gecontroleerd.` : ""}`
         : "Geen facturen in dit kwartaal — dit onderdeel telt niet mee.",
     });
     if (applicable && gap > 0) {
@@ -885,6 +920,22 @@ export function buildReadiness(s: ReadinessSignals): ReadinessReport {
   }
   notes.push("Deze score meet alleen wat is geïmporteerd. Ontbreekt er een bron, dan is het beeld nog niet compleet.");
 
+  // ── [READINESS-DEGRADE] A check that did not run is not a check that passed ──
+  // Named as a GAP, first in the list, so that `missing.length > 0` keeps the verdict off "ready"
+  // by the same rule every other gap uses, and the honesty guard above keeps the score off 100.
+  // The measured dimensions stay on the screen exactly as measured; only the conclusion is
+  // withheld. "Onbekend" may never become "klaar".
+  if (unverifiedReads.length > 0) {
+    const genoemd = [...new Map(unverifiedReads.map((u) => [u.key, u.label])).values()];
+    missing.unshift({
+      severity: "missing",
+      title: "Niet alles kon worden gecontroleerd",
+      detail: `Niet gelezen: ${genoemd.join(", ")}. Dit oordeel is daardoor onvolledig en telt niet als groen licht. Vernieuw de pagina; blijft dit staan, dan ligt het aan de lezing en niet aan je boeken.`,
+    });
+    notes.push("Dit oordeel is onvolledig: een deel van de controles kon niet worden uitgevoerd. Het is geen groen licht.");
+    if (score >= 100) score = 99;
+  }
+
   // ── Status: 'ready' only when NOTHING is missing AND the score is high. Documented
   //    risks may remain (they travel to the accountant flagged) — but a gap never hides. ──
   const hasData = applicableWeight > 0;
@@ -902,6 +953,8 @@ export function buildReadiness(s: ReadinessSignals): ReadinessReport {
     missing,
     risks,
     notes,
+    verified: unverifiedReads.length === 0,
+    unverified: unverifiedReads,
   };
 }
 

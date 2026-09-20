@@ -15,8 +15,10 @@
 //   2. Document must be readable by the caller (documents_accountant_read only
 //      returns shared docs of linked clients) → null = 403.
 //   3. Accountant↔client link (accountant_clients) must exist → else 403.
-//   4. UPSERT via the ACCOUNTANT SESSION (RLS acc_status_owner_all: accountant_id
-//      = auth.uid()) — no service_role needed for the status write itself.
+//   4. UPSERT via the ACCOUNTANT SESSION (RLS acc_status_owner_write: accountant_id
+//      = auth.uid(), linked client, and — since accountant_invoice_question_door_only.sql —
+//      subject_type = 'document' only) — no service_role needed for the status write itself.
+//      Invoice rows have no session write path at all; they move through the door (VR-01).
 //   5. status==='vraag' → notify the client (service_role, notifications has no
 //      authenticated INSERT policy). Best-effort: never fails the status write.
 
@@ -53,7 +55,7 @@ export async function POST(req: NextRequest) {
   // "vraag" on a file the owner has moved to the trash (matches /brug's trashed=false).
   const { data: doc, error: docErr } = await supabase
     .from('documents')
-    .select('user_id')
+    .select('user_id, file_name')
     .eq('id', subjectId)
     .eq('trashed', false)
     .single()
@@ -87,9 +89,11 @@ export async function POST(req: NextRequest) {
     updated_at: now,
   }
 
+  // [VRAAG-SYNC] `status` is read along with the id: whether THIS accountant's question on the
+  // document was open decides, below, whether the owner is told it is handled.
   const { data: existing } = await supabase
     .from('accountant_subject_status')
-    .select('id')
+    .select('id, status')
     .eq('accountant_id', user.id)
     .eq('subject_type', 'document')
     .eq('subject_id', subjectId)
@@ -127,6 +131,27 @@ export async function POST(req: NextRequest) {
     })
     if (!melding.ok) {
       console.error('[subject-status] vraag notification failed:', melding.error)
+    }
+  }
+
+  // ── (6) [VRAAG-SYNC] …and on a question that just closed ──
+  // The invoice side gets this from the database function (invoice-status route); a document
+  // question has no counter on the invoice and is closed right here, by this same UPDATE. The
+  // owner's "Vraag van je boekhouder" notification would otherwise be the last word about a
+  // question that has just left /dashboard/vragen. Best-effort, after the write, like (5).
+  if (existing?.status === 'vraag' && status !== 'vraag') {
+    const naam = (doc.file_name ?? '').trim()
+    const melding = await createNotification({
+      userId: doc.user_id,
+      title: 'Vraag afgehandeld',
+      body: naam
+        ? `Je boekhouder heeft de vraag over ${naam.length > 80 ? `${naam.slice(0, 77)}…` : naam} afgehandeld.`
+        : 'Je boekhouder heeft de vraag over een document afgehandeld.',
+      type: 'status',
+      link: '/dashboard/vragen',
+    })
+    if (!melding.ok) {
+      console.error('[subject-status] "vraag afgehandeld" notification failed:', melding.error)
     }
   }
 

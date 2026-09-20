@@ -43,6 +43,8 @@ import type { NotificationRow } from '@/types/rows'
 import type { Role } from '@/lib/navigation'
 import { NotificationsBell } from '@/app/dashboard/_shared'
 import { useToast } from '@/components/ui/Toast'
+// [VRAAG-EIGENAAR] The Berichten door: one linked accountant → that conversation; otherwise the inbox.
+import { classifyAccountantLinks, messagesDoorHref } from '@/lib/accountant-links'
 
 export interface RailAccountInfo {
   id: string
@@ -98,7 +100,8 @@ export function RailAccount({ account, role }: { account: RailAccountInfo; role:
   const [notifError, setNotifError] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const [unreadMessages, setUnreadMessages] = useState(0)
-  const [accountantId, setAccountantId] = useState<string | null>(null)
+  // [VRAAG-EIGENAAR] Where the Berichten door opens — from the link COLLECTION, never one row.
+  const [messagesHref, setMessagesHref] = useState<string>('/dashboard/messages')
 
   useEffect(() => {
     let live = true
@@ -119,11 +122,13 @@ export function RailAccount({ account, role }: { account: RailAccountInfo; role:
       // A badge that stays away is silent; a badge that says 0 is a claim. A failed count stays away.
       setUnreadMessages(countErr ? 0 : count || 0)
       if (countErr) console.error('[ZIJBALK-ACCOUNT] unread messages could not be counted:', countErr.message)
-      // The owner's Berichten door opens the conversation with their boekhouder when they have one,
-      // exactly as the home's did. An accountant has no single counterpart: the list.
+      // The owner's Berichten door opens the conversation with their boekhouder when they have
+      // exactly one, as the home's does; with two offices, or none, or a read that failed, it opens
+      // the inbox. An accountant has no single counterpart: the list.
       if (role !== 'accountant') {
-        const { data: link } = await supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', account.id).maybeSingle()
-        if (live && link?.accountant_id) setAccountantId(link.accountant_id)
+        const linkRead = await supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', account.id)
+        if (linkRead.error) console.error('[ZIJBALK-ACCOUNT] accountant links could not be read:', linkRead.error.message)
+        if (live) setMessagesHref(messagesDoorHref(classifyAccountantLinks({ data: linkRead.data, error: linkRead.error })))
       }
     })()
     return () => { live = false }
@@ -160,7 +165,6 @@ export function RailAccount({ account, role }: { account: RailAccountInfo; role:
     router.push('/login')
   }
 
-  const messagesHref = accountantId ? `/dashboard/messages/${accountantId}` : '/dashboard/messages'
   const initials = deriveInitials(account.name || 'U')
 
   return (

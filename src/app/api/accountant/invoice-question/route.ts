@@ -24,11 +24,18 @@
 // boekhouder zelf. Daarom zet het antwoord van de klant de status níét terug — dat zou de bewering
 // van de één in het vakje van de ander schrijven.
 //
-// ── TWEE SCHRIJFACTIES, EN WAAROM DE VOLGORDE ZO IS ──
-// De status staat op de factuur (daar kijken de drie tellers), de TEKST staat in
-// accountant_subject_status (daar staat vraag_text al voor documenten, en de CHECK van die tabel
-// noemt 'invoice' sinds dag één). De tekst gaat eerst: een status 'vraag' zonder tekst is de
-// situatie die dit hele bestand komt oplossen — de klant ziet dat er iets is en niet wat.
+// ── [VRAAG-SYNC] ONE write, where there were two ──
+// This route used to write the question TEXT itself (an upsert on accountant_subject_status through
+// the session client) and then ask the door for the STATUS on the invoice. Two writes, and a failure
+// between them was exactly the contradiction the Phase 2 audit measured (VR-01): a status without
+// words, or words the accountant's own counters never saw — and, on the way back, an invoice set to
+// 'verwerkt' while the client kept reading an open question about it, forever.
+//
+// Both facts now move in ONE database transaction behind the door (accountant_set_invoice_status):
+// the words and the status are written together or not at all, and the same door closes the
+// question when the accountant later resolves the invoice. This route holds only what is HTTP:
+// reading a body, refusing a malformed one, the rate limit, the notification, and turning the
+// door's answer into a status code.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
@@ -37,13 +44,32 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit
 import { logAuditAction } from '@/lib/audit'
 import { VRAAG_STATUS, vraagTekst } from '@/lib/vragen'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
-import { setAccountantStatus } from '@/lib/accountant-status-door'
+import { setAccountantStatus, DOOR_REFUSAL_HTTP_STATUS, type DoorRefusal } from '@/lib/accountant-status-door'
 
 export const dynamic = 'force-dynamic'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /** Genoeg voor een echte vraag, kort genoeg om een notificatie niet te laten ontsporen. */
 const MAX_TEXT = 500
+
+/**
+ * What the accountant reads when the door refuses — one sentence per reason. The sentences are the
+ * ones this route has always answered with; only the place they are chosen from has changed.
+ * [NO-SILENT-EMPTY] A failed read of the link is never "not linked": that reads as a revoked
+ * mandate, which is a very different message from "try again".
+ */
+const REFUSAL_TEXT: Record<DoorRefusal, string> = {
+  not_authenticated: 'Niet ingelogd.',
+  unknown_status: 'Onbekende status',
+  question_required: 'Vraag is leeg',
+  link_read_failed: 'De koppeling kon niet worden gecontroleerd — probeer het opnieuw.',
+  not_linked: 'Je kunt alleen een vraag stellen bij een gekoppelde klant',
+  invoice_read_failed: 'De factuur kon niet worden gelezen — probeer het opnieuw.',
+  invoice_not_visible: 'Factuur niet gevonden',
+  invoice_not_this_client: 'Deze factuur hoort niet bij deze klant',
+  write_failed: 'De vraag kon niet worden opgeslagen — probeer het opnieuw.',
+  nothing_written: 'De vraag kon niet worden opgeslagen — probeer het opnieuw.',
+}
 
 export async function POST(request: NextRequest) {
   const supabase = await createServerSupabaseClient()
@@ -57,9 +83,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Ongeldig verzoek' }, { status: 400 })
   }
   // Een lege vraag is geen vraag. Weigeren is eerlijker dan een status zetten waar de klant niets
-  // mee kan — dat is exact de toestand die deze route komt opheffen.
+  // mee kan — dat is exact de toestand die deze route komt opheffen. The door refuses it a second
+  // time, and the database a third: a status is never written without its words.
   const question = vraagTekst(typeof body?.question === 'string' ? body.question.slice(0, MAX_TEXT) : null)
-  if (!question) return NextResponse.json({ error: 'Vraag is leeg' }, { status: 400 })
+  if (!question) return NextResponse.json({ error: REFUSAL_TEXT.question_required }, { status: 400 })
 
   const limit = await checkRateLimit({
     userId: user.id,
@@ -68,100 +95,34 @@ export async function POST(request: NextRequest) {
   })
   if (!limit.allowed) return rateLimitResponse(limit)
 
-  // De koppeling is de grens, en zij wordt IN CODE gecontroleerd — niet met clientId in een
-  // PostgREST-filter, waar hij extra syntax kan injecteren. Zelfde vorm als /api/messages en
-  // /api/accountant/vraag-stukken.
-  const { data: links, error: linkErr } = await supabase
-    .from('accountant_clients')
-    .select('accountant_id, zzper_id')
-    .eq('accountant_id', user.id)
-  if (linkErr) {
-    // [NO-SILENT-EMPTY] Een mislukte lezing mag nooit als "niet gekoppeld" aankomen: dat leest als
-    // een ingetrokken machtiging, en dat is een heel ander bericht dan "probeer het opnieuw".
-    console.error('[FACTUURVRAAG] koppelingslezing mislukt', { accountantId: user.id, error: linkErr.message })
-    return NextResponse.json({ error: 'De koppeling kon niet worden gecontroleerd — probeer het opnieuw.' }, { status: 503 })
-  }
-  if (!(links ?? []).some((l) => l.zzper_id === clientId)) {
-    return NextResponse.json({ error: 'Je kunt alleen een vraag stellen bij een gekoppelde klant' }, { status: 403 })
-  }
-
-  // De factuur, met de SESSIE-client: de boekhouder mag hem zien via de deel-policies, en zo blijft
-  // "wat mag deze boekhouder lezen" één antwoord in de database in plaats van twee in de code.
-  const { data: invRow, error: invErr } = await supabase
-    .from('invoices')
-    .select('id, sender_id, receiver_id, invoice_number, client_name, total_inc_btw, accountant_status')
-    .eq('id', invoiceId)
-    .maybeSingle()
-  if (invErr) {
-    console.error('[FACTUURVRAAG] factuurlezing mislukt', { accountantId: user.id, invoiceId, error: invErr.message })
-    return NextResponse.json({ error: 'De factuur kon niet worden gelezen — probeer het opnieuw.' }, { status: 503 })
-  }
-  if (!invRow) return NextResponse.json({ error: 'Factuur niet gevonden' }, { status: 404 })
-
-  const inv = invRow as {
-    id: string; sender_id: string | null; receiver_id: string | null
-    invoice_number: string | null; client_name: string | null; total_inc_btw: number | null
-    accountant_status: string | null
-  }
-  // De factuur moet van DEZE klant zijn. Zichtbaar zijn is niet genoeg: een boekhouder met tien
-  // klanten ziet tien administraties, en een vraag die bij de verkeerde klant landt zet een status
-  // in boeken waar deze vraag niet over gaat.
-  if (inv.sender_id !== clientId && inv.receiver_id !== clientId) {
-    return NextResponse.json({ error: 'Deze factuur hoort niet bij deze klant' }, { status: 403 })
-  }
-
-  // ── (1) De TEKST eerst ───────────────────────────────────────────────────────
-  // Als deze faalt gaat de status niet om, en dat is de goede volgorde: een 'vraag' zonder tekst is
-  // precies het probleem dat deze route oplost. Geschreven met de SESSIE-client — RLS-policy
-  // acc_status_owner_write bindt de rij aan accountant_id = auth.uid(), dus service_role zou hier
-  // alleen de grens omzeilen die het punt is.
-  const { error: textErr } = await (supabase as unknown as {
-    from: (t: string) => {
-      upsert: (v: Record<string, unknown>, o: { onConflict: string }) => PromiseLike<{ error: { message: string } | null }>
-    }
-  })
-    .from('accountant_subject_status')
-    .upsert({
-      accountant_id: user.id,
-      subject_type: 'invoice',
-      subject_id: invoiceId,
-      status: VRAAG_STATUS,
-      vraag_text: question,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'accountant_id,subject_type,subject_id' })
-  if (textErr) {
-    console.error('[FACTUURVRAAG] vraagtekst opslaan mislukt', { accountantId: user.id, invoiceId, error: textErr.message })
-    return NextResponse.json({ error: 'De vraag kon niet worden opgeslagen — probeer het opnieuw.' }, { status: 500 })
-  }
-
-  // ── (2) De STATUS op de factuur ──────────────────────────────────────────────
-  // [BOEKHOUDER-DEUR] Door dezelfde deur als het kwartaalscherm. Deze route schreef de kolom zelf
-  // met de sessie-client; de database neemt die schrijf niet meer aan, en dat is de bedoeling —
-  // accountant_status heeft één schrijfpad en daar horen de koppelingscontrole, de factuurcontrole
-  // en de toeschrijving bij. De deur leest de boekhouder uit de sessie, dus 'vraag' kan hier niet
-  // aan iemand anders worden toegeschreven dan wie hem stelt.
-  //
-  // Slaagt dit niet, dan staat de tekst er wel en de status niet: de klant ziet de vraag dan op
-  // /dashboard/vragen (die leest de statusrij), alleen tellen de boekhouderstellers hem nog niet.
-  // Dat is de goede kant om op te falen — de vraag bereikt de klant, en wij zeggen het eerlijk.
-  const doorResult = await setAccountantStatus({
+  // [BOEKHOUDER-DEUR] The door decides everything about the invoice: who is asking (the session,
+  // never a parameter), whether they are linked to this client (checked in code, never with
+  // clientId inside a PostgREST filter), whether the invoice is visible to them under RLS and
+  // belongs to this client — and then makes the ONE write, in which the status on the invoice and
+  // this accountant's question row (the words) move together.
+  const result = await setAccountantStatus({
     session: supabase,
     pipeline: createPipelineClient(),
     invoiceId,
     clientId,
     status: VRAAG_STATUS,
+    question,
   })
-  const statusApplied = doorResult.ok
-  if (!doorResult.ok) {
-    console.error('[FACTUURVRAAG] status op de factuur zetten mislukt', { accountantId: user.id, invoiceId, error: doorResult.reason })
+  if (!result.ok) {
+    const status = DOOR_REFUSAL_HTTP_STATUS[result.reason]
+    if (status >= 500) {
+      console.error('[FACTUURVRAAG] vraag opslaan mislukt', {
+        accountantId: user.id, invoiceId, reason: result.reason, detail: result.detail,
+      })
+    }
+    return NextResponse.json({ error: REFUSAL_TEXT[result.reason] }, { status })
   }
 
-  // ── (3) De klant weten ───────────────────────────────────────────────────────
+  // ── De klant weten ───────────────────────────────────────────────────────────
   // Best-effort: een mislukte melding mag een opgeslagen vraag nooit terugdraaien. De link wijst
   // naar /dashboard/vragen — het scherm met de vraag, de factuur erbij en één veld om te antwoorden
   // — en niet naar een lijst waar de klant zelf mag zoeken wat er bedoeld werd.
-  const label = [inv.client_name?.trim(), inv.invoice_number ? `factuur ${inv.invoice_number}` : null]
-    .filter(Boolean).join(' · ')
+  const label = result.invoiceLabel
   const melding = await createNotification({
     userId: clientId,
     title: 'Vraag van je boekhouder',
@@ -181,10 +142,10 @@ export async function POST(request: NextRequest) {
     action: 'accountant.invoice_question',
     entityType: 'invoice',
     entityId: invoiceId,
-    newValue: { client_id: clientId, invoice_number: inv.invoice_number, status_applied: statusApplied },
+    newValue: { client_id: clientId, invoice_label: label, question_was_open: result.questionWasOpen },
   }).catch((e) => {
     console.error('[FACTUURVRAAG] audit mislukt', { error: e instanceof Error ? e.message : String(e) })
   })
 
-  return NextResponse.json({ ok: true, statusApplied })
+  return NextResponse.json({ ok: true })
 }

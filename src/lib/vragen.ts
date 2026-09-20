@@ -39,6 +39,11 @@ export interface VraagStatusRow {
   // Absent on rows read from a document-only query — those are documents by construction, so the
   // default below keeps every existing caller behaving exactly as before.
   subject_type?: string | null
+  // [VRAAG-EIGENAAR] WHO asked. The column has been on every row since the table was created; the
+  // screens just never selected it, and read "the" accountant from the link table instead — which
+  // has no answer for an owner with two offices. Optional here so older callers compile; the
+  // questions page selects it, and an answer goes to THIS id, never to a link picked at random.
+  accountant_id?: string | null
 }
 
 /** Het document waar de vraag over gaat, zoals het uit documents komt. */
@@ -62,6 +67,12 @@ export interface VraagInvoiceRow {
   client_name: string | null
   total_inc_btw: number | null
   invoice_date: string | null
+  // [VRAAG-DEUR] Which way the invoice goes, and whose it is — the two facts the app already
+  // records that decide which screen shows it. Optional so older callers compile; the questions
+  // page selects all three, and the door (invoiceQuestionHref) refuses to guess without them.
+  direction?: string | null
+  sender_id?: string | null
+  receiver_id?: string | null
 }
 
 /** Een openstaande vraag, klaar om te tonen. */
@@ -86,6 +97,12 @@ export interface OpenVraag {
    * field of its own rather than an inference from a null name.
    */
   invoice?: VraagInvoiceRow | null
+  /**
+   * [VRAAG-EIGENAAR] The accountant who asked — the row's own accountant_id. The answer goes to
+   * them, and the card says whether they are still linked. Null only when the row carried none,
+   * which the schema does not allow; it is kept honest rather than defaulted to "the" accountant.
+   */
+  accountantId: string | null
 }
 
 /**
@@ -119,6 +136,7 @@ export function buildOpenVragen(
       question: vraagTekst(row.vraag_text),
       askedAt: row.updated_at ?? null,
       subjectType: 'document',
+      accountantId: row.accountant_id ?? null,
     })
   }
 
@@ -156,6 +174,7 @@ export function buildOpenInvoiceVragen(
       askedAt: row.updated_at ?? null,
       subjectType: 'invoice',
       invoice: inv,
+      accountantId: row.accountant_id ?? null,
     })
   }
   return sortOldestFirst(open)
@@ -180,6 +199,43 @@ export function invoiceLabel(inv: VraagInvoiceRow): string {
     : null
   if (amount) parts.push(amount)
   return parts.length > 0 ? parts.join(' · ') : 'Factuur'
+}
+
+/** [VRAAG-DEUR] The marker the parent rules read to send the visitor back to the questions screen. */
+export const FROM_VRAGEN = 'from=vragen'
+
+/**
+ * [VRAAG-DEUR] Where "Bekijk" on an invoice question lands — the screen that actually shows THIS
+ * invoice, with the way back written into the link.
+ *
+ * The card sent every invoice question to /dashboard/incoming/manage?focus=, the purchase-invoice
+ * screen. A question about a SALES invoice landed on a list that does not contain it: the focus
+ * did nothing, the owner scrolled four hundred purchase bills for a number that was never there,
+ * and the way back ("Terug") went to the verify queue (audit VR-03).
+ *
+ * The direction is the app's own record — the `direction` column, or ownership when that column
+ * is null, exactly the rule the closing package and readiness use (effectiveDirection). Never the
+ * number's shape or the counterparty's name. When neither fact is there, there is no link: a door
+ * to a guess is worse than no door.
+ */
+export function invoiceQuestionHref(
+  inv: { id: string; direction?: string | null; sender_id?: string | null; receiver_id?: string | null } | null | undefined,
+  ownerId: string,
+): string | null {
+  if (!inv?.id) return null
+  const direction: 'incoming' | 'outgoing' | null =
+    inv.direction === 'incoming' || inv.direction === 'outgoing'
+      ? inv.direction
+      : inv.receiver_id === ownerId
+        ? 'incoming'
+        : inv.sender_id === ownerId
+          ? 'outgoing'
+          : null
+  if (direction === null) return null
+  const id = encodeURIComponent(inv.id)
+  return direction === 'incoming'
+    ? `/dashboard/incoming/manage?focus=${id}&${FROM_VRAGEN}`
+    : `/dashboard/invoice/${id}?${FROM_VRAGEN}`
 }
 
 /** Oudste eerst; rijen zonder datum achteraan. Gedeeld door beide bouwers. */

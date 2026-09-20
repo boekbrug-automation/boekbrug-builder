@@ -41,3 +41,28 @@ test("[FROM-HOME] the marker resolves to each role's own home, never to a door t
   assert.equal(parentOf("/dashboard/settings/team?from=home", "accountant"), getHomePath("accountant"));
   assert.equal(parentOf("/dashboard/incoming/manage?from=home", "medewerker"), "/dashboard/verkoop");
 });
+
+// ── [VRAAG-DEUR] the questions screen's door to an invoice, and the way back ─────────────────────
+import { invoiceQuestionHref } from "./vragen";
+const OWNER = "11111111-1111-4111-8111-111111111111";
+
+test("[VRAAG-DEUR] an incoming invoice question lands on Inkomend, focused, and its Terug returns to the questions", () => {
+  const href = invoiceQuestionHref({ id: "inv-in", direction: "incoming", receiver_id: OWNER, sender_id: null }, OWNER) as string;
+  assert.equal(href, "/dashboard/incoming/manage?focus=inv-in&from=vragen");
+  assert.equal(parentOf(href), "/dashboard/vragen");
+});
+
+test("[VRAAG-DEUR] an outgoing invoice question opens the invoice itself, and its Terug returns to the questions", () => {
+  const href = invoiceQuestionHref({ id: "inv-out", direction: "outgoing", sender_id: OWNER, receiver_id: null }, OWNER) as string;
+  assert.equal(href, "/dashboard/invoice/inv-out?from=vragen");
+  assert.equal(parentOf(href), "/dashboard/vragen");
+  // Unmarked, the invoice page still returns to the invoice list — nothing that relied on it changed.
+  assert.equal(parentOf("/dashboard/invoice/inv-out"), "/dashboard/facturen");
+  // …and the accountant's marker still wins its own way home.
+  assert.equal(parentOf("/dashboard/invoice/inv-out?from=client&clientId=k1&q=2&year=2026", "accountant"), "/dashboard/clients/k1/kwartaal?q=2&year=2026");
+});
+
+test("[VRAAG-DEUR] the marker is exact: a different value falls back to the documented default", () => {
+  assert.equal(parentOf("/dashboard/incoming/manage?focus=x&from=vragenlijst"), "/dashboard/incoming");
+  assert.equal(parentOf("/dashboard/invoice/x?from=vragenlijst"), "/dashboard/facturen");
+});
