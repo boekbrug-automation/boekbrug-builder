@@ -343,6 +343,20 @@ const STAND_CONTROLE: Record<string, Stand> = {
           and has_function_privilege('authenticated', 'public.has_active_invoice_mandate(uuid,uuid)', 'EXECUTE')
           and has_function_privilege('anon', 'public.is_my_accountant_client(uuid)', 'EXECUTE')`,
   },
+  // [DEFINER-ANON] The state check mirrors the migration's whole contract, not just its
+  // headline: anon is gone from both signatures AND authenticated and service_role still hold.
+  // Measuring only the revoke would let a later over-eager "harden everything" pass read as
+  // TOEGEPAST while it had quietly cut the session client off from the refund flow.
+  "anon_revoke_refund_writers.sql": {
+    soort: "controle",
+    vraag: "anon kan de twee terugbetalingsfuncties niet meer aanroepen — en authenticated en service_role nog wél",
+    sql: `not has_function_privilege('anon', 'public.reverse_invoice_payment(uuid,uuid)', 'EXECUTE')
+          and not has_function_privilege('anon', 'public.answer_mollie_refund(uuid,text,text,numeric)', 'EXECUTE')
+          and has_function_privilege('authenticated', 'public.reverse_invoice_payment(uuid,uuid)', 'EXECUTE')
+          and has_function_privilege('authenticated', 'public.answer_mollie_refund(uuid,text,text,numeric)', 'EXECUTE')
+          and has_function_privilege('service_role', 'public.reverse_invoice_payment(uuid,uuid)', 'EXECUTE')
+          and has_function_privilege('service_role', 'public.answer_mollie_refund(uuid,text,text,numeric)', 'EXECUTE')`,
+  },
   "accountant_clients_insert_consent.sql": {
     soort: "controle",
     vraag: "de oude insert-policy is weg — een boekhouder koppelt zichzelf niet meer aan een klant",

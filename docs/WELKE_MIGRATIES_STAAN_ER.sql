@@ -32,7 +32,7 @@
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
 --   DEEL 1  de 162 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
---   DEEL 2  de 19 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
+--   DEEL 2  de 20 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
 -- Draai ze allebei. Deel 1 alleen is een schoon rapport met twee veiligheidsmigraties er
@@ -683,7 +683,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 19 van de 181
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 20 van de 182
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
@@ -736,6 +736,15 @@ with controle(bestand, vraag, toegepast) as (
     and not has_function_privilege('anon', 'public.audit_row_is_about_me(text,uuid,uuid)', 'EXECUTE')
     and has_function_privilege('authenticated', 'public.has_active_invoice_mandate(uuid,uuid)', 'EXECUTE')
     and has_function_privilege('anon', 'public.is_my_accountant_client(uuid)', 'EXECUTE')
+  )
+  union all
+  select 'anon_revoke_refund_writers.sql'::text, 'anon kan de twee terugbetalingsfuncties niet meer aanroepen — en authenticated en service_role nog wél'::text, (
+    not has_function_privilege('anon', 'public.reverse_invoice_payment(uuid,uuid)', 'EXECUTE')
+    and not has_function_privilege('anon', 'public.answer_mollie_refund(uuid,text,text,numeric)', 'EXECUTE')
+    and has_function_privilege('authenticated', 'public.reverse_invoice_payment(uuid,uuid)', 'EXECUTE')
+    and has_function_privilege('authenticated', 'public.answer_mollie_refund(uuid,text,text,numeric)', 'EXECUTE')
+    and has_function_privilege('service_role', 'public.reverse_invoice_payment(uuid,uuid)', 'EXECUTE')
+    and has_function_privilege('service_role', 'public.answer_mollie_refund(uuid,text,text,numeric)', 'EXECUTE')
   )
   union all
   select 'bank_transactions_column_grant.sql'::text, 'authenticated mag op bank_transactions nog precies de drie categorie-kolommen UPDATEN en geen enkele regel meer verwijderen'::text, (
