@@ -33388,6 +33388,20 @@ test("[VAST-IN-DE-DB] a paid outgoing invoice's money cannot be rewritten, by an
 // acting_for_owner, with the current grant as an accepted deviation. Closing it is a separate,
 // owner-approved production step. This gate keeps both names on purpose until that step exists.
 //
+// BE EXACT ABOUT WHAT is_my_accountant_client NEEDS, TOO. It needs anon to hold EFFECTIVE EXECUTE.
+// It does not need the PUBLIC entry: production also carries named grants to anon, authenticated
+// and service_role, and on a real PostgreSQL the TO public policies kept working with PUBLIC
+// revoked and those named grants in place (evidence pass batch 2, 2026-09-20). The registry
+// therefore records PUBLIC = DENY for it, with the current PUBLIC entry as an accepted deviation.
+// The step that closes PUBLIC must assert the named grants the intended boundary requires
+// explicitly in the same migration (IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT in
+// scripts/privilege-registry.ts): anon and authenticated because the RLS policy paths evaluate
+// the function as those roles, and service_role because it stays explicitly ALLOW as the
+// server-side compatibility boundary — not because of RLS, which service_role bypasses. That
+// migration must also update this gate and carry a SQL seam proof — one owner-approved change.
+// Until then this gate refuses a repo migration that touches anon OR PUBLIC on it, because an
+// unreviewed PUBLIC revoke that forgot the named grants is exactly the September incident again.
+//
 // ── WHAT HAPPENED, IN ORDER ──
 //
 //  1. `REVOKE EXECUTE … FROM anon` applied cleanly, reported success, and changed NOTHING.
