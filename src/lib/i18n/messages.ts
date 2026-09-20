@@ -431,6 +431,8 @@ export const MESSAGES = {
 
   // ─── [START] Het startscherm — de eerste indruk na inloggen ─────────────────────────────────
 
+  // [GROET] The label above the owner's name — it was a hard-coded GOEDENDAG until now.
+  'start.goedendag': { nl: 'Goedendag', en: 'Good day' },
   'start.toevoegen': { nl: 'Toevoegen', ar: 'إضافة', en: 'Add' },
   'start.administratie': { nl: 'Mijn administratie', ar: 'إدارتي', en: 'My records' },
   'start.meer': { nl: 'Meer', ar: 'المزيد', en: 'More' },
@@ -501,6 +503,12 @@ export const MESSAGES = {
   'afr.bewaren': { nl: 'Bewaren', ar: 'احفظ', en: 'Save' },
   'afr.annuleren': { nl: 'Annuleren', ar: 'إلغاء', en: 'Cancel' },
   'start.klaar': { nl: 'Ben ik klaar?', ar: 'هل أنا جاهز؟', en: 'Am I ready?' },
+  // [VRAGEN-TELLING] The banner's own line — it lived as Dutch inside vragen.ts until now.
+  'start.vragen.een': { nl: 'Je boekhouder heeft een vraag', en: 'Your bookkeeper has a question' },
+  'start.vragen.meer': { nl: 'Je boekhouder heeft {n} vragen', en: 'Your bookkeeper has {n} questions' },
+  // [NO-SILENT-EMPTY] A failed count is not "no questions": the home says it could not look.
+  'start.vragen.onbekend': { nl: 'Kon niet nakijken of je boekhouder een vraag heeft', en: 'Could not check whether your bookkeeper has a question' },
+  'start.vragen.onbekend.sub': { nl: 'Bekijk het hier, of probeer het zo opnieuw', en: 'Check here, or try again shortly' },
   'start.vraag': { nl: 'Bekijk de vraag en antwoord hier', ar: 'اطّلع على السؤال والجواب هنا', en: 'See the question and answer here' },
 
   'start.allesUploaden.sub': { nl: 'Meerdere bestanden tegelijk — de app sorteert', ar: 'عدة ملفات دفعة واحدة — والتطبيق يرتّبها', en: 'Several files at once — the app sorts them' },
@@ -1985,6 +1993,10 @@ export const MESSAGES = {
 
   'kop.meldingen': { nl: 'Meldingen', ar: 'التنبيهات', en: 'Notifications' },
   'kop.geenMeldingen': { nl: 'Geen meldingen', ar: 'لا تنبيهات', en: 'No notifications' },
+  // [MELDING-WAARHEID] Shown when marking read was not stored; the rows are unread again.
+  // [UITLOGGEN] signOut() refused; the session is still there, and the screen says so.
+  'kop.uitloggenMislukt': { nl: 'Uitloggen lukte niet. Je bent nog ingelogd; probeer het zo opnieuw.', en: 'Signing out did not work. You are still signed in; try again shortly.' },
+  'kop.gelezenMislukt': { nl: 'Niet als gelezen opgeslagen. Probeer het zo opnieuw.', en: 'Not saved as read. Try again shortly.' },
   'kop.allesGelezen': { nl: 'Alles gelezen', ar: 'تمت قراءة الكل', en: 'All read' },
   'kop.berichten': { nl: 'Berichten', ar: 'الرسائل', en: 'Messages' },
   'kop.profielmenu': { nl: 'Profielmenu', ar: 'قائمة الحساب', en: 'Profile menu' },
@@ -15337,6 +15349,49 @@ export const MESSAGES = {
   },
 
   // Het inlogscherm zelf.
+  // [DASHBOARD-TOOLS] The file-tools block on both homes — it was plain Dutch in the component.
+  'tools.kop': { nl: 'Gereedschap voor je bestanden', en: 'Tools for your files' },
+  'tools.sub': { nl: 'Gratis, en alles gebeurt in je eigen browser — je bestand wordt nergens naartoe gestuurd.', en: 'Free, and everything happens in your own browser — your file is never sent anywhere.' },
+  'tools.alle': { nl: 'Alle gratis tools', en: 'All free tools' },
+  'tools.pdfVerkleinen': { nl: 'PDF verkleinen', en: 'Shrink a PDF' },
+  'tools.fotosNaarPdf': { nl: "Foto's naar PDF", en: 'Photos to PDF' },
+  'tools.pdfSamenvoegen': { nl: 'PDF samenvoegen', en: 'Merge PDFs' },
+  'tools.pdfSplitsen': { nl: 'PDF splitsen', en: 'Split a PDF' },
+  'tools.pdfOndertekenen': { nl: 'PDF ondertekenen', en: 'Sign a PDF' },
+  'tools.fotoVerkleinen': { nl: 'Foto verkleinen', en: 'Shrink a photo' },
+  'tools.paginasOrdenen': { nl: "Pagina's ordenen", en: 'Reorder pages' },
+  'tools.pdfNaarTekst': { nl: 'PDF naar tekst', en: 'PDF to text' },
+  'tools.pdfEigenschappen': { nl: 'PDF-eigenschappen', en: 'PDF properties' },
+  // Why a tool is on THIS screen — the moment it answers, not what it does.
+  'tools.wanneer.teGroot': { nl: 'Te groot om te uploaden', en: 'Too big to upload' },
+  'tools.wanneer.bonnetjesEenDocument': { nl: 'Bonnetjes als één document', en: 'Receipts as one document' },
+  'tools.wanneer.lossePaginas': { nl: "Losse pagina's bij elkaar", en: 'Loose pages together' },
+  'tools.wanneer.eenBonUitStapel': { nl: 'Eén bon uit een hele stapel', en: 'One receipt out of a whole pile' },
+  'tools.wanneer.offerteTekenen': { nl: 'Offerte tekenen zonder printen', en: 'Sign a quote without printing' },
+  'tools.wanneer.telefoonfoto': { nl: 'Telefoonfoto van 4 MB', en: 'A 4 MB phone photo' },
+  'tools.wanneer.stukkenBundelen': { nl: 'Stukken van één klant bundelen', en: "Bundle one client's documents" },
+  'tools.wanneer.factuurUitBatch': { nl: 'Eén factuur uit een batch', en: 'One invoice out of a batch' },
+  'tools.wanneer.teGrootDoorsturen': { nl: 'Te groot om door te sturen', en: 'Too big to forward' },
+  'tools.wanneer.scheveScan': { nl: 'Scheve scan rechtzetten', en: 'Straighten a skewed scan' },
+  'tools.wanneer.bedragenOvernemen': { nl: 'Bedragen overnemen', en: 'Copy the amounts over' },
+  'tools.wanneer.naamEruit': { nl: 'Naam eruit voor je doorstuurt', en: 'Remove the name before forwarding' },
+  // [TAAL-POORT] The two password screens one click behind the translated door.
+  'auth.terugNaarInloggen': { nl: 'Terug naar inloggen', en: 'Back to sign in' },
+  'auth.vergeten.uitleg': { nl: 'Vul je e-mail in. We sturen je een link om een nieuw wachtwoord te kiezen.', en: 'Enter your e-mail. We will send you a link to choose a new password.' },
+  'auth.vergeten.stuurLink': { nl: 'Stuur de link', en: 'Send the link' },
+  'auth.vergeten.linkGestuurd': { nl: 'We hebben je een link gestuurd.', en: 'We have sent you a link.' },
+  'auth.herstel.nieuw': { nl: 'Nieuw wachtwoord', en: 'New password' },
+  'auth.herstel.uitleg': { nl: 'Kies een nieuw wachtwoord voor je account.', en: 'Choose a new password for your account.' },
+  'auth.herstel.herhaal': { nl: 'Herhaal wachtwoord', en: 'Repeat password' },
+  'auth.herstel.opslaan': { nl: 'Wachtwoord opslaan', en: 'Save password' },
+  'auth.herstel.teKort': { nl: 'Kies een wachtwoord van minstens 6 tekens', en: 'Choose a password of at least 6 characters' },
+  'auth.herstel.nietGelijk': { nl: 'De wachtwoorden zijn niet gelijk', en: 'The passwords do not match' },
+  'auth.herstel.opgeslagen': { nl: 'Wachtwoord opgeslagen', en: 'Password saved' },
+  'auth.herstel.nuInloggen': { nl: 'Je kunt nu inloggen met je nieuwe wachtwoord.', en: 'You can now sign in with your new password.' },
+  'auth.herstel.linkWeg': { nl: 'Deze link werkt niet meer', en: 'This link no longer works' },
+  // [RUSTIG] Twenty words, the ratchet's line: it said the same in twenty-three on the page itself.
+  'auth.herstel.linkWegUitleg': { nl: 'Een herstellink is kort geldig en werkt maar één keer. Open hem in dezelfde browser waarin je hem hebt aangevraagd.', en: 'A reset link is valid briefly and works only once. Open it in the same browser you requested it in.' },
+  'auth.herstel.nieuweLink': { nl: 'Vraag een nieuwe link aan', en: 'Request a new link' },
   'auth.slogan': {
     nl: 'De brug tussen jou en je boekhouder',
     ar: 'الجسر بينك وبين محاسبك',
