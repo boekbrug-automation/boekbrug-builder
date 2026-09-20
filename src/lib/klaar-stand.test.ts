@@ -1,6 +1,7 @@
 // [KLAAR-STAND] Pure node test — run: npx tsx src/lib/klaar-stand.test.ts
 // The line the dashboard button shows, from the readiness verdict. Pure, no I/O.
-import { klaarRegel } from "./klaar-stand";
+import { klaarRegel, klaarPath } from "./klaar-stand";
+import { quarterFromParams } from "./quarter";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -38,6 +39,15 @@ check("a non-string status is not a verdict",
 // The one that matters most: nothing may turn an unmeasured quarter green.
 check("no unknown input can produce the ready key", [null, undefined, {}, { status: "" }, { status: "READY" }]
   .every((b) => klaarRegel(b as never).key !== "start.klaar.ready"));
+
+console.log("\n— [KLAAR-KWARTAAL] the door carries the period its verdict was measured for —");
+check("the path names the year and the quarter",
+  klaarPath({ year: 2026, quarter: 2 }) === "/dashboard/klaar?year=2026&quarter=2");
+check("…and quarterFromParams reads exactly that back, so the page opens on the same quarter", (() => {
+  const u = new URL(klaarPath({ year: 2025, quarter: 4 }), "https://boekbrug.nl");
+  const q = quarterFromParams((k) => u.searchParams.get(k));
+  return q.year === 2025 && q.quarter === 4;
+})());
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
