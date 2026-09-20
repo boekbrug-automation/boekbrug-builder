@@ -8557,6 +8557,12 @@ test("[TAAL] the translated screens have no Dutch of their own left", () => {
     // into them would look perfectly finished — in Dutch.
     "src/components/invoice/SupplierNameInput.tsx",
     "src/components/invoice/SupplierPinModal.tsx",
+    // [TAAL-POORT] The two password screens one click behind the translated door, and the tools
+    // block both homes render. All three were plain Dutch and outside this sweep, so a translated
+    // login led to a Dutch reset screen and a translated home ended in a Dutch block of links.
+    "src/app/wachtwoord-vergeten/page.tsx",
+    "src/app/wachtwoord-herstellen/page.tsx",
+    "src/components/tools/DashboardTools.tsx",
   ];
   const leftovers: string[] = [];
 
@@ -8580,6 +8586,11 @@ test("[TAAL] the translated screens have no Dutch of their own left", () => {
     // [TAAL-BLIND] A lowercase fragment between tags is a SPLIT sentence — the halves around a
     // <strong> — and a split cannot survive a language with another word order.
     /> *([a-zéë]+(?: [a-zéë]+){1,6}[.,]?) *</g,
+    // [TAAL-BLIND] An ALL-CAPS text node. `>GOEDENDAG<` sat above the owner's name on the home
+    // through every sweep, because every pattern above wants a lowercase letter after the first.
+    // Five letters or more: the abbreviations a screen legitimately shouts (BTW, KVK, IBAN, PDF)
+    // are shorter, and were measured to be the only other all-caps nodes on these screens.
+    /> *([A-ZÉ]{5,}(?: [A-ZÉ]{2,})*) *</g,
     // An attribute a user reads.
     /(?:label|placeholder|title|aria-label|desc)="([^"]{3,70})"/g,
     // A message handed to the owner when something goes wrong.
@@ -8603,8 +8614,8 @@ test("[TAAL] the translated screens have no Dutch of their own left", () => {
     for (const m of page.matchAll(re)) {
       const text = m[1].trim();
       if (dbExempt.has(text)) continue;
-      // Two Dutch-looking words, or one capitalised Dutch word on its own.
-      if (!/[a-zé] [a-zé]|^[A-Z][a-zé]{3,}$/.test(text)) continue;
+      // Two Dutch-looking words, one capitalised Dutch word on its own, or one shouted in capitals.
+      if (!/[a-zé] [a-zé]|^[A-Z][a-zé]{3,}$|^[A-ZÉ]{5,}(?: [A-ZÉ]{2,})*$/.test(text)) continue;
       if (text.includes("/") || text.includes("http")) continue;
       // A city and a street are FORMAT examples, not words: an Arabic example would have the
       // owner typing a postcode that does not exist here. Same for the VAT number shape.
