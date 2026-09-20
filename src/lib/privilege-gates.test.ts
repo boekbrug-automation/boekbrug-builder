@@ -26,13 +26,12 @@ import {
   INTENT_SQL_PATH, MIGRATIONS_DIR, ORACLE_SQL_PATH,
   checkMigration, finalDecisions, functionsCreatedBy, functionsDroppedBy, grantPathsHandled, identityTypeOfArgument,
   indexMigrations, isExistingIdentity, migrationFiles, normaliseType, readPrivilegeStatements, renderIntentSql,
-  renderOracleSql, splitStatements, type MigrationFinding,
+  renderOracleSql, splitStatements, stripSql, type MigrationFinding,
 } from "../../scripts/privilege-oracle";
 
 const index = indexMigrations();
 const files = migrationFiles();
 const read = (f: string) => readFileSync(`${MIGRATIONS_DIR}/${f}`, "utf8");
-const dropped = new Set(index.droppedIn.keys());
 
 // ── The grandfather list: migrations that predate the four-path rule ───────────────────────────
 //
@@ -60,7 +59,7 @@ const GRANDFATHERED = new Set([
 const GRANDFATHERED_CEILING = 44;
 
 const allFindings: MigrationFinding[] = files.flatMap((f) =>
-  checkMigration(f, read(f), REGISTRY, { grandfathered: GRANDFATHERED.has(f), dropped }));
+  checkMigration(f, read(f), REGISTRY, { grandfathered: GRANDFATHERED.has(f) }));
 const findingsOf = (problem: MigrationFinding["problem"]) => allFindings.filter((x) => x.problem === problem);
 const describe = (x: MigrationFinding) =>
   `${x.file}: ${x.fn ?? x.signature ?? ""}${x.role ? " " + x.role : ""}${x.missing ? " does not decide " + x.missing.join(", ") : ""}${x.detail ? " — " + x.detail : ""}`;
@@ -419,8 +418,23 @@ test("[PRIVILEGE-REGISTRY][MUTATION] privilege SQL the reader cannot prove is su
 test("[PRIVILEGE-REGISTRY][MUTATION] a GRANT/REVOKE on a function the registry does not know is caught", () => {
   assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON FUNCTION public.stranger(uuid) TO anon;`, FAKES, NEW)),
     ["privilege_on_unregistered_function"]);
-  // …unless some migration drops it, which is the created-then-dropped case.
-  assert.deepEqual(checkMigration("x.sql", `REVOKE ALL ON FUNCTION public.stranger(uuid) FROM anon;`, FAKES, { grandfathered: false, dropped: new Set(["stranger"]) }), []);
+  // A name some OTHER migration once dropped is not a waiver: the first version exempted every such
+  // name from registration, the four paths and direction, in every file.
+  const real = REGISTRY;
+  const revived = `CREATE FUNCTION public.generate_invoice_number(p uuid) RETURNS text LANGUAGE sql SECURITY DEFINER AS $$ SELECT 'x' $$;
+    GRANT EXECUTE ON FUNCTION public.generate_invoice_number(uuid) TO anon;`;
+  assert.deepEqual(problems(checkMigration("x.sql", revived, real, NEW)), ["no_registry_entry"]);
+  // The only exemption: a helper created and dropped again in the SAME file, after its use.
+  const transient = `CREATE FUNCTION public.helper_once(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
+    REVOKE ALL ON FUNCTION public.helper_once(uuid) FROM PUBLIC, anon, authenticated, service_role;
+    SELECT public.helper_once('00000000-0000-0000-0000-000000000000');
+    DROP FUNCTION public.helper_once(uuid);`;
+  assert.deepEqual(checkMigration("x.sql", transient, FAKES, NEW), []);
+  // …and a GRANT on an overload the registry does not know is caught one level down.
+  const overload = `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, numeric(12,2), text[]) TO service_role;`;
+  const f = checkMigration("x.sql", overload, FAKES, NEW);
+  assert.deepEqual(problems(f), ["privilege_on_unregistered_function"]);
+  assert.equal(f[0].signature, "public.known_fn(uuid, numeric, text[])");
 });
 
 test("[PRIVILEGE-REGISTRY][MUTATION] a REVOKE written in a comment counts for nothing", () => {
@@ -456,22 +470,26 @@ test("[PRIVILEGE-REGISTRY][MUTATION] the DO-loop shape (rpc_anon_revoke.sql) is 
   assert.equal(grantPathsHandled(`REVOKE ALL ON FUNCTION public.other_fn(uuid) FROM PUBLIC, anon, authenticated, service_role;`, "known_fn").size, 0);
 });
 
-test("[PRIVILEGE-REGISTRY][MUTATION] the statement splitter respects dollar-quoted bodies and strings", () => {
+test("[PRIVILEGE-REGISTRY][MUTATION] the statement splitter follows PostgreSQL: dollar bodies, strings, E-strings, nested comments", () => {
   const sql = `CREATE FUNCTION public.a() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM 1; PERFORM 2; END $$;
-    DO $body$ BEGIN EXECUTE 'GRANT EXECUTE ON FUNCTION public.a() TO anon; -- not a boundary'; END $body$;
-    SELECT 'a;b';
+    SELECT 'a;b', E'\\'', $$ -- not a comment; $$, x$a$y;
+    /* a /* nested */ comment; */
     GRANT EXECUTE ON FUNCTION public.a() TO service_role`;
-  const parts = splitStatements(sql);
-  assert.equal(parts.length, 4);
+  const parts = splitStatements(stripSql(sql));
+  assert.equal(parts.length, 3, parts.map((p) => p.sql.slice(0, 30)).join(" | "));
   assert.match(parts[0].sql, /^CREATE FUNCTION/);
-  assert.match(parts[1].sql, /^DO \$body\$/);
-  assert.equal(parts[2].sql, "SELECT 'a;b'");
-  assert.match(parts[3].sql, /^GRANT/);
-  // …and the string inside the DO body is not read as a statement of its own.
+  assert.match(parts[1].sql, /^SELECT 'a;b'/);
+  assert.match(parts[2].sql, /^GRANT/);
   const reading = readPrivilegeStatements(sql, new Set(["a"]));
   assert.deepEqual(reading.effects.map((e) => `${e.fn}:${e.role}:${e.action}:${e.via}`), ["a:serviceRole:GRANT:direct"]);
   assert.deepEqual(reading.unproven, []);
   assert.deepEqual([...finalDecisions(reading).get("a")!], [["serviceRole", "GRANT"]]);
+  // A string inside a DO body is what EXECUTE runs: it is never ignored, and never blessed either.
+  const inBody = `DO $body$ BEGIN EXECUTE 'GRANT EXECUTE ON FUNCTION public.a() TO anon'; END $body$;`;
+  const r2 = readPrivilegeStatements(inBody, new Set(["a"]));
+  assert.deepEqual(r2.effects, []);
+  assert.equal(r2.unproven.length, 1);
+  assert.match(r2.unproven[0], /could not account for/);
 });
 
 test("[PRIVILEGE-REGISTRY][MUTATION] signature parsing meets PostgreSQL's identity form", () => {
@@ -548,4 +566,167 @@ test("[PRIVILEGE-REGISTRY][MUTATION] the provenance block classifies by name and
   assert.match(sql, /'ACKNOWLEDGED_BUT_DIFFERENT'/, "an acknowledgement whose function set no longer matches production is its own verdict");
   assert.match(sql, /ELSE 'DRIFT' END AS provenance/);
   for (const a of ACKNOWLEDGED_PRODUCTION_MIGRATIONS) assert.ok(sql.includes(`('${a.version}', '${a.name}'`), `${a.name} must be embedded`);
+});
+
+// ── Mutations from the adversarial review: every hole it found, closed and pinned ─────────────
+
+test("[PRIVILEGE-REGISTRY][MUTATION] a GRANT after BEGIN or IF … THEN inside a DO block is read, with direction", () => {
+  const begin = `DO $$ BEGIN GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon; END $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", begin, FAKES, NEW)), ["contradicts_intent"]);
+  const guarded = `DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+      GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon; END IF; END $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", guarded, FAKES, NEW)), ["contradicts_intent"]);
+  // …and the consistent version passes.
+  const fine = guarded.replace("TO anon", "TO service_role").replace("GRANT EXECUTE", "GRANT EXECUTE");
+  assert.deepEqual(checkMigration("x.sql", fine, FAKES, NEW), []);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] privilege SQL hidden in a string the reader does not read is unproven, never silent", () => {
+  const shapes = [
+    `DO $$ BEGIN EXECUTE 'GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon'; END $$;`,
+    `DO $$ DECLARE r text := 'anon'; BEGIN EXECUTE 'GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO ' || r; END $$;`,
+    `DO $$ BEGIN EXECUTE format($f$GRANT EXECUTE ON FUNCTION %s TO anon$f$, 'public.known_fn(uuid, integer)'); END $$;`,
+    `DO $$ DECLARE t text := 'GRANT EXECUTE ON FUNCTION %s TO anon'; BEGIN EXECUTE format(t, 'public.known_fn(uuid, integer)'); END $$;`,
+    `DO $$ BEGIN EXECUTE format('%s EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon', 'GRANT'); END $$;`,
+    `CREATE OR REPLACE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+       BEGIN GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon; END $$;`,
+    `CREATE OR REPLACE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE plpgsql AS 'BEGIN EXECUTE ''GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon''; END';`,
+  ];
+  for (const sql of shapes) {
+    const f = checkMigration("x.sql", sql, FAKES, NEW);
+    assert.deepEqual(problems(f), ["unproven_privilege_sql"], sql.slice(0, 80));
+  }
+  // A single-quoted DO body is read like a dollar-quoted one.
+  const doString = `DO 'BEGIN GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon; END';`;
+  assert.deepEqual(problems(checkMigration("x.sql", doString, FAKES, NEW)), ["contradicts_intent"]);
+  // A string at the top level that is not a body is text: COMMENT ON may say GRANT all it likes.
+  const comment = `COMMENT ON FUNCTION public.known_fn(uuid, integer) IS 'GRANT is deliberately absent here';`;
+  assert.deepEqual(checkMigration("x.sql", comment, FAKES, NEW), []);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] the lexer cannot be desynchronised from PostgreSQL to hide a GRANT", () => {
+  const wrong = `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon;`;
+  const disguises = [
+    `SELECT $$ -- $$;\n${wrong}`,
+    `CREATE OR REPLACE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 -- done $$;\n${wrong}`,
+    `SELECT E'\\'';\n${wrong}`,
+    `SELECT 1 AS x$a$y;\n${wrong}`,
+  ];
+  for (const sql of disguises) {
+    assert.deepEqual(problems(checkMigration("x.sql", sql, FAKES, NEW)), ["contradicts_intent"], sql.slice(0, 60));
+  }
+  // …and the reverse: decisions inside a nested block comment, or after a swallowed line, did not run.
+  const nested = `CREATE FUNCTION public.new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
+    /* /* */ REVOKE ALL ON FUNCTION public.new_fn(uuid) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION public.new_fn(uuid) TO service_role; */`;
+  assert.deepEqual(checkMigration("x.sql", nested, FAKES, NEW)[0]?.missing, ["anon", "authenticated", "serviceRole", "public"]);
+  const apostrophe = `CREATE FUNCTION public.new_fn(p uuid) RETURNS text LANGUAGE sql AS $$ SELECT $n$it's$n$ $$;
+    SELECT 1 --; REVOKE ALL ON FUNCTION public.new_fn(uuid) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION public.new_fn(uuid) TO service_role;
+    ;`;
+  assert.deepEqual(checkMigration("x.sql", apostrophe, FAKES, NEW)[0]?.missing, ["anon", "authenticated", "serviceRole", "public"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] DROP then CREATE of a live function is a new identity: the ACL was reset", () => {
+  const sql = `DROP FUNCTION public.known_fn(uuid, integer);
+    CREATE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`;
+  const f = checkMigration("x.sql", sql, FAKES, NEW);
+  assert.deepEqual(problems(f), ["default_paths_not_handled"]);
+  assert.deepEqual(f[0].missing, ["anon", "authenticated", "serviceRole", "public"]);
+  const withIfExists = sql.replace("DROP FUNCTION", "DROP FUNCTION IF EXISTS").replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION");
+  assert.deepEqual(problems(checkMigration("x.sql", withIfExists, FAKES, NEW)), ["default_paths_not_handled"]);
+  // Decided again after the re-creation, it passes.
+  const decided = sql + `\n REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO service_role;`;
+  assert.deepEqual(checkMigration("x.sql", decided, FAKES, NEW), []);
+  assert.deepEqual(functionsDroppedBy("DROP FUNCTION public.a(uuid), public.b(uuid); DROP ROUTINE IF EXISTS public.c(); drop procedure other.d();"), ["a", "b", "c"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] a DO loop's target must be a literal name list the loop provably uses", () => {
+  const negated = `DO $$ DECLARE sig text; BEGIN FOR sig IN SELECT oid::regprocedure::text FROM pg_proc
+      WHERE pronamespace = 'public'::regnamespace AND proname <> 'known_fn' LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', sig); END LOOP; END $$;`;
+  const decoy = `DO $$ DECLARE sig text; BEGIN RAISE NOTICE 'client_fn';
+      FOR sig IN SELECT oid::regprocedure::text FROM pg_proc p WHERE p.proname = 'known' || '_fn' LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO authenticated', sig); END LOOP; END $$;`;
+  const regclass = `DO $$ DECLARE sig text; BEGIN IF to_regclass('known_fn') IS NULL THEN
+      FOR sig IN SELECT oid::regprocedure::text FROM pg_proc WHERE pronamespace = 'public'::regnamespace LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', sig); END LOOP; END IF; END $$;`;
+  for (const sql of [negated, decoy, regclass]) {
+    const f = checkMigration("x.sql", sql, FAKES, NEW);
+    assert.ok(f.length > 0 && f.every((x) => x.problem === "unproven_privilege_sql"), sql.slice(0, 60));
+    assert.ok(readPrivilegeStatements(sql, new Set(["known_fn", "client_fn"])).effects.length === 0, "no effect may be invented from a stray literal");
+  }
+  // The two documented shapes are still read.
+  const byLiteral = `DO $$ DECLARE sig text; BEGIN FOR sig IN SELECT format('public.%I(%s)', p.proname, pg_get_function_identity_arguments(p.oid))
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'known_fn' LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM anon', sig); END LOOP; END $$;`;
+  assert.deepEqual(checkMigration("x.sql", byLiteral, FAKES, NEW), []);
+  assert.deepEqual(readPrivilegeStatements(byLiteral, new Set(["known_fn"])).effects.map((e) => `${e.fn}:${e.role}:${e.action}`), ["known_fn:anon:REVOKE"]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] grantee spellings and trailing clauses cannot make a role disappear", () => {
+  assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO GROUP anon;`, FAKES, NEW)), ["contradicts_intent"]);
+  assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO anon WITH GRANT OPTION GRANTED BY postgres;`, FAKES, NEW)), ["contradicts_intent"]);
+  assert.deepEqual(problems(checkMigration("x.sql", `GRANT ALL PRIVILEGES ON FUNCTION "public"."known_fn"(uuid, integer) TO "anon", dashboard_user CASCADE;`, FAKES, NEW)), ["contradicts_intent"]);
+  // A grantee list with no recognised role is unproven, not a pass.
+  assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO some_new_role;`, FAKES, NEW)), ["unproven_privilege_sql"]);
+  // Wildcards over routines and procedures are as unproven as over functions.
+  for (const w of ["FUNCTIONS", "ROUTINES", "PROCEDURES"]) {
+    assert.deepEqual(problems(checkMigration("x.sql", `GRANT EXECUTE ON ALL ${w} IN SCHEMA public TO anon;`, FAKES, NEW)), ["unproven_privilege_sql"], w);
+  }
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] privilege-shaping DDL the gate does not model is unproven, never silent", () => {
+  const shapes = [
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon;`,
+    `ALTER FUNCTION public.known_fn(uuid, integer) OWNER TO anon;`,
+    `ALTER FUNCTION public.known_fn(uuid, integer) SECURITY DEFINER;`,
+    `GRANT service_role TO authenticated;`,
+    `CREATE FUNCTION public.new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$; SAVEPOINT s;
+     REVOKE ALL ON FUNCTION public.new_fn(uuid) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION public.new_fn(uuid) TO service_role;
+     ROLLBACK TO SAVEPOINT s;`,
+  ];
+  for (const sql of shapes) {
+    const f = checkMigration("x.sql", sql, FAKES, NEW);
+    assert.ok(f.some((x) => x.problem === "unproven_privilege_sql"), sql.slice(0, 60));
+    assert.ok(!f.some((x) => x.problem === "contradicts_intent" && sql.startsWith("ALTER")), "an ALTER is reported as unmodelled, not misread as a grant");
+  }
+  // ALTER FUNCTION … SET search_path (function_search_path.sql) changes no privilege and stays silent.
+  assert.deepEqual(checkMigration("x.sql", `ALTER FUNCTION public.known_fn(uuid, integer) SET search_path = public;`, FAKES, NEW), []);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] a CREATE the reader cannot fully read is a finding, and a dynamic CREATE is unproven", () => {
+  assert.deepEqual(problems(checkMigration("x.sql", `CREATE FUNCTION public . new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`, FAKES, NEW)), ["default_paths_not_handled"]);
+  assert.deepEqual(problems(checkMigration("x.sql", `CREATE FUNCTION public.\nnew_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`, FAKES, NEW)), ["default_paths_not_handled"]);
+  assert.deepEqual(problems(checkMigration("x.sql", `DO $$ BEGIN EXECUTE format('CREATE FUNCTION public.%I(p uuid) RETURNS void LANGUAGE sql AS $b$ SELECT 1 $b$', 'brand_new'); END $$;`, FAKES, NEW)),
+    ["unproven_privilege_sql"]);
+  // A quoted mixed-case name is a different function from its lower-case twin.
+  assert.deepEqual(functionsCreatedBy(`CREATE FUNCTION public."Known_Fn"(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`).map((c) => c.signature),
+    ['public."Known_Fn"(uuid, integer)']);
+  assert.deepEqual(problems(checkMigration("x.sql", `CREATE FUNCTION public."Known_Fn"(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`, FAKES, NEW)), ["no_registry_entry"]);
+  // Procedures are functions to the catalog and to this gate.
+  assert.deepEqual(problems(checkMigration("x.sql", `CREATE PROCEDURE public.do_money(p uuid) LANGUAGE sql AS $$ SELECT 1 $$;`, FAKES, NEW)), ["no_registry_entry"]);
+  // A CREATE inside a string literal is text, not a creation.
+  assert.deepEqual(checkMigration("x.sql", `SELECT 'create function public.phantom(p uuid)';`, FAKES, NEW), []);
+  // SECURITY DEFINER is read from the right header even when a body is single-quoted.
+  assert.deepEqual(functionsCreatedBy(`CREATE FUNCTION public.a() RETURNS void LANGUAGE sql AS 'select 1'; CREATE FUNCTION public.b() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$;`).map((c) => c.definer), [false, true]);
+});
+
+test("[PRIVILEGE-REGISTRY][MUTATION] overloads are decided per signature, not per name", () => {
+  const over1: FunctionEntry = { ...LIVE_FN, signature: "public.over(uuid)" };
+  const over2: FunctionEntry = { ...PLANNED_FN, signature: "public.over(uuid, text, integer)" };
+  const registry = [over1, over2];
+  // Deciding the OLD overload does not decide the NEW one.
+  const sql = `CREATE FUNCTION public.over(p uuid, q text, r integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;
+    REVOKE ALL ON FUNCTION public.over(uuid) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION public.over(uuid) TO service_role;`;
+  const f = checkMigration("x.sql", sql, registry, NEW);
+  assert.deepEqual(problems(f), ["default_paths_not_handled"]);
+  assert.equal(f[0].signature, "public.over(uuid, text, integer)");
+  // A wrong GRANT on one overload is judged against THAT overload only.
+  const wrongOnNew = sql + `\n REVOKE ALL ON FUNCTION public.over(uuid, text, integer) FROM PUBLIC, authenticated; GRANT EXECUTE ON FUNCTION public.over(uuid, text, integer) TO service_role, anon;`;
+  const g = checkMigration("x.sql", wrongOnNew, registry, NEW);
+  assert.deepEqual(g.map((x) => `${x.problem}:${x.signature}:${x.role ?? ""}`), ["contradicts_intent:public.over(uuid, text, integer):anon"]);
+  // A %s placeholder resolved by NAME hits every overload, as the DO loop does in PostgreSQL.
+  const byName = `DO $$ DECLARE sig text; BEGIN FOR sig IN SELECT oid::regprocedure::text FROM pg_proc WHERE proname = 'over' LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO anon', sig); END LOOP; END $$;`;
+  assert.deepEqual(checkMigration("x.sql", byName, registry, NEW).map((x) => `${x.problem}:${x.signature}`),
+    ["contradicts_intent:public.over(uuid)", "contradicts_intent:public.over(uuid, text, integer)"]);
 });
