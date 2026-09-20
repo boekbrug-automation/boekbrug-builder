@@ -1,4 +1,4 @@
--- migrations: factuur_b_numbering.sql
+-- migrations: factuur_b_numbering.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] next_invoice_seq, against a real PostgreSQL — including two real sessions.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

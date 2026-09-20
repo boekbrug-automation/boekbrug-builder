@@ -1,4 +1,4 @@
--- migrations: invoice_partial_payments.sql, bank_rpc_never_payable_states.sql
+-- migrations: invoice_partial_payments.sql, bank_rpc_never_payable_states.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] apply_bank_payment, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

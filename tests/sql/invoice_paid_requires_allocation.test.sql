@@ -1,4 +1,4 @@
--- migrations: bank_tx_invoices.sql, invoice_partial_payments.sql, allocate_bank_payment.sql, book_bank_batch_atomic.sql, invoice_manual_payments.sql, invoice_manual_payment_idempotency_scope.sql, bank_rpc_never_payable_states.sql, invoice_move_payment_creditnota_guard.sql, invoice_paid_requires_allocation.sql
+-- migrations: bank_tx_invoices.sql, invoice_partial_payments.sql, allocate_bank_payment.sql, book_bank_batch_atomic.sql, invoice_manual_payments.sql, invoice_manual_payment_idempotency_scope.sql, bank_rpc_never_payable_states.sql, invoice_move_payment_creditnota_guard.sql, invoice_paid_requires_allocation.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [BETAALD-GEDEKT] An invoice enters 'paid' only when an allocation backs it.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

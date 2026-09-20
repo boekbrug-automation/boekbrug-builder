@@ -1,4 +1,4 @@
--- migrations: book_bank_batch_atomic.sql, bank_confirm_atomic.sql
+-- migrations: book_bank_batch_atomic.sql, bank_confirm_atomic.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] book_bank_batch, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)
