@@ -1,4 +1,4 @@
--- migrations: invoice_partial_payments.sql, bank_rpc_never_payable_states.sql
+-- migrations: invoice_partial_payments.sql, bank_rpc_never_payable_states.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [LIJN-BUDGET] apply_bank_payment measures against what the LINE STILL HAS.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

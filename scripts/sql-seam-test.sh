@@ -119,7 +119,11 @@ for test_file in "$here"/tests/sql/*.test.sql; do
     continue
   fi
 
-  args=(-f "$here/tests/sql/fixture.sql")   # a clean schema per file
+  # [PRIVILEGE-REGISTRY] The loaded list travels into the privilege check as a psql variable, so
+  # the check can tell a function whose whole ACL history was replayed (judged) from one whose
+  # history is only partly here (reported, not judged).
+  loaded="$(echo $migrations)"
+  args=(-v "loaded=$loaded" -f "$here/tests/sql/fixture.sql")   # a clean schema per file
   missing=""
   for m in $migrations; do
     path="$here/supabase/migrations/$m"
@@ -131,6 +135,11 @@ for test_file in "$here"/tests/sql/*.test.sql; do
     failed=1
     continue
   fi
+  # [PRIVILEGE-REGISTRY] Between the migrations and the test: who can execute what, according to
+  # the catalog, against the registry's intent. Before the test file, so the test's own helper
+  # functions are not in public yet. privilege-intent.sql is generated from
+  # scripts/privilege-registry.ts; a unit gate keeps it current.
+  args+=(-f "$here/tests/sql/privilege-intent.sql" -f "$here/tests/sql/privilege-check.sql")
   args+=(-f "$test_file")
 
   if ! "${psql_base[@]}" "${args[@]}" 2>&1; then
