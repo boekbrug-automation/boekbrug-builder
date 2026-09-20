@@ -51,7 +51,9 @@ export type Kind =
   | "rls_helper"   // called inside a policy expression, as whichever role is querying
   | "trigger"      // fired by a trigger; PostgreSQL checks no EXECUTE for that (measured)
   | "internal"     // called by nothing in this repository
-  | "invoker_rpc"; // SECURITY INVOKER function called as an RPC; RLS applies to the caller
+  | "invoker_rpc"  // SECURITY INVOKER function called as an RPC; RLS applies to the caller
+  | "obsolete";    // no live application or dependency caller found as of verification; kept in
+                   // production until an owner-approved DROP, so its intent is DENY for every role
 
 export type Status =
   | "live"               // exists in production today, measured; an EXISTING identity
@@ -141,6 +143,15 @@ const intent = (anon: Decision, authenticated: Decision, serviceRole: Decision, 
 
 const D = "DENY", A = "ALLOW", U = "UNKNOWN";
 
+// [PRIVILEGE-BEWIJS] The first read-only evidence pass (accepted 2026-09-20) resolved seven
+// UNKNOWN decisions into DENY without changing a single privilege. Where reality still says
+// ALLOW, the row records that as an accepted deviation with this marker, so the oracle prints
+// ACCEPTED_DEVIATION and not DRIFT: deciding the intended boundary and hardening production
+// towards it are deliberately two separate steps.
+const EVIDENCE_PASS_1 = "resolved by the 2026-09-20 evidence pass; production privilege deliberately unchanged in that PR";
+const OBSOLETE_LEGACY_GRANT =
+  EVIDENCE_PASS_1 + "; obsolete / no live caller found; the grant is legacy default exposure kept until an owner-approved DROP";
+
 // ── client_rpc: called through the session client, so authenticated must be able to execute ────
 
 const clientRpc = (
@@ -222,13 +233,25 @@ export const REGISTRY: readonly FunctionEntry[] = [
   {
     signature: "public.acting_for_owner()", kind: "rls_helper", managedBy: "boekbrug", owner: "postgres",
     definer: true, status: "live",
-    // Every policy that uses it is TO authenticated (catalog-verified), so anon looks unnecessary.
-    // It stays UNKNOWN until its own explicit test, by the owner's ruling, and the [ANON-ORAKEL]
-    // gate protects it in the meantime.
-    intent: intent(U, A, A, U),
+    // anon and PUBLIC are DENY (evidence pass accepted 2026-09-20). This is NOT the same case as
+    // is_my_accountant_client: every policy that calls acting_for_owner is TO authenticated, so
+    // anon never evaluates it and its EXECUTE cannot be a policy dependency. The [ANON-ORAKEL]
+    // incident's error came from is_my_accountant_client alone. Reality still carries the default
+    // anon grant and the PUBLIC entry; both are recorded below and closed in a later, separate step.
+    intent: intent(D, A, A, D),
     current: m(true, true, true, true, ACL.publicAndThreeReordered),
-    evidence: ["7 policies, all TO authenticated: clients_member_*, invoice_lines_member_*, invoices_member_*", "anon need unproven either way; owner ruling: keep current"],
-    callers: ["7 RLS policies TO authenticated"],
+    acceptedDeviations: {
+      anon: EVIDENCE_PASS_1 + "; anon EXECUTE is default-grant residue, not a policy dependency; left in place until a separate hardening step",
+      public: EVIDENCE_PASS_1 + "; the PUBLIC entry is the CREATE-time default, not a policy dependency; left in place until a separate hardening step",
+    },
+    evidence: [
+      "live catalog: 7 policies call it and all are TO authenticated: clients_member_insert/read/update, invoice_lines_member_read/write_draft, invoices_member_read/update_draft",
+      "rls_backup.policies_20260901 (snapshot before the initplan rewrite and before the incident): the same 7 policies, all TO authenticated",
+      "no TO public policy, function body, view, trigger or pg_depend row references it",
+      "body derives the owner from auth.uid(), which is NULL for anon",
+      "throwaway-PostgreSQL proof with RLS on and rows present: with anon and PUBLIC EXECUTE revoked, anon reads of invoices/clients/invoice_lines still return zero rows without error; the 'permission denied for function' shape reproduces only when a TO public policy calls it",
+    ],
+    callers: ["7 RLS policies TO authenticated", "no .rpc() site in src on any remote branch"],
     provenance: REPO, verified: VERIFIED,
   },
   {
@@ -323,15 +346,22 @@ export const REGISTRY: readonly FunctionEntry[] = [
   {
     signature: "public.answer_mollie_refund(uuid, text, text, numeric)", kind: "server_rpc", managedBy: "boekbrug", owner: "postgres",
     definer: true, status: "live",
-    // authenticated UNKNOWN operationally: the original text granted service_role only and no
-    // repo caller exists, but a financial writer is not revoked until the absence of a real
-    // caller is proven.
-    intent: intent(D, U, A, D), current: AUTH_AND_SERVICE,
+    // authenticated DENY (evidence pass accepted 2026-09-20): the creation migration granted
+    // service_role only; the authenticated EXECUTE reality still carries is the creation-time
+    // named default grant, not a documented intent, and a SECURITY DEFINER body that mutates
+    // refund and payment state should not keep an unused direct boundary. Not revoked here.
+    intent: intent(D, D, A, D), current: AUTH_AND_SERVICE,
+    acceptedDeviations: {
+      authenticated: EVIDENCE_PASS_1 + "; authenticated EXECUTE is the creation-time named default grant that REVOKE FROM PUBLIC never touched; no caller uses it; left in place until a separate hardening step",
+    },
     evidence: [
-      "production migration 20260913221343 mollie_refund_answer: REVOKE FROM PUBLIC; GRANT TO service_role (authenticated kept by the default grant)",
+      "production migration 20260913221343 mollie_refund_answer (statements read back from supabase_migrations): REVOKE ALL … FROM PUBLIC; GRANT EXECUTE … TO service_role — and nothing else",
       "anon closed by anon_revoke_refund_writers.sql (PR #367)",
+      "no live application caller found as of 2026-09-20: none on main (which Vercel deploys to production), no /rest/v1/rpc/answer_mollie_refund request in the 24h edge logs, no execution row in pg_stat_statements since its 2026-06-03 reset (supporting only: the statement store has evicted)",
+      "the only known application caller, the refund route on PR #344 (unmerged), calls through createPipelineClient(), i.e. service_role",
+      "body guard: a signed-in caller may only answer refunds where auth.uid() = p_user_id; service_role (auth.uid() NULL) may answer for any owner",
     ],
-    callers: ["no .rpc() site in src"],
+    callers: ["no .rpc() site in src on main", "PR #344 (unmerged): src/app/api/mollie/terugbetaling/route.ts via the pipeline client (service_role)"],
     provenance: { inRepo: false, productionVersions: ["20260913221343"], note: "applied through the MCP apply_migration path; no repo file" },
     verified: VERIFIED,
   },
@@ -363,10 +393,29 @@ export const REGISTRY: readonly FunctionEntry[] = [
     verified: VERIFIED,
   },
   {
-    signature: "public.get_accountant_for_zzper(uuid)", kind: "invoker_rpc", managedBy: "boekbrug", owner: "postgres",
-    definer: false, status: "live", intent: intent(U, U, U, U), current: OPEN_TO_ALL,
-    evidence: ["appears only in generated database types; no .rpc() caller; purpose and audience unproven"],
-    callers: ["none found in this repository"], provenance: DASHBOARD_ERA, verified: VERIFIED,
+    signature: "public.get_accountant_for_zzper(uuid)", kind: "obsolete", managedBy: "boekbrug", owner: "postgres",
+    definer: false, status: "live",
+    // obsolete / no live caller found (evidence pass accepted 2026-09-20). DENY for every role is
+    // the intended boundary; the four current ALLOWs are legacy default exposure, recorded below.
+    // Absence of a caller is stated narrowly: none FOUND as of this verification, not "can never
+    // be used". Confidence in the evidence is medium for authenticated and service_role. The clean
+    // resolution is an owner-approved DROP in a later change; nothing is dropped or revoked here.
+    intent: intent(D, D, D, D), current: OPEN_TO_ALL,
+    acceptedDeviations: {
+      anon: OBSOLETE_LEGACY_GRANT,
+      authenticated: OBSOLETE_LEGACY_GRANT,
+      serviceRole: OBSOLETE_LEGACY_GRANT,
+      public: OBSOLETE_LEGACY_GRANT,
+    },
+    evidence: [
+      "no live application or dependency caller found as of 2026-09-20: no .rpc() site in src on main or on any examined remote branch; no policy, view, trigger or pg_depend row references it",
+      "appears in the repository only in the May 2026 production snapshot (database.sql, section 'Accountant Lookup') and in generated database types; never created by a repo migration (function_search_path.sql only pins its search_path)",
+      "SECURITY INVOKER over accountant_clients, which has RLS enabled and only TO authenticated policies: anon gets NULL, authenticated sees only rows it could read directly, service_role bypasses RLS",
+      "throwaway-PostgreSQL proof of the three role outcomes above",
+      "current grants are the CREATE-time PUBLIC entry plus the three named default grants, not a documented application contract",
+    ],
+    callers: ["none found in this repository as of 2026-09-20 (main and the examined remote branches)"],
+    provenance: DASHBOARD_ERA, verified: VERIFIED,
   },
   triggerFn("public.assert_paid_is_backed()", false, ["invoices"], OPEN_TO_ALL,
     ["invoice_paid_requires_allocation.sql; created under the default grants"], REPO,
@@ -479,7 +528,7 @@ export const ACKNOWLEDGED_PRODUCTION_MIGRATIONS: readonly AcknowledgedMigration[
   { version: "20260901232158", name: "rls_baseline_snapshot_before_initplan", repoFile: null, functions: [],
     reason: "snapshot of pg_policies into rls_backup.policies_20260901 before the initplan rewrite, with REVOKEs on that schema and table; creates no function, no repo file" },
   { version: "20260912162856", name: "anon_owner_oracle_revoke", repoFile: null, functions: [],
-    reason: "the [ANON-ORAKEL] incident: revoked anon from is_my_accountant_client/acting_for_owner and broke anonymous reads; rolled back by the three rows that follow" },
+    reason: "the [ANON-ORAKEL] incident: revoked anon from is_my_accountant_client and acting_for_owner together and broke anonymous reads; the error came from is_my_accountant_client, whose policies are TO public — acting_for_owner's are all TO authenticated and never needed anon; rolled back by the three rows that follow" },
   { version: "20260912162934", name: "anon_owner_oracle_revoke_from_public", repoFile: null, functions: [], reason: "second step of the same incident" },
   { version: "20260912163155", name: "anon_owner_oracle_revoke_rollback", repoFile: null, functions: [], reason: "rollback of the incident: anon re-granted" },
   { version: "20260912163226", name: "anon_owner_oracle_restore_public_grant", repoFile: null, functions: [], reason: "rollback of the incident: PUBLIC re-granted" },

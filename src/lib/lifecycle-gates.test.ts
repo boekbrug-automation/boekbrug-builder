@@ -33359,16 +33359,24 @@ test("[VAST-IN-DE-DB] a paid outgoing invoice's money cannot be rewritten, by an
     "no way to ask a live database whether this is actually installed");
 });
 
-// ─── [ANON-ORAKEL] These two oracles must STAY callable by anon, and here is why ───────────────
+// ─── [ANON-ORAKEL] No repo migration revokes anon or PUBLIC from these two, and here is why ─────
 //
 // The Supabase security linter flags two SECURITY DEFINER functions as callable by `anon`:
 //
 //     public.acting_for_owner()
 //     public.is_my_accountant_client(uuid)
 //
-// They look exactly like the ones rpc_anon_revoke.sql and anon_mandate_oracle_revoke.sql closed,
-// and revoking them is WRONG. This gate exists because that was tried — on production — and it
-// broke something, and the next reader will have the same good idea.
+// They look exactly like the ones rpc_anon_revoke.sql and anon_mandate_oracle_revoke.sql closed.
+// Revoking them from a repo migration is refused here because that was tried — on production,
+// both at once — and it broke something, and the next reader will have the same good idea.
+//
+// BE EXACT ABOUT WHICH ONE BROKE. Only is_my_accountant_client participates in policies declared
+// TO public, so only its anon EXECUTE is a policy dependency. acting_for_owner does NOT: its seven
+// policies are all TO authenticated, in the live catalog and in the 1 September snapshot, so anon
+// never evaluates it and its anon/PUBLIC grant is default residue. That was established by the
+// 2026-09-20 evidence pass; scripts/privilege-registry.ts records anon and PUBLIC as DENY for
+// acting_for_owner, with the current grant as an accepted deviation. Closing it is a separate,
+// owner-approved production step. This gate keeps both names on purpose until that step exists.
 //
 // ── WHAT HAPPENED, IN ORDER ──
 //
@@ -33382,11 +33390,12 @@ test("[VAST-IN-DE-DB] a paid outgoing invoice's money cannot be rewritten, by an
 //     "permission denied for function is_my_accountant_client".
 //
 // ── WHY ──
-// Five policies use these functions and are declared TO public, not TO authenticated:
+// Five policies use is_my_accountant_client and are declared TO public, not TO authenticated:
 // invoices_accountant_read, invoices_accountant_update_v2, invoice_lines_select_accountant,
 // documents_accountant_read and acc_status_owner_write. A policy TO public is evaluated by EVERY
 // role, anon included, and a policy expression runs with the CALLER's privileges. Take the grant
-// away and anon does not get "false" — it gets an error.
+// away and anon does not get "false" — it gets an error. None of acting_for_owner's policies is
+// TO public, which is why step 2 named only is_my_accountant_client in its error.
 //
 // anon_mandate_oracle_revoke.sql knew this: its own state check asserts, in as many words, that
 // is_my_accountant_client is still callable by anon. That line was the warning, and it was read
@@ -33421,10 +33430,11 @@ test("[VAST-IN-DE-DB] a paid outgoing invoice's money cannot be rewritten, by an
 // regardless of which mechanism granted the right. That is where "did the revoke take" is
 // answered. This gate keeps the two oracles safe and stops claiming the rest.
 //
-// acting_for_owner is protected here on the strength of the incident above. The catalog today
-// shows it used only by policies declared TO authenticated, so anon may not need it — that is a
-// separate, explicit test to write before anything changes, not a reason to loosen this one.
-test("[ANON-ORAKEL] nothing revokes the two oracles that TO-public policies need", () => {
+// acting_for_owner is kept in the list below NOT because a TO-public policy needs it (none does,
+// see the header) but because the production change that closes it has not been approved yet, and
+// a repo migration must not run ahead of that decision. When it is approved, the migration that
+// closes anon and PUBLIC on acting_for_owner removes the name from BESCHERMD in the same commit.
+test("[ANON-ORAKEL] nothing revokes anon or PUBLIC from the two owner oracles by repo migration", () => {
   const dir = "supabase/migrations";
   const bestanden = readdirSync(dir).filter((f) => f.endsWith(".sql"));
 
@@ -33436,13 +33446,16 @@ test("[ANON-ORAKEL] nothing revokes the two oracles that TO-public policies need
       const kaal = regel.trim();
       if (kaal.startsWith("--") || !/^REVOKE\b/i.test(kaal)) continue;
 
-      // 1. The two that must never be revoked from the roles a TO-public policy is evaluated by.
+      // 1. The two whose anon/PUBLIC grant no repo migration may remove: is_my_accountant_client
+      //    because TO-public policies evaluate it, acting_for_owner because its closing step is
+      //    not approved yet (see the note above this test).
       for (const fn of BESCHERMD) {
         if (!kaal.includes(fn)) continue;
         assert.doesNotMatch(kaal, /\b(PUBLIC|anon)\b/,
-          `${f}: "${kaal}" takes ${fn} away from a role that TO-public policies are evaluated by. ` +
-          "An anonymous read then raises 'permission denied for function' instead of returning " +
-          "zero rows. Tried on production once; see the note above this test.");
+          `${f}: "${kaal}" takes ${fn} away from anon or PUBLIC. For is_my_accountant_client an ` +
+          "anonymous read then raises 'permission denied for function' instead of returning zero " +
+          "rows (tried on production once). For acting_for_owner the production step is not " +
+          "approved yet; see the note above this test.");
       }
 
       // 2. Count every other anon revoke, and assert nothing about its shape. This used to demand
