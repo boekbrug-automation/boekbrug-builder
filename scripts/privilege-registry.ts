@@ -163,15 +163,19 @@ const EVIDENCE_PASS_2 = "resolved by the 2026-09-20 evidence pass (batch 2); pro
 const TRIGGER_GRANT_INERT =
   EVIDENCE_PASS_2 + "; a trigger function needs no EXECUTE for any role to fire, and cannot be called directly; this grant is inert default exposure, left in place until a separate hardening step";
 /**
- * [PRIVILEGE-BEWIJS] Recorded invariant for the day PUBLIC is closed on is_my_accountant_client:
- * the RLS paths need anon, authenticated and service_role to hold EXECUTE by NAME. Today they do,
+ * [PRIVILEGE-BEWIJS] Recorded invariant for the day PUBLIC is closed on is_my_accountant_client.
+ * Be exact about who needs EXECUTE by NAME and why: anon and authenticated because the RLS policy
+ * paths evaluate the function as those roles (only they can read the protected tables while
+ * subject to RLS); service_role NOT because of RLS — it bypasses RLS — but because it stays
+ * explicitly ALLOW as the server-side compatibility boundary. Today all three hold the grant,
  * through the creation-time default grants and the explicit re-grant of 12 September 2026, but a
- * hardening migration must assert those named grants itself and never assume them from default
- * privileges. That migration, the PUBLIC revoke, the [ANON-ORAKEL] gate update and a SQL seam
- * proof move together, in one owner-approved change. Exported so a gate can pin it.
+ * hardening migration must assert the grants the intended boundary requires itself and never
+ * assume them from default privileges. That migration, the PUBLIC revoke, the [ANON-ORAKEL] gate
+ * update and a SQL seam proof move together, in one owner-approved change. Exported so a gate can
+ * pin it.
  */
 export const IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT =
-  "HARDENING INVARIANT: if PUBLIC is ever revoked from is_my_accountant_client, the named EXECUTE grants the RLS paths require (anon, authenticated, service_role) must be asserted explicitly in the same migration and must not be assumed from default privileges";
+  "HARDENING INVARIANT: if PUBLIC is ever revoked from is_my_accountant_client, the named EXECUTE grants the intended boundary requires must be asserted explicitly in the same migration and must not be assumed from default privileges: anon and authenticated because the RLS policy paths evaluate the function as those roles; service_role because it remains explicitly ALLOW as the server-side compatibility boundary, not because of RLS, which it bypasses";
 
 // ── client_rpc: called through the session client, so authenticated must be able to execute ────
 

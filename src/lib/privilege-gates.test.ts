@@ -239,6 +239,10 @@ test("[PRIVILEGE-REGISTRY] the settled decisions stay settled", () => {
     "the hardening invariant (assert the named grants explicitly when PUBLIC is revoked) must travel with the row");
   assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /named EXECUTE grants .* must be asserted explicitly/);
   assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /must not be assumed from default privileges/);
+  // The invariant must not overstate the evidence: only anon and authenticated evaluate the RLS
+  // paths; service_role bypasses RLS and is kept ALLOW as the compatibility boundary, not for RLS.
+  assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /anon and authenticated because the RLS policy paths/);
+  assert.match(IS_MY_ACCOUNTANT_CLIENT_HARDENING_INVARIANT, /service_role because it remains explicitly ALLOW .* not because of RLS/);
   // [PRIVILEGE-BEWIJS] batch 2: the accountant-status door trigger is fully decided: DENY for every
   // role, all four current grants recorded as inert deviations. Written explicitly, not via the
   // trigger helper, so the other trigger rows keep their undecided service_role/PUBLIC.
