@@ -57,16 +57,23 @@ const ZONDER_LINK = {
 // request body. Dit is wat er in die kolom kan staan.
 const VIJANDIGE_LINK = { ...MET_LINK, id: "n3", title: "Factuur betaald", link: "//evil.example/steal" };
 
+// [MELDING-WAARHEID] The bell says out loud when a mark was not stored, through the app's toast —
+// so it renders under the provider the root layout mounts, exactly as it does in the app.
+async function inToast(el: React.ReactElement): Promise<React.ReactElement> {
+  const { ToastProvider } = await import("../../src/components/ui/Toast");
+  return React.createElement(ToastProvider, null, el);
+}
+
 async function render(notifications: unknown[]) {
   const { NotificationsBell } = await import("../../src/app/dashboard/_shared/index");
   return renderToStaticMarkup(
-    React.createElement(NotificationsBell as never, {
+    await inToast(React.createElement(NotificationsBell as never, {
       notifications,
       showNotifications: true,
       onToggle: NOOP,
       onMarkAllRead: NOOP,
       loadError: null,
-    } as never),
+    } as never)),
   );
 }
 
@@ -128,13 +135,13 @@ test("[MELDING-TIK] een ongelezen melding is zichtbaar ongelezen, een gelezen ni
 test("[NO-SILENT-EMPTY] een leesfout wordt nooit 'geen meldingen'", async () => {
   const { NotificationsBell } = await import("../../src/app/dashboard/_shared/index");
   const html = renderToStaticMarkup(
-    React.createElement(NotificationsBell as never, {
+    await inToast(React.createElement(NotificationsBell as never, {
       notifications: [],
       showNotifications: true,
       onToggle: NOOP,
       onMarkAllRead: NOOP,
       loadError: "De meldingen konden niet worden geladen.",
-    } as never),
+    } as never)),
   );
   assert.ok(html.includes("konden niet worden geladen"),
     "de leesfout wordt niet getoond");

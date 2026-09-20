@@ -32,12 +32,21 @@ mock.module("next/navigation", {
 
 // Imported inside the tests, not at the top: the loader compiles this file to CJS, where a
 // top-level await is a syntax error — the same shape money-screens.test.tsx uses.
-const load = async () => ({
-  DashboardRail: (await import("../../src/components/nav/DashboardRail")).DashboardRail,
-  BottomNav: (await import("../../src/components/nav/BottomNav")).BottomNav,
-});
+// [MELDING-WAARHEID] The rail's bell and its way out speak through the app's toast when a store
+// refuses, so the rail renders under the provider the root layout mounts — loaded here, with the
+// components, for the same CJS reason as the imports above.
+let ToastProvider: React.ComponentType<{ children: React.ReactNode }> | null = null;
 
-const draw = (el: React.ReactElement): string => renderToStaticMarkup(el);
+const load = async () => {
+  ToastProvider = (await import("../../src/components/ui/Toast")).ToastProvider;
+  return {
+    DashboardRail: (await import("../../src/components/nav/DashboardRail")).DashboardRail,
+    BottomNav: (await import("../../src/components/nav/BottomNav")).BottomNav,
+  };
+};
+
+const draw = (el: React.ReactElement): string =>
+  renderToStaticMarkup(ToastProvider ? React.createElement(ToastProvider, null, el) : el);
 
 /** The opening tag of each <a> in the markup — React does not emit attributes in source order. */
 const links = (html: string): string[] => [...html.matchAll(/<a\b[^>]*>/g)].map((m) => m[0]);

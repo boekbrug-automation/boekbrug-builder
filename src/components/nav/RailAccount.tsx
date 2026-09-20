@@ -42,6 +42,7 @@ import { deriveInitials } from '@/lib/logo-initials'
 import type { NotificationRow } from '@/types/rows'
 import type { Role } from '@/lib/navigation'
 import { NotificationsBell } from '@/app/dashboard/_shared'
+import { useToast } from '@/components/ui/Toast'
 
 export interface RailAccountInfo {
   id: string
@@ -89,6 +90,7 @@ const BADGE: CSSProperties = {
 export function RailAccount({ account, role }: { account: RailAccountInfo; role: Role | null }) {
   const t = translator(useLocale())
   const router = useRouter()
+  const showToast = useToast()
   const [notifications, setNotifications] = useState<NotificationRow[]>([])
   // [NO-SILENT-EMPTY] A read that failed is not "Geen meldingen". The bell is where a question
   // from the boekhouder arrives; "there is nothing" is the costliest sentence it can say when it
@@ -129,8 +131,9 @@ export function RailAccount({ account, role }: { account: RailAccountInfo; role:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account.id, role])
 
-  async function markAllRead() {
+  async function markAllRead(): Promise<boolean> {
     // The screen may only say "read" once it is stored — the home's rule, for the same reason.
+    // [MELDING-WAARHEID] The outcome is returned: the bell takes its local mark back on a false.
     const { error } = await getBrowserClient()
       .from('notifications')
       .update({ read: true })
@@ -138,13 +141,22 @@ export function RailAccount({ account, role }: { account: RailAccountInfo; role:
       .eq('read', false)
     if (error) {
       console.error('[ZIJBALK-ACCOUNT] marking notifications read failed:', error.message)
-      return
+      return false
     }
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })))
+    return true
   }
 
   async function logout() {
-    await getBrowserClient().auth.signOut()
+    // [UITLOGGEN] signOut() keeps the local session when the server refused, so navigating to
+    // /login as if it worked only bounced the owner straight back, with no word. Say it, and stay
+    // signed in — which is the truth. Same rule as the home bar's own way out.
+    const { error } = await getBrowserClient().auth.signOut()
+    if (error) {
+      console.error('[ZIJBALK-ACCOUNT] signing out failed:', error.message)
+      showToast(t('kop.uitloggenMislukt'), { tone: 'error' })
+      return
+    }
     router.push('/login')
   }
 

@@ -40,10 +40,12 @@ import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
 import type { NotificationRow } from '@/types/rows'
 import { NotificationsBell, ProfileMenu, type HeaderProfile } from '@/app/dashboard/_shared'
+import { useToast } from '@/components/ui/Toast'
 
 export function MedewerkerHeader({ profile }: { profile: HeaderProfile }) {
   const t = translator(useLocale())
   const router = useRouter()
+  const showToast = useToast()
   const supabase = createClient()
 
   const [notifications, setNotifications] = useState<NotificationRow[]>([])
@@ -71,17 +73,31 @@ export function MedewerkerHeader({ profile }: { profile: HeaderProfile }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.id])
 
-  async function markAllRead() {
+  async function markAllRead(): Promise<boolean> {
     const ongelezen = notifications.filter((n) => !n.read).map((n) => n.id)
-    if (ongelezen.length === 0) return
+    if (ongelezen.length === 0) return true
     const { error } = await supabase.from('notifications').update({ read: true }).in('id', ongelezen)
     // Het scherm mag pas "gelezen" tonen als het ook echt is opgeslagen — zelfde regel als op de
-    // home van de eigenaar.
-    if (!error) setNotifications((vorige) => vorige.map((n) => ({ ...n, read: true })))
+    // home van de eigenaar. [MELDING-WAARHEID] The outcome is returned: the bell takes its local
+    // mark back on a false.
+    if (error) {
+      console.error('[MEDEWERKER] meldingen als gelezen markeren mislukt:', error.message)
+      return false
+    }
+    setNotifications((vorige) => vorige.map((n) => ({ ...n, read: true })))
+    return true
   }
 
   async function logout() {
-    await supabase.auth.signOut()
+    // [UITLOGGEN] signOut() keeps the local session when the server refused, so navigating to
+    // /login as if it worked only bounced the member straight back, with no word. Say it, and stay
+    // signed in — which is the truth. Same rule as the owner's home bar and the rail.
+    const { error } = await supabase.auth.signOut()
+    if (error) {
+      console.error('[MEDEWERKER] uitloggen mislukt:', error.message)
+      showToast(t('kop.uitloggenMislukt'), { tone: 'error' })
+      return
+    }
     router.push('/login')
   }
 

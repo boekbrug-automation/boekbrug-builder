@@ -36,6 +36,7 @@ import DashboardTools from '@/components/tools/DashboardTools'
 // [TAAL] This screen holds no language of its own: every sentence comes from messages.ts.
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
+import { useToast } from '@/components/ui/Toast'
 import { failureText } from '@/lib/server-message'
 
 // ─────────────────────────────────────────────────────────
@@ -124,6 +125,7 @@ export default function AccountantHome({ profile, overview, workQueues, clients,
   const locale = useLocale()
   const t = translator(locale)
   const router = useRouter()
+  const showToast = useToast()
   const supabase = createClient()
 
   // ── Notifications (client-side read for real-time badge) ──
@@ -186,15 +188,24 @@ export default function AccountantHome({ profile, overview, workQueues, clients,
   }
 
   async function handleLogout() {
-    await supabase.auth.signOut()
+    // [UITLOGGEN] signOut() keeps the local session when the server refused, so navigating to
+    // /login as if it worked only bounced the accountant straight back, with no word. Say it, and
+    // stay signed in — which is the truth. Same rule as the owner's home bar and the rail.
+    const { error } = await supabase.auth.signOut()
+    if (error) {
+      console.error('[BOEKHOUDER-HOME] uitloggen mislukt:', error.message)
+      showToast(t('kop.uitloggenMislukt'), { tone: 'error' })
+      return
+    }
     router.push('/login')
   }
 
-  async function markAllRead() {
+  async function markAllRead(): Promise<boolean> {
     // Het scherm mag pas "gelezen" tonen als het ook echt is opgeslagen. De uitkomst werd hier
     // genegeerd — precies de fout die de ZZP-home al had opgelost, en die op deze home was blijven
     // staan: de bel ging op nul, en bij de volgende keer openen stonden dezelfde meldingen er weer
     // ongelezen bij, zonder dat iets uitlegde waarom.
+    // [MELDING-WAARHEID] The outcome is returned: the bell takes its local mark back on a false.
     const { error } = await supabase
       .from('notifications')
       .update({ read: true })
@@ -202,9 +213,10 @@ export default function AccountantHome({ profile, overview, workQueues, clients,
       .eq('read', false)
     if (error) {
       console.error('[BOEKHOUDER-HOME] meldingen als gelezen markeren mislukt:', error.message)
-      return
+      return false
     }
     setNotifications(prev => prev.map(n => ({ ...n, read: true })))
+    return true
   }
 
   // ─────────────────────────────────────────────────────────
