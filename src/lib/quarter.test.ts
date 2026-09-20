@@ -1,5 +1,5 @@
 // [QUARTER] Pure node test — run: npx tsx src/lib/quarter.test.ts
-import { lastCompletedQuarter, quarterFromParams, quarterKeyOf, quarterLabelOf, quartersPresent, matchesQuarter, crossQuarterPayment } from "./quarter";
+import { lastCompletedQuarter, quarterFromParams, quarterKeyOf, quarterLabelOf, quartersPresent, matchesQuarter, crossQuarterPayment, isPeriodStarted, currentQuarter } from "./quarter";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -89,5 +89,31 @@ console.log("\n— [CROSS-QUARTER] crossQuarterPayment —");
   check("both null → null", crossQuarterPayment(null, null) === null);
 }
 
-console.log(`\n${passed} passed, ${failed} failed\n`);
-process.exit(failed === 0 ? 0 : 1);
+
+console.log("\n— [KLAAR-TOEKOMST] isPeriodStarted / currentQuarter, on the Amsterdam day —");
+{
+  const q = (year: number, quarter: 1 | 2 | 3 | 4) => ({ year, quarter });
+  check("mid-Q3 2026: Q3 2026 (the open quarter) has started", isPeriodStarted(q(2026, 3), at("2026-08-15")));
+  check("mid-Q3 2026: Q2 2026 has started", isPeriodStarted(q(2026, 2), at("2026-08-15")));
+  check("mid-Q3 2026: Q4 2026 has NOT started", !isPeriodStarted(q(2026, 4), at("2026-08-15")));
+  check("mid-Q3 2026: Q1 2027 has NOT started", !isPeriodStarted(q(2027, 1), at("2026-08-15")));
+  check("mid-Q3 2026: Q4 2025 has started", isPeriodStarted(q(2025, 4), at("2026-08-15")));
+  check("currentQuarter mid-Q3 → Q3", JSON.stringify(currentQuarter(at("2026-08-15"))) === JSON.stringify({ year: 2026, quarter: 3 }));
+
+  // New Year in Europe/Amsterdam, both sides of midnight — the boundary the device clock got wrong.
+  check("1 Jan 00:30 Amsterdam (= 31 Dec 23:30 UTC): Q1 2026 has started",
+    isPeriodStarted(q(2026, 1), new Date("2025-12-31T23:30:00Z")));
+  check("31 Dec 23:30 Amsterdam (= 22:30 UTC): Q1 2026 has NOT started",
+    !isPeriodStarted(q(2026, 1), new Date("2025-12-31T22:30:00Z")));
+  check("31 Dec 23:30 Amsterdam: Q4 2025 has started", isPeriodStarted(q(2025, 4), new Date("2025-12-31T22:30:00Z")));
+  // A quarter transition in summer time (UTC+2).
+  check("1 Jul 00:30 CEST (= 30 Jun 22:30 UTC): Q3 2026 has started",
+    isPeriodStarted(q(2026, 3), new Date("2026-06-30T22:30:00Z")));
+  check("30 Jun 23:30 CEST (= 21:30 UTC): Q3 2026 has NOT started",
+    !isPeriodStarted(q(2026, 3), new Date("2026-06-30T21:30:00Z")));
+  check("the picker's current quarter and this rule agree on the same instant",
+    isPeriodStarted(currentQuarter(new Date("2026-06-30T22:30:00Z")), new Date("2026-06-30T22:30:00Z")));
+}
+
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

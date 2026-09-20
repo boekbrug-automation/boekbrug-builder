@@ -48,6 +48,8 @@ import { useRouter } from 'next/navigation'
 import { useEffect, useState, type ReactNode } from 'react'
 // [KLAAR-STAND] The component holds no language of its own: this returns a key and a colour.
 import { klaarRegel, klaarPath, type KlaarBron } from '@/lib/klaar-stand'
+// [VRAAG-EIGENAAR] The Berichten door: one linked accountant → that conversation; otherwise the inbox.
+import { classifyAccountantLinks, messagesDoorHref } from '@/lib/accountant-links'
 // [KLAAR-KWARTAAL] The app-wide default quarter — the one the owner is asked to hand over.
 import { lastCompletedQuarter, type YearQuarter } from '@/lib/quarter'
 import { createClient } from '@/lib/supabase'
@@ -90,7 +92,8 @@ export function ZzpDashboard(
   const [notifError, setNotifError]               = useState<string | null>(null)
   const [showNotifications, setShowNotifications] = useState(false)
   const [unreadMessages, setUnreadMessages]       = useState(0)
-  const [accountantId, setAccountantId]           = useState<string | null>(null)
+  // [VRAAG-EIGENAAR] Where the Berichten door opens — read from the link COLLECTION, never one row.
+  const [messagesHref, setMessagesHref]           = useState<string>('/dashboard/messages')
   // [BOEK-029] BOEK-011 integration — pending incoming invoices count
   const [pendingCount, setPendingCount]           = useState<number>(0)
   // [BRUG-RETOUR] Openstaande vragen van de boekhouder over eigen documenten.
@@ -104,13 +107,15 @@ export function ZzpDashboard(
 
   async function loadGlobal() {
     const [
-      { data: link },
+      linkRead,
       { data: notifData, error: notifErr },
       { count, error: berichtenErr },
       { count: documentVragen, error: documentVragenErr },
       { count: invoiceVragen, error: invoiceVragenErr },
     ] = await Promise.all([
-      supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', profile.id).maybeSingle(),
+      // [VRAAG-EIGENAAR] The collection: an owner with two offices has two rows, and .maybeSingle()
+      // answered that with an error the door then read as "no accountant" (audit VR-02).
+      supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', profile.id),
       supabase.from('notifications').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }).limit(20),
       supabase.from('messages').select('id', { count: 'exact', head: true }).eq('receiver_id', profile.id).eq('read', false),
       // [BRUG-RETOUR] RLS (acc_status_client_read_document) beperkt dit al tot documenten
@@ -124,7 +129,8 @@ export function ZzpDashboard(
       supabase.from('accountant_subject_status').select('subject_id', { count: 'exact', head: true })
         .eq('subject_type', 'invoice').eq('status', VRAAG_STATUS),
     ])
-    if (link?.accountant_id) setAccountantId(link.accountant_id)
+    if (linkRead.error) console.error('[HOME] koppelingslezing mislukt:', linkRead.error.message)
+    setMessagesHref(messagesDoorHref(classifyAccountantLinks({ data: linkRead.data, error: linkRead.error })))
     // [NO-SILENT-EMPTY] `if (notifData)` alleen liet een mislukte lezing als "Geen meldingen" op
     // het scherm komen: supabase-js gooit niet, dus een RLS-weigering of een haperende verbinding
     // kwam hier binnen als data === null. De bel is de plek waar een vraag van de boekhouder
@@ -236,7 +242,7 @@ export function ZzpDashboard(
         unreadMessages={unreadMessages}
         onToggleNotifications={() => { setShowNotifications(p => !p) }}
         onMarkAllRead={markAllRead}
-        onMessagesClick={() => accountantId ? router.push(`/dashboard/messages/${accountantId}`) : router.push('/dashboard/messages')}
+        onMessagesClick={() => router.push(messagesHref)}
         onLogout={async () => {
           // [UITLOGGEN] signOut() keeps the local session when the server refused, so navigating to
           // /login as if it worked only bounced the owner straight back here, with no word. Say it,

@@ -1243,34 +1243,43 @@ test("[FACTUURVRAAG] the counters that were reading zero now have a writer", () 
   //
   // [BOEKHOUDER-DEUR] The write moved. accountant_status now has ONE path — the server door — and
   // the database refuses this column from any session client, so the route's own UPDATE could no
-  // longer work. What this gate cares about is unchanged and is asserted the same way: that the
-  // route still SETS the status those three surfaces count, rather than only storing the text.
+  // longer work.
+  //
+  // [VRAAG-SYNC] And the question's TEXT moved with it. The route used to upsert the words itself
+  // and then ask the door for the status — two writes, and the resolve side only ever moved one of
+  // them, so a client kept reading an open question about a finished invoice (audit VR-01). The
+  // door now hands BOTH facts to one database function that moves them in one transaction. What
+  // this gate cares about: the route still asks the door for the status those three surfaces
+  // count, WITH the accountant's words, and writes the question table nowhere itself.
   const route = code("src/app/api/accountant/invoice-question/route.ts");
   assert.match(
     route, /setAccountantStatus\(\{[\s\S]{0,300}?status: VRAAG_STATUS,/,
     "the route must actually set the status the three surfaces count",
   );
-  // And the TEXT, without which a 'vraag' is the problem this feature exists to replace: the client
-  // sees that something is wrong and not what.
-  assert.match(route, /subject_type: 'invoice'/, "the question is stored against the invoice");
-  assert.match(route, /vraag_text: question/, "with the accountant's actual words");
-  // Text first, status second — a status with no text is worse than no status.
-  //
-  // The order is measured against the DOOR CALL, because the literal `accountant_status:` is no
-  // longer in this file: the column is written inside src/lib/accountant-status-door.ts. Both
-  // positions are asserted found first — an indexOf that returns -1 would make this comparison
-  // true for the wrong reason, which is exactly how a gate passes on the day it matters.
-  const textAt = route.indexOf("vraag_text: question");
-  const statusAt = route.indexOf("setAccountantStatus({");
-  assert.ok(textAt >= 0, "the question text write must be findable");
-  assert.ok(statusAt >= 0, "the status write must go through the door, and be findable");
-  assert.ok(
-    textAt < statusAt,
-    "the text must be written BEFORE the status, so a half-failure never leaves a question the " +
-      "client can see the existence of but not the content of",
+  assert.match(
+    route, /setAccountantStatus\(\{[\s\S]{0,300}?question,/,
+    "with the accountant's actual words, through the same door call — a status with no text is worse than no status",
+  );
+  assert.doesNotMatch(
+    route, /from\('accountant_subject_status'\)/,
+    "the route writes the question table on its own again — that is the second write the resolve side never mirrored",
   );
   // An empty question is refused rather than stored.
   assert.match(route, /if \(!question\) return/, "an empty question is not a question");
+
+  // The door itself: one write, the database function, never a table.
+  const door = code("src/lib/accountant-status-door.ts");
+  assert.match(door, /pipeline\.rpc\(ACCOUNTANT_STATUS_RPC, \{/, "the door no longer calls the one function");
+  assert.doesNotMatch(door, /\.from\("invoices"\)\s*\.update\(/, "the door writes invoices directly again — the question row is then left behind");
+  assert.doesNotMatch(door, /\.from\("accountant_subject_status"\)/, "the door writes the question table on its own");
+  const fn = readFileSync("supabase/migrations/accountant_invoice_status_sync.sql", "utf8");
+  assert.match(fn, /UPDATE public\.invoices[\s\S]{0,400}?accountant_subject_status/, "the function must move both rows");
+  assert.match(fn, /REVOKE ALL ON FUNCTION public\.accountant_set_invoice_status\(uuid, uuid, uuid, text, text\) FROM PUBLIC, anon, authenticated;/,
+    "the client must never be able to call the function that closes a question");
+  // And the resolve side says so to the owner: a closed question is announced, never left to be
+  // discovered by an absence.
+  const status = code("src/app/api/accountant/invoice-status/route.ts");
+  assert.match(status, /questionWasOpen/, "the resolve route ignores whether it just closed a question");
 });
 
 test("[FACTUURVRAAG] the client can reach the invoice the question is about", () => {
@@ -1285,17 +1294,18 @@ test("[FACTUURVRAAG] the client can reach the invoice the question is about", ()
     "[NO-SILENT-EMPTY] a failed read of this half must not read as 'no questions' either",
   );
 
-  const client = code("src/app/dashboard/vragen/VragenClient.tsx");
+  // [VRAAG-DEUR] The door is decided on the SERVER (invoiceQuestionHref, from the invoice's own
+  // direction) and handed to the card as invoiceHref: a purchase invoice opens Inkomend, a sales
+  // invoice its own page. The card only renders what it was handed.
   assert.match(
-    client, /\/dashboard\/incoming\/manage\?focus=/,
+    page, /!v\.documentMissing \? invoiceQuestionHref\(v\.invoice, user\.id\) : null/,
     "the question must link to the invoice itself — otherwise the client hunts through four " +
-      "hundred rows for the one being asked about, and the conversation moves to WhatsApp",
-  );
-  assert.match(
-    client, /!vraag\.documentMissing/,
-    "and only when the invoice was actually readable: a link to a row that is not there is worse " +
+      "hundred rows for the one being asked about, and the conversation moves to WhatsApp — " +
+      "and only when the invoice was actually readable: a link to a row that is not there is worse " +
       "than no link",
   );
+  const client = code("src/app/dashboard/vragen/VragenClient.tsx");
+  assert.match(client, /const factuurHref = vraag\.invoiceHref \?\? null/, "the card must render the door the server decided");
 });
 
 test("[FACTUURVRAAG] the accountant asks from where they are looking", () => {
@@ -33822,7 +33832,9 @@ test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought i
   // The owner's side of the loop: the screen where he says he has no accountant offers the list.
   const vragen = code("src/app/dashboard/vragen/VragenClient.tsx");
   assert.match(vragen, /href="\/boekhouders"/, "the one screen that knows he has no boekhouder does not offer one");
-  assert.match(vragen, /!accountantId && \(/,
+  // [VRAAG-EIGENAAR] Only when the link read succeeded AND found nobody: a failed read is not
+  // "no accountant", and an owner whose links we could not read is not sent to the directory.
+  assert.match(vragen, /linksKnown && !heeftBoekhouder && \(/,
     "the list is offered to owners who already have an accountant, which is noise on a done screen");
 });
 
@@ -34381,14 +34393,12 @@ test("[BOEKHOUDER-DEUR] only the door writes accountant_status or its actor", ()
     return out;
   };
 
-  // One entry, and it is the door. The generated types are NOT here: they declare the columns and
-  // perform no write, so the nearest-preceding-.from rule never reaches them — and the stale half
-  // of this gate said so when they were listed anyway.
-  const EXCUSED: Readonly<Record<string, string>> = {
-    "src/lib/accountant-status-door.ts":
-      "the door — the one place that writes these two columns, and the only client the database " +
-      "accepts them from",
-  };
+  // No entry at all. [VRAAG-SYNC] The door itself no longer writes the table: it calls the one
+  // database function (accountant_set_invoice_status), which moves invoices.accountant_status and
+  // the accountant's own question row in one transaction. So NO TypeScript file may write these
+  // two columns — the write lives in SQL, asserted below. The generated types are NOT here: they
+  // declare the columns and perform no write, so the nearest-preceding-.from rule never reaches them.
+  const EXCUSED: Readonly<Record<string, string>> = {};
 
   const writers: string[] = [];
   for (const file of walk("src")) {
@@ -34420,6 +34430,17 @@ test("[BOEKHOUDER-DEUR] only the door writes accountant_status or its actor", ()
   const stale = Object.keys(EXCUSED).filter((f) => !writers.includes(f)).sort();
   assert.deepStrictEqual(stale, [],
     "these files are excused from a rule they no longer break — remove them from EXCUSED");
+
+  // [VRAAG-SYNC] The one write is the database function, called by the door and nothing else.
+  const door = code("src/lib/accountant-status-door.ts");
+  assert.match(door, /pipeline\.rpc\(ACCOUNTANT_STATUS_RPC, \{/, "the door no longer calls the one function");
+  assert.doesNotMatch(door, /\.from\("invoices"\)\s*\.update\(/, "the door writes the column directly again");
+  const fn = readFileSync("supabase/migrations/accountant_invoice_status_sync.sql", "utf8");
+  assert.match(fn, /UPDATE public\.invoices\s+SET accountant_status = p_status,\s+accountant_id\s+= CASE WHEN p_status = 'verwerkt' THEN p_accountant_id ELSE NULL END/,
+    "the function no longer writes the status and its actor the way attributionFor() decides them");
+  const rpcCallers = walk("src").filter((f) => /rpc\(\s*["']accountant_set_invoice_status["']|ACCOUNTANT_STATUS_RPC/.test(code(f)));
+  assert.deepStrictEqual(rpcCallers.sort(), ["src/lib/accountant-status-door.ts"],
+    "the database function is called from somewhere other than the door");
 
   // The two callers that had their own write now go through the door. Named, because a door with
   // no callers is the failure [REGEL-DEUR] exists to catch.

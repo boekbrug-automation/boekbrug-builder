@@ -17,6 +17,14 @@
 //    profiles_select_accountant_clients, één richting). Wij lezen die daarom met
 //    service_role, en uitsluitend nádat accountant_clients de koppeling heeft bewezen —
 //    net als de ondertekende bestands-URL's hieronder.
+//
+// [VRAAG-EIGENAAR] An owner may have more than one accountant, and every question knows who asked
+// it. This page used to read "the" accountant with .maybeSingle(): with two offices linked that
+// read fails (PGRST116), the failure was thrown away, and the owner saw "no accountant linked"
+// under questions from both offices, with nowhere to answer them (audit VR-02). The links are now
+// read as the collection they are (accountant-links.ts: failed / zero / one / many, never
+// collapsed), each question carries its own accountant_id, and the answer goes to THAT accountant.
+// Names are read with service_role for exactly the ids the owner's own rows and links prove.
 
 import { redirect } from 'next/navigation'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
@@ -27,9 +35,10 @@ import { fetchAllRowsForIds } from '@/lib/supabase-paginate'
 // [SEC-STORAGE-PATH] A row check is not a path check — see the header of storage-path.ts.
 import { toStoragePath, pathBelongsToOwner } from '@/lib/storage-path'
 import {
-  buildOpenVragen, buildOpenInvoiceVragen, VRAAG_STATUS,
+  buildOpenVragen, buildOpenInvoiceVragen, invoiceQuestionHref, VRAAG_STATUS,
   type VraagStatusRow, type VraagInvoiceRow,
 } from '@/lib/vragen'
+import { classifyAccountantLinks, provenAccountantIds } from '@/lib/accountant-links'
 import VragenClient, { type VraagView, type VoorstelView } from './VragenClient'
 import type { ProposedChange } from '@/lib/correction-proposal'
 
@@ -57,7 +66,7 @@ export default async function VragenPage() {
     { data: profile },
     { data: statusData, error: statusErr },
     { data: invStatusData, error: invStatusErr },
-    { data: link },
+    linkRead,
   ] = await Promise.all([
     supabase.from('profiles').select('role, onboarding_done').eq('id', user.id).single(),
 
@@ -66,9 +75,10 @@ export default async function VragenPage() {
     // het document en het document aan de eigenaar. Faalt de lezing, dan tonen wij géén
     // lege lijst maar een eerlijke foutmelding (zie loadFailed): "geen vragen" is een
     // bewering, en die mag nooit uit een mislukte query komen.
+    // [VRAAG-EIGENAAR] accountant_id travels with every row: the answer goes to the asker.
     supabase
       .from('accountant_subject_status')
-      .select('subject_id, status, vraag_text, updated_at')
+      .select('accountant_id, subject_id, status, vraag_text, updated_at')
       .eq('subject_type', 'document')
       .eq('status', VRAAG_STATUS),
 
@@ -76,12 +86,14 @@ export default async function VragenPage() {
     // samenvoegt. Aparte lezing, geen OR op subject_type, en dat blijft zo.
     supabase
       .from('accountant_subject_status')
-      .select('subject_id, status, vraag_text, updated_at')
+      .select('accountant_id, subject_id, status, vraag_text, updated_at')
       .eq('subject_type', 'invoice')
       .eq('status', VRAAG_STATUS),
 
-    // ── De boekhouder ──────────────────────────────────────────────────────────
-    supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', user.id).maybeSingle(),
+    // ── De boekhouders ─────────────────────────────────────────────────────────
+    // [VRAAG-EIGENAAR] The collection, never .maybeSingle() and never .limit(1): two linked
+    // offices are two rows by design, and a read that failed is kept apart from zero rows.
+    supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', user.id),
   ])
 
   if (!profile?.onboarding_done) redirect('/onboarding')
@@ -105,10 +117,11 @@ export default async function VragenPage() {
   // facturen van de factuurvragen, de naam van de boekhouder van de koppeling — maar NIET van
   // elkaar. Dus opnieuw: één rit voor alle drie in plaats van drie ritten.
   //
-  // De naam van de boekhouder gaat via service_role, en pas nadat de koppeling in de eerste golf
-  // is bewezen. Uitsluitend voor de wéérgave van die naam, nooit om te bepalen wát iemand mag
-  // zien — daarom hangt hij aan accountantId en niet aan user.id.
-  const accountantId: string | null = link?.accountant_id ?? null
+  // [VRAAG-EIGENAAR] Which accountants are linked right now — failed / zero / one / many.
+  const links = classifyAccountantLinks({ data: linkRead.data, error: linkRead.error })
+  if (linkRead.error) {
+    console.error('[VRAGEN] koppelingslezing mislukt', { userId: user.id, error: linkRead.error.message })
+  }
   const pipeline = createPipelineClient()
 
   // [NO-SILENT-EMPTY] Deze twee lezingen pakten alleen `data` uit, en het gevolg stond niet in de
@@ -119,7 +132,14 @@ export default async function VragenPage() {
   //
   // [IN-CHUNK] En gechunkt: docIds/invIds groeien met het aantal openstaande vragen, en een kale
   // `.in()` is voorbij een paar honderd id's precies de manier waarop deze lezing mislukt.
-  const [docs, invRows, { data: accProfile }] = await Promise.all([
+  // [VRAAG-EIGENAAR] The names, for exactly the ids the owner's OWN rows and links prove: the
+  // askers of the questions the owner can see (those rows came through the owner's RLS) and the
+  // owner's current links. service_role reads the name; it never decides who may be named.
+  const provenIds = provenAccountantIds(
+    [...statusRows, ...invStatusRows].map((r) => ({ accountantId: r.accountant_id ?? null })),
+    links,
+  )
+  const [docs, invRows, accProfiles] = await Promise.all([
     fetchAllRowsForIds<{ id: string; file_name: string | null; file_url: string | null; trashed: boolean | null }, string>(
       docIds,
       (chunk, from, to) =>
@@ -129,18 +149,27 @@ export default async function VragenPage() {
       console.error('[VRAGEN] documenten bij de vragen lezen mislukt', { userId: user.id, e })
       return null
     }),
+    // [VRAAG-DEUR] direction, sender and receiver travel along: they decide which screen "Bekijk"
+    // opens (a purchase invoice lives on Inkomend, a sales invoice on its own page).
     fetchAllRowsForIds<VraagInvoiceRow, string>(
       invIds,
       (chunk, from, to) =>
-        supabase.from('invoices').select('id, invoice_number, client_name, total_inc_btw, invoice_date')
+        supabase.from('invoices').select('id, invoice_number, client_name, total_inc_btw, invoice_date, direction, sender_id, receiver_id')
           .in('id', chunk).order('id', { ascending: true }).range(from, to),
     ).catch((e: unknown) => {
       console.error('[VRAGEN] facturen bij de vragen lezen mislukt', { userId: user.id, e })
       return null
     }),
-    accountantId
-      ? pipeline.from('profiles').select('full_name, company_name').eq('id', accountantId).maybeSingle()
-      : Promise.resolve({ data: null }),
+    fetchAllRowsForIds<{ id: string; full_name: string | null; company_name: string | null }, string>(
+      provenIds,
+      (chunk, from, to) =>
+        pipeline.from('profiles').select('id, full_name, company_name')
+          .in('id', chunk).order('id', { ascending: true }).range(from, to),
+    ).catch((e: unknown) => {
+      // A name is display only; without it the card still says everything it knows.
+      console.error('[VRAGEN] namen van boekhouders lezen mislukt', { userId: user.id, e })
+      return [] as { id: string; full_name: string | null; company_name: string | null }[]
+    }),
   ])
 
   // null = de lezing mislukte. Dat telt mee in loadFailed, want een scherm dat elk bestand als
@@ -176,13 +205,18 @@ export default async function VragenPage() {
     return 0
   })
 
-  // ── De naam van de boekhouder ────────────────────────────────────────────────
-  let accountantNaam: string | null = null
-  if (accountantId) {
-    const naam = (accProfile?.full_name ?? '').trim()
-    const bedrijf = (accProfile?.company_name ?? '').trim()
-    accountantNaam = naam || bedrijf || null
+  // ── De namen van de boekhouders ──────────────────────────────────────────────
+  // Per id, so a card can say who asked. The sentence at the top names an accountant only when
+  // there is exactly ONE linked — with two offices, "your accountant" is the honest word.
+  const accountantNames: Record<string, string> = {}
+  for (const row of accProfiles) {
+    const naam = (row.full_name ?? '').trim()
+    const bedrijf = (row.company_name ?? '').trim()
+    const name = naam || bedrijf
+    if (name) accountantNames[row.id] = name
   }
+  const accountantNaam: string | null =
+    links.state === 'known' && links.ids.length === 1 ? (accountantNames[links.ids[0]] ?? null) : null
 
   // ── Ondertekende bestands-URL's ──────────────────────────────────────────────
   // Zelfde reden als op /dashboard/brug: de bucket-policy staat los van de tabel-RLS.
@@ -207,6 +241,8 @@ export default async function VragenPage() {
   const views: VraagView[] = vragen.map((v) => ({
     ...v,
     fileUrl: urlByDoc.get(v.documentId) ?? null,
+    // [VRAAG-DEUR] Decided here, where the owner's id is known: which screen shows this invoice.
+    invoiceHref: v.subjectType === 'invoice' && !v.documentMissing ? invoiceQuestionHref(v.invoice, user.id) : null,
   }))
 
   // ── [VOORSTEL] The accountant's correction proposals, open, with their invoice ───────────
@@ -253,7 +289,8 @@ export default async function VragenPage() {
     <VragenClient
       vragen={views}
       voorstellen={voorstellen}
-      accountantId={accountantId}
+      links={links}
+      accountantNames={accountantNames}
       accountantNaam={accountantNaam}
       loadFailed={loadFailed}
     />

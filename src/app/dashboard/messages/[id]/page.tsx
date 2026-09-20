@@ -15,6 +15,8 @@ import { PAGE_HEADER_HEIGHT, COLUMN } from '@/lib/design/tokens'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
 import { LOCALE_META } from '@/lib/i18n/locale'
+// [AG-03] A session that expires mid-thread comes back to THIS thread after logging in.
+import { withRedirect } from '@/lib/safe-redirect'
 import type { MessageRow } from '@/types/rows'
 
 // Skeleton للرسائل أثناء التحميل
@@ -48,6 +50,12 @@ export default function ConversationPage() {
   const [error, setError] = useState('')
   // [NO-SILENT-EMPTY] Een mislukte lezing mag niet als "nog geen berichten" op het scherm komen.
   const [loadError, setLoadError] = useState('')
+  // [GESPREK-GRENS] Whether the two are linked, as the server reports it: true, false, or null
+  // when it could not check. false with no messages is a stranger's id in the URL — not a
+  // conversation, and never a composer that pretends it is (audit TH-01). false WITH messages is a
+  // former accountant: readable, not writable. The server refuses the send either way; this only
+  // stops the screen from claiming otherwise.
+  const [linked, setLinked] = useState<boolean | null>(null)
 
   async function fetchMessages() {
     try {
@@ -60,6 +68,7 @@ export default function ConversationPage() {
       setLoadError('')
       if (data?.messages) setMessages(data.messages)
       if (data?.partner) setPartnerName(data.partner.name ?? null)
+      setLinked(typeof data?.linked === 'boolean' ? data.linked : null)
     } catch {
       setLoadError(t('gesprek.ophaalFout'))
     }
@@ -68,7 +77,8 @@ export default function ConversationPage() {
   useEffect(() => {
     async function load() {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) { router.push('/login'); return }
+      // [AG-03] Not a bare /login: the owner was on THIS thread, and comes back to it.
+      if (!user) { router.push(withRedirect('/login', `/dashboard/messages/${otherId}`)); return }
       setCurrentUserId(user.id)
 
       await fetchMessages()
@@ -155,6 +165,10 @@ export default function ConversationPage() {
   }
 
   const otherName = partnerName || '...'
+  // [GESPREK-GRENS] The composer exists only for a pair the server says is linked. Unknown (null,
+  // the link read failed) keeps it: the server decides on send, and answers with its reason.
+  const kanSturen = linked !== false
+  const vreemde = linked === false && messages.length === 0
 
   // [SUBNAV] Conversation partner's name as the shared sub-page header title
   // (back is provided there too). The chat fills exactly the space below the
@@ -190,6 +204,12 @@ export default function ConversationPage() {
             >
               {t('ber.opnieuw')}
             </button>
+          </div>
+        ) : vreemde ? (
+          /* [GESPREK-GRENS] Not an empty conversation with a stranger: there is none to have. */
+          <div className="text-center py-16">
+            <p className="text-2xl mb-2">🚫</p>
+            <p className="text-gray-700 text-sm font-medium px-6">{t('gesprek.nietGekoppeld')}</p>
           </div>
         ) : messages.length === 0 ? (
           <div className="text-center py-16">
@@ -241,26 +261,32 @@ export default function ConversationPage() {
         </div>
       )}
 
-      {/* Input */}
+      {/* Input — [GESPREK-GRENS] only for a linked pair; a read-only line otherwise. */}
       <div className="bg-white border-t border-gray-200 px-6 py-4 sticky bottom-0">
-        <div className="mx-auto flex items-end gap-3" style={{ maxWidth: COLUMN.work }}>
-          <textarea
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={t('gesprek.plaatshouder', { name: otherName })}
-            rows={1}
-            className="flex-1 border border-gray-200 rounded-2xl px-4 py-2.5 text-sm resize-none focus:outline-none focus:border-blue-400 transition-colors"
-            style={{ minHeight: '42px', maxHeight: '120px' }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || sending}
-            className="bg-blue-600 text-white px-4 py-2.5 rounded-2xl text-sm font-medium hover:bg-blue-700 disabled:opacity-40 transition-colors flex-shrink-0"
-          >
-            {sending ? '...' : t('gesprek.stuur')}
-          </button>
-        </div>
+        {kanSturen ? (
+          <div className="mx-auto flex items-end gap-3" style={{ maxWidth: COLUMN.work }}>
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={t('gesprek.plaatshouder', { name: otherName })}
+              rows={1}
+              className="flex-1 border border-gray-200 rounded-2xl px-4 py-2.5 text-sm resize-none focus:outline-none focus:border-blue-400 transition-colors"
+              style={{ minHeight: '42px', maxHeight: '120px' }}
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || sending}
+              className="bg-blue-600 text-white px-4 py-2.5 rounded-2xl text-sm font-medium hover:bg-blue-700 disabled:opacity-40 transition-colors flex-shrink-0"
+            >
+              {sending ? '...' : t('gesprek.stuur')}
+            </button>
+          </div>
+        ) : (
+          <p className="mx-auto text-xs text-gray-500 text-center" style={{ maxWidth: COLUMN.work }}>
+            {vreemde ? t('gesprek.nietGekoppeld') : t('gesprek.koppelingWeg')}
+          </p>
+        )}
       </div>
 
     </div>

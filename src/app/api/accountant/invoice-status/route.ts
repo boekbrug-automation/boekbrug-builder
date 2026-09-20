@@ -9,30 +9,22 @@
 //
 // This route holds only what is HTTP: reading a body, refusing a malformed one, the rate limit, and
 // turning the door's answer into a status code. It decides nothing about the invoice.
+//
+// [VRAAG-SYNC] One thing was added on the way out: when the statement closed this accountant's own
+// open question on the invoice (the database moves both in one transaction and says so), the
+// owner is told. See the note above the notification.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { logAuditAction } from '@/lib/audit'
-import { setAccountantStatus, isAccountantStatus, type DoorRefusal } from '@/lib/accountant-status-door'
+import { createNotification } from '@/lib/notifications'
+import { setAccountantStatus, isAccountantStatus, DOOR_REFUSAL_HTTP_STATUS as STATUS_OF } from '@/lib/accountant-status-door'
 
 export const dynamic = 'force-dynamic'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/** Which refusals are the caller's fault, which are ours. A 503 invites a retry; a 403 does not. */
-const STATUS_OF: Record<DoorRefusal, number> = {
-  not_authenticated: 401,
-  unknown_status: 400,
-  link_read_failed: 503,
-  not_linked: 403,
-  invoice_read_failed: 503,
-  invoice_not_visible: 404,
-  invoice_not_this_client: 403,
-  write_failed: 500,
-  nothing_written: 409,
-}
 
 export async function POST(request: NextRequest) {
   const supabase = await createServerSupabaseClient()
@@ -76,6 +68,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: result.reason }, { status: STATUS_OF[result.reason] })
   }
 
+  // [VRAAG-SYNC] The database moved this accountant's own question row in the same transaction as
+  // the invoice, and reported whether that row was open. When it was, and this statement is not a
+  // new question, the owner is told: their "Vraag van je boekhouder" notification is otherwise the
+  // last word about a question that has just left /dashboard/vragen, and the only way to learn it
+  // is closed would be to notice an absence. Best-effort, after the write, like the audit row —
+  // and it reports a fact the database has already committed; it decides nothing.
+  if (result.questionWasOpen && raw !== 'vraag') {
+    const melding = await createNotification({
+      userId: clientId,
+      title: 'Vraag afgehandeld',
+      body: result.invoiceLabel
+        ? `Je boekhouder heeft de vraag over ${result.invoiceLabel} afgehandeld.`
+        : 'Je boekhouder heeft de vraag over een factuur afgehandeld.',
+      type: 'status',
+      link: '/dashboard/vragen',
+    })
+    if (!melding.ok) {
+      console.error('[VRAAG-SYNC] melding "vraag afgehandeld" mislukt', { clientId, invoiceId, error: melding.error })
+    }
+  }
+
   // The act is recorded where every other accountant action on an invoice is recorded. Best-effort,
   // and deliberately after the write: a failed audit may never undo a status the accountant set.
   await logAuditAction({
@@ -83,7 +96,7 @@ export async function POST(request: NextRequest) {
     action: 'accountant.invoice_status_set',
     entityType: 'invoice',
     entityId: invoiceId,
-    newValue: { accountant_status: result.status, accountant_id: result.accountantId },
+    newValue: { accountant_status: result.status, accountant_id: result.accountantId, question_status: result.questionStatus, question_was_open: result.questionWasOpen },
   }).catch(() => {})
 
   return NextResponse.json({ ok: true, status: result.status, accountantId: result.accountantId })

@@ -79,4 +79,5 @@ INSERT INTO privilege_intent (sig, kind, status, definer, i_anon, i_authenticate
   ('public.guard_paid_when_verwerkt()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY['revoke_execute_on_trigger_functions.sql']::text[]),
   ('public.invoices_search_vector_update()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY['revoke_execute_on_trigger_functions.sql']::text[]),
   ('public.prevent_accountant_amount_changes()', 'trigger', 'live', false, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY['revoke_execute_on_trigger_functions.sql']::text[]),
+  ('public.accountant_set_invoice_status(uuid, uuid, uuid, text, text)', 'server_rpc', 'planned', false, 'DENY', 'DENY', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY['accountant_invoice_status_sync.sql']::text[]),
   ('public.document_is_referenced(uuid)', 'invoker_rpc', 'not_in_production', false, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', NULL, NULL, NULL, NULL, ARRAY[]::text[]);

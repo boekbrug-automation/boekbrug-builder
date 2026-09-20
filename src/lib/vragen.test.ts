@@ -224,3 +224,59 @@ test('[FACTUURVRAAG] de documentkant blijft precies wat hij was', () => {
   assert.equal(open[0].documentName, 'bon.pdf')
   assert.equal(open[0].invoice, undefined, 'een documentvraag draagt geen factuur mee')
 })
+
+// ── [VRAAG-EIGENAAR] every question carries its asker ────────────────────────────────────────────
+const ACC_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const ACC_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+test("[VRAAG-EIGENAAR] a document question carries the accountant who asked it", () => {
+  const open = buildOpenVragen([{ ...status("d", VRAAG_STATUS, "Bon?"), accountant_id: ACC_A }], [doc("d", "d.pdf")]);
+  assert.equal(open[0].accountantId, ACC_A);
+  const oud = buildOpenVragen([status("d", VRAAG_STATUS, "Bon?")], [doc("d", "d.pdf")]);
+  assert.equal(oud[0].accountantId, null, "a row read without the column is honest about it, not defaulted to anyone");
+});
+
+test("[VRAAG-EIGENAAR] two accountants asking about the SAME invoice are two questions, each with its own asker", () => {
+  const inv = { id: "inv-1", invoice_number: "2026-014", client_name: "Bakker BV", total_inc_btw: 121, invoice_date: "2026-05-01" };
+  const open = buildOpenInvoiceVragen(
+    [
+      { subject_id: "inv-1", status: VRAAG_STATUS, vraag_text: "Tarief?", updated_at: "2026-07-01T10:00:00.000Z", accountant_id: ACC_A },
+      { subject_id: "inv-1", status: VRAAG_STATUS, vraag_text: "Privé?", updated_at: "2026-07-02T10:00:00.000Z", accountant_id: ACC_B },
+    ],
+    [inv],
+  );
+  assert.equal(open.length, 2, "never merged under one accountant id");
+  assert.deepEqual(open.map((q) => q.accountantId), [ACC_A, ACC_B]);
+  assert.deepEqual(open.map((q) => q.question), ["Tarief?", "Privé?"]);
+});
+
+// ── [VRAAG-DEUR] the invoice's own direction decides the screen ──────────────────────────────────
+import { invoiceQuestionHref } from "./vragen";
+const OWNER = "11111111-1111-4111-8111-111111111111";
+const OTHER = "22222222-2222-4222-8222-222222222222";
+
+test("[VRAAG-DEUR] an incoming invoice opens Inkomend, focused, with the way back to the questions", () => {
+  assert.equal(
+    invoiceQuestionHref({ id: "inv-in", direction: "incoming", sender_id: OTHER, receiver_id: OWNER }, OWNER),
+    "/dashboard/incoming/manage?focus=inv-in&from=vragen",
+  );
+});
+
+test("[VRAAG-DEUR] an outgoing invoice opens its own page — never the purchase list", () => {
+  assert.equal(
+    invoiceQuestionHref({ id: "inv-out", direction: "outgoing", sender_id: OWNER, receiver_id: null }, OWNER),
+    "/dashboard/invoice/inv-out?from=vragen",
+  );
+});
+
+test("[VRAAG-DEUR] a null direction is settled by ownership, the same rule the closing package uses", () => {
+  assert.equal(invoiceQuestionHref({ id: "x", direction: null, sender_id: OTHER, receiver_id: OWNER }, OWNER), "/dashboard/incoming/manage?focus=x&from=vragen");
+  assert.equal(invoiceQuestionHref({ id: "x", direction: null, sender_id: OWNER, receiver_id: OTHER }, OWNER), "/dashboard/invoice/x?from=vragen");
+});
+
+test("[VRAAG-DEUR] when neither the direction nor the ownership settles it, there is no door — never a guess", () => {
+  assert.equal(invoiceQuestionHref({ id: "x", direction: null, sender_id: OTHER, receiver_id: OTHER }, OWNER), null);
+  assert.equal(invoiceQuestionHref({ id: "x", direction: "sideways", sender_id: null, receiver_id: null }, OWNER), null);
+  assert.equal(invoiceQuestionHref(null, OWNER), null);
+  assert.equal(invoiceQuestionHref({ id: "a&b", direction: "outgoing" }, OWNER), "/dashboard/invoice/a%26b?from=vragen", "the id is encoded");
+});

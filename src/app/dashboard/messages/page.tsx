@@ -11,6 +11,10 @@ import { COLUMN } from '@/lib/design/tokens';
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
 import { failureText } from '@/lib/server-message'
+// [TAAL] The date beside a conversation follows the owner's language, like the clock in the thread.
+import { LOCALE_META } from '@/lib/i18n/locale'
+// [AG-03] A session that expires here comes back here after logging in.
+import { withRedirect } from '@/lib/safe-redirect'
 
 // Eén gesprek in de lijst: samengesteld uit berichten + de naam van de tegenpartij.
 interface Conversation {
@@ -38,7 +42,8 @@ function ConversationSkeleton() {
 }
 
 export default function MessagesPage() {
-  const t = translator(useLocale())
+  const locale = useLocale()
+  const t = translator(locale)
   const router = useRouter()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -58,7 +63,7 @@ export default function MessagesPage() {
       // boekhouder niet zien, dus de browser kon deze lijst nooit compleet maken.
       try {
         const res = await fetch('/api/messages/conversations')
-        if (res.status === 401) { router.push('/login'); return }
+        if (res.status === 401) { router.push(withRedirect('/login', '/dashboard/messages')); return }
         const data = await res.json().catch(() => null)
         if (!res.ok) {
           setLoadError(failureText(res.status, data, t('ber.ophaalFout')))
@@ -168,7 +173,7 @@ export default function MessagesPage() {
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <p className="text-xs text-gray-300">
-                      {conv.lastAt ? new Date(conv.lastAt).toLocaleDateString('nl-NL') : ''}
+                      {conv.lastAt ? new Date(conv.lastAt).toLocaleDateString(LOCALE_META[locale].intl) : ''}
                     </p>
                     {conv.unread > 0 && (
                       <span className="bg-blue-600 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-medium">

@@ -50,17 +50,47 @@ export async function GET(request: NextRequest) {
       if (readErr) console.error('[BERICHTEN] als gelezen markeren mislukt', { userId: user.id, error: readErr.message })
     }
 
-    const partnerName = await resolvePartnerName(supabase, user.id, otherId, (messages ?? []).length > 0)
+    // [GESPREK-GRENS] Whether the two are linked right now, read as a fact of its own: the thread
+    // screen used to render any id as an empty conversation with a live composer — a page that
+    // looked like a chat with a stranger (audit TH-01). null = the read failed; not "no".
+    const linked = await pairIsLinked(supabase, user.id, otherId)
+    const partnerName = await resolvePartnerName(supabase, user.id, otherId, (messages ?? []).length > 0, linked)
 
     return NextResponse.json({
       messages: messages || [],
       // [NAAM-TEGENPARTIJ] Resolved server-side on purpose — see resolvePartnerName.
       partner: { id: otherId, name: partnerName },
+      linked,
     })
 
   } catch {
     return NextResponse.json({ error: 'Onbekende fout' }, { status: 500 })
   }
+}
+
+/**
+ * [GESPREK-GRENS] Is this pair linked (accountant ↔ client, either way round), as far as the
+ * caller's own link rows say? The caller's OWN rows only (bounded, no interpolation of otherId);
+ * null when the read failed — a failed read is not "not linked", which reads as a revoked mandate.
+ */
+async function pairIsLinked(
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  userId: string,
+  otherId: string,
+): Promise<boolean | null> {
+  const { data: myLinks, error } = await supabase
+    .from('accountant_clients')
+    .select('accountant_id, zzper_id')
+    .or(`accountant_id.eq.${userId},zzper_id.eq.${userId}`)
+  if (error) {
+    console.error('[BERICHTEN] koppelingslezing mislukt', { userId, error: error.message })
+    return null
+  }
+  return (myLinks ?? []).some(
+    (l) =>
+      (l.accountant_id === userId && l.zzper_id === otherId) ||
+      (l.zzper_id === userId && l.accountant_id === otherId),
+  )
 }
 
 /**
@@ -82,20 +112,12 @@ async function resolvePartnerName(
   userId: string,
   otherId: string,
   hasConversation: boolean,
+  linked: boolean | null,
 ): Promise<string | null> {
   try {
-    if (!hasConversation) {
-      const { data: myLinks } = await supabase
-        .from('accountant_clients')
-        .select('accountant_id, zzper_id')
-        .or(`accountant_id.eq.${userId},zzper_id.eq.${userId}`)
-      const linked = (myLinks ?? []).some(
-        (l) =>
-          (l.accountant_id === userId && l.zzper_id === otherId) ||
-          (l.zzper_id === userId && l.accountant_id === otherId),
-      )
-      if (!linked) return null
-    }
+    // A name for an arbitrary id would be a leak: only a proven link, or a conversation RLS itself
+    // just returned, earns one. (The link read happened once, in pairIsLinked.)
+    if (!hasConversation && linked !== true) return null
 
     const pipeline = createPipelineClient()
     const { data: profile } = await pipeline

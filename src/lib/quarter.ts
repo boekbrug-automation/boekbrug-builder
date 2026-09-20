@@ -42,6 +42,27 @@ export function lastCompletedQuarter(now: Date = new Date()): YearQuarter {
     : { year, quarter: (quarter - 1) as QuarterNo };
 }
 
+/** The calendar quarter `now` falls in, on the Amsterdam day — the one still open. */
+export function currentQuarter(now: Date = new Date()): YearQuarter {
+  return amsterdamYearQuarter(now);
+}
+
+/**
+ * [KLAAR-TOEKOMST] Has this period begun, on the Amsterdam day?
+ *
+ * A quarter that has not started has nothing in it to assess, and a verdict about it is a verdict
+ * about nothing: /dashboard/klaar?year=2027&quarter=1 answered with a confident 🔴 "Nog niet
+ * klaar · 0%" and a deadline count for a period that does not exist yet (audit KL-02). The picker
+ * already refused such a quarter; the URL did not, and the route did not. One rule, here, for all
+ * three — on the same Amsterdam day the rest of this file counts, so the night the year turns is
+ * not a different answer in a different timezone. The CURRENT quarter has started and stays
+ * assessable: checking your progress mid-quarter is what the screen is for.
+ */
+export function isPeriodStarted(period: YearQuarter, now: Date = new Date()): boolean {
+  const cur = amsterdamYearQuarter(now);
+  return period.year < cur.year || (period.year === cur.year && period.quarter <= cur.quarter);
+}
+
 /**
  * Resolve a year/quarter from URL params, falling back to the last completed quarter when
  * they are absent or invalid. So a surface opened WITH ?year&quarter (e.g. from a klaar

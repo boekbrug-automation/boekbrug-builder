@@ -101,6 +101,8 @@ const PARENT_RULES: ParentRule[] = [
     parent: (_, role, search) => {
       const from = search?.get('from')
       const clientId = search?.get('clientId')
+      // [VRAAG-DEUR] Opened from a question about this invoice → back to the questions screen.
+      if (from === 'vragen') return '/dashboard/vragen'
       if (from === 'client' && clientId) {
         const q = search?.get('q')
         const year = search?.get('year')
@@ -193,6 +195,8 @@ const PARENT_RULES: ParentRule[] = [
       const from = search?.get('from')
       if (from === 'home') return getHomePath(role)
       if (from === 'vandaag') return '/dashboard/vandaag'
+      // [VRAAG-DEUR] Opened from a question about this invoice → back to the questions screen.
+      if (from === 'vragen') return '/dashboard/vragen'
       return '/dashboard/incoming'
     },
   },

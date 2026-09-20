@@ -395,6 +395,16 @@ export const REGISTRY: readonly FunctionEntry[] = [
   triggerFn("public.prevent_accountant_amount_changes()", false, ["invoices"], CLOSED_TO_ALL_BUT_SERVICE,
     ["revoke_execute_on_trigger_functions.sql"]),
 
+  // ── [VRAAG-SYNC] the one write path for (invoices.accountant_status, the accountant's own
+  //    invoice question row); server door only. Planned: the migration is in the repo and not yet
+  //    applied to production — `planned` becomes `live` once it is measured there.
+  {
+    signature: "public.accountant_set_invoice_status(uuid, uuid, uuid, text, text)", kind: "server_rpc", managedBy: "boekbrug", owner: "postgres",
+    definer: false, status: "planned", intent: intent(D, D, A, D), current: null,
+    evidence: ["accountant_invoice_status_sync.sql revokes PUBLIC, anon, authenticated; grants service_role"],
+    callers: ["src/lib/accountant-status-door.ts (pipeline client)"], provenance: REPO, verified: null,
+  },
+
   // ── created by a repo migration, absent from production ────────────────────────────────────
   {
     signature: "public.document_is_referenced(uuid)", kind: "invoker_rpc", managedBy: "boekbrug", owner: "postgres",

@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 162 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 163 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 20 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -67,6 +67,7 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('accountant_invoice_mandate.sql', 'index', 'accountant_invoice_mandates_accountant', null, 'public'),
   ('accountant_invoice_mandate.sql', 'policy', 'accountant_invoice_mandates_select', 'accountant_invoice_mandates', 'public'),
   ('accountant_invoice_mandate.sql', 'policy', 'invoice_lines_mandate_read', 'invoice_lines', 'public'),
+  ('accountant_invoice_status_sync.sql', 'function', 'accountant_set_invoice_status', null, 'public'),
   ('accountant_subject_status.sql', 'policy', 'acc_status_client_read_document', 'accountant_subject_status', 'public'),
   ('accountant_subject_status.sql', 'table', 'accountant_subject_status', null, 'public'),
   ('accountant_vat_deduction_guard.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
@@ -683,7 +684,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 20 van de 182
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 20 van de 183
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
