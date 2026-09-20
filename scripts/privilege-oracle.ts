@@ -709,10 +709,12 @@ export function isExistingIdentity(entry: FunctionEntry | undefined): boolean {
  *   · A NEW identity must, outside the grandfather list, carry a final explicit decision for all
  *     four default grant paths — until the deny-by-default boundary in the database is live, a new
  *     function arrives open to three roles and PUBLIC. New means: the registry row is not `live`,
- *     or this same file DROPs the function before creating it again (the DROP resets the ACL and
- *     the default grants come back).
+ *     the statement is a plain CREATE rather than CREATE OR REPLACE, or this same file DROPs the
+ *     function before creating it again (the DROP resets the ACL and the default grants come back).
  *   · A body-only CREATE OR REPLACE of an EXISTING identity needs no privilege SQL at all. The
- *     ACL survives the replacement; forcing a rewrite would be the wrong invariant.
+ *     ACL survives the replacement; forcing a rewrite would be the wrong invariant. A plain
+ *     CREATE is not a replacement: PostgreSQL creates a new object with creation-time defaults
+ *     (or fails), so it decides the four paths like any new identity.
  *   · Any GRANT/REVOKE the file does contain is validated by direction, per identity: a final
  *     GRANT where the registry says DENY, or a final REVOKE where it says ALLOW, is a finding.
  *     UNKNOWN is reported, never decided here. On a grandfathered file the contradiction is
@@ -745,8 +747,12 @@ export function checkMigration(
     if (!entry && drops.some((d) => d.name === f.name && d.at > f.at)) { transient.add(f.name); continue; }
     if (!entry) { findings.push({ file, signature: f.signature, problem: "no_registry_entry" }); continue; }
     if (opts.grandfathered) continue;
+    // Body-only replacement — the one case that keeps the ACL — is CREATE OR REPLACE of a live
+    // identity that this file did not DROP first. A plain CREATE is fresh object creation to
+    // PostgreSQL: it fails if the function exists, and if it succeeds the object was absent and
+    // received creation-time defaults. So it decides the four paths, whatever the registry says.
     const droppedFirst = drops.some((d) => d.name === f.name && d.at < f.at);
-    if (isExistingIdentity(entry) && !droppedFirst) continue;
+    if (f.replace && isExistingIdentity(entry) && !droppedFirst) continue;
     const decided = decisionsFor(reading, f.name, f.signature);
     const missing = ALL_GRANTEES.filter((g) => !decided.has(g));
     if (missing.length) findings.push({ file, signature: f.signature, problem: "default_paths_not_handled", missing });

@@ -344,13 +344,34 @@ test("[PRIVILEGE-REGISTRY][MUTATION] NEW identity + missing four-path decision �
 });
 
 test("[PRIVILEGE-REGISTRY][MUTATION] EXISTING identity + body-only CREATE OR REPLACE → pass without any privilege SQL", () => {
-  const sql = `CREATE OR REPLACE FUNCTION public.known_fn(p_user_id uuid, p_n integer) RETURNS void
+  // 1. live + body-only CREATE OR REPLACE → PASS: the ACL survives the replacement.
+  const replace = `CREATE OR REPLACE FUNCTION public.known_fn(p_user_id uuid, p_n integer) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$ BEGIN PERFORM 2; END $$;`;
-  assert.deepEqual(checkMigration("x.sql", sql, FAKES, NEW), [],
+  assert.deepEqual(checkMigration("x.sql", replace, FAKES, NEW), [],
     "the ACL survives a CREATE OR REPLACE; forcing a body-only migration to rewrite privileges is the wrong invariant");
-  // Same for a plain CREATE of a live function (a re-creation after a DROP in another file).
+  // 2. live + plain CREATE without a four-path decision → FAIL. A plain CREATE is fresh object
+  //    creation to PostgreSQL: it fails if the function exists, and if it succeeds the object was
+  //    absent (dropped by some earlier migration) and received creation-time defaults.
   const plain = `CREATE FUNCTION public.known_fn(p uuid, n integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`;
-  assert.deepEqual(checkMigration("x.sql", plain, FAKES, NEW), []);
+  const f = checkMigration("x.sql", plain, FAKES, NEW);
+  assert.deepEqual(problems(f), ["default_paths_not_handled"]);
+  assert.deepEqual(f[0].missing, ["anon", "authenticated", "serviceRole", "public"]);
+  const plainProcedure = `CREATE PROCEDURE public.known_fn(p uuid, n integer) LANGUAGE sql AS $$ SELECT 1 $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", plainProcedure, FAKES, NEW)), ["default_paths_not_handled"]);
+  // 3. live + plain CREATE with the four paths decided in the registry's direction → PASS.
+  const decided = plain + `\n REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM PUBLIC, anon, authenticated;
+    GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO service_role;`;
+  assert.deepEqual(checkMigration("x.sql", decided, FAKES, NEW), []);
+  // 4. live + DROP then CREATE OR REPLACE → FAIL unless the four paths are decided.
+  const dropReplace = `DROP FUNCTION IF EXISTS public.known_fn(uuid, integer);\n` + replace;
+  assert.deepEqual(problems(checkMigration("x.sql", dropReplace, FAKES, NEW)), ["default_paths_not_handled"]);
+  assert.deepEqual(checkMigration("x.sql", dropReplace + `\n REVOKE ALL ON FUNCTION public.known_fn(uuid, integer) FROM PUBLIC, anon, authenticated;
+    GRANT EXECUTE ON FUNCTION public.known_fn(uuid, integer) TO service_role;`, FAKES, NEW), []);
+  // 5. planned/new + CREATE OR REPLACE → still requires the four paths.
+  const newReplace = `CREATE OR REPLACE FUNCTION public.new_fn(p uuid) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`;
+  assert.deepEqual(problems(checkMigration("x.sql", newReplace, FAKES, NEW)), ["default_paths_not_handled"]);
+  // Grandfathered history is exempt from the rule, not from registration.
+  assert.deepEqual(checkMigration("x.sql", plain, FAKES, { grandfathered: true }), []);
 });
 
 test("[PRIVILEGE-REGISTRY][MUTATION] EXISTING identity + explicit privilege change → validated against intent", () => {
