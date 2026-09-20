@@ -7,7 +7,8 @@ import {
   vraagTekst,
   vraagAntwoordPrefix,
   bouwAntwoordBericht,
-  vragenBannerTekst,
+  vragenBannerRegel,
+  openQuestionCount,
   VRAAG_STATUS,
   buildOpenInvoiceVragen,
   invoiceLabel,
@@ -103,11 +104,27 @@ test("een leeg antwoord wordt nooit verstuurd", () => {
   );
 });
 
-test("de banner telt in gewoon Nederlands en zwijgt bij nul", () => {
-  assert.equal(vragenBannerTekst(0), null);
-  assert.equal(vragenBannerTekst(-1), null);
-  assert.equal(vragenBannerTekst(1), "Je boekhouder heeft een vraag");
-  assert.equal(vragenBannerTekst(3), "Je boekhouder heeft 3 vragen");
+test("de banner geeft een sleutel en een aantal, en zwijgt bij nul", () => {
+  assert.equal(vragenBannerRegel(0), null);
+  assert.equal(vragenBannerRegel(-1), null);
+  assert.equal(vragenBannerRegel(Number.NaN), null);
+  assert.deepEqual(vragenBannerRegel(1), { key: "start.vragen.een", params: {} });
+  assert.deepEqual(vragenBannerRegel(3), { key: "start.vragen.meer", params: { n: 3 } });
+});
+
+test("[VRAGEN-TELLING] document, factuur, beide — en een mislukte lezing is geen nul", () => {
+  const ok = (n: number) => ({ count: n, error: null });
+  const fail = { count: null, error: { message: "permission denied for table accountant_subject_status" } };
+  assert.deepEqual(openQuestionCount(ok(1), ok(0)), { known: true, count: 1 }, "alleen een documentvraag");
+  assert.deepEqual(openQuestionCount(ok(0), ok(1)), { known: true, count: 1 }, "alleen een factuurvraag");
+  assert.deepEqual(openQuestionCount(ok(2), ok(3)), { known: true, count: 5 }, "allebei");
+  assert.deepEqual(openQuestionCount(ok(0), ok(0)), { known: true, count: 0 }, "niets open");
+  // [NO-SILENT-EMPTY] de helft die mislukte maakt het hele antwoord onbekend — nooit een kleiner getal
+  assert.deepEqual(openQuestionCount(fail, ok(4)), { known: false }, "documentlezing mislukt");
+  assert.deepEqual(openQuestionCount(ok(4), fail), { known: false }, "factuurlezing mislukt");
+  assert.deepEqual(openQuestionCount(fail, fail), { known: false }, "beide mislukt");
+  // en een telling die als null binnenkwam is geen telling
+  assert.deepEqual(openQuestionCount({ count: null, error: null }, ok(1)), { known: false });
 });
 
 test("de klant kan een vraag niet zelf afvinken — die weg bestaat hier niet", () => {

@@ -20,6 +20,8 @@ import { M3, FONT, FONT_NUM } from '@/lib/design/tokens'
 import { R } from '@/lib/design/tokens'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
+// [FROM-HOME] The resolve surface per row, with the way back written into the link.
+import { attentionHref } from '@/lib/home-links'
 
 const EL1 = '0 1px 2px rgba(0,0,0,0.08)'
 
@@ -171,12 +173,9 @@ export default function DailyTruth() {
   const allClear = toPay.count === 0 && toReceive.count === 0
 
   // incoming → the manage surface (pay / mark paid); outgoing → the invoice detail.
-  const openItem = (it: AttentionItem) =>
-    router.push(
-      it.direction === 'incoming'
-        ? `/dashboard/incoming/manage?focus=${it.id}`
-        : `/dashboard/invoice/${it.id}`
-    )
+  // [FROM-HOME] Marked as entered from the home, like the "Te betalen" card above: without the
+  // marker, Terug on the manage screen landed on the verify queue, which this visitor never saw.
+  const openItem = (it: AttentionItem) => router.push(attentionHref(it))
 
   return (
     <div style={{ marginBottom: 20, fontFamily: FONT }}>

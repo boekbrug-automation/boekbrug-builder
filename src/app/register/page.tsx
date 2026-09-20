@@ -747,10 +747,13 @@ function GoogleIcon() {
 }
 
 export default function RegisterPage() {
+  // [TAAL] Ook het wachtscherm — dezelfde reden als op /login: het is het eerste wat een bezoeker
+  // van /ar/blog hier ziet, en juist daarom viel het buiten elke sweep.
+  const t = translator(useLocale())
   return (
     <Suspense fallback={
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-gray-400 text-sm">Laden...</p>
+        <p className="text-gray-400 text-sm">{t('auth.laden')}</p>
       </div>
     }>
       <RegisterContent />

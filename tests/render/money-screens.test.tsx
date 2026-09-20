@@ -2273,8 +2273,20 @@ const homeClients = [
   { id: "c2", full_name: "Piet Pieters", company_name: null, email: "piet@example.nl" },
 ];
 
-test("[WERKVOORRAAD] de home toont de werkvoorraad als getallen, niet als tegels zonder tekst", async () => {
+// [MELDING-WAARHEID] The home's bell and its way out speak through the app's toast when a store
+// refuses, so the screen renders under the provider the root layout mounts — exactly as the app
+// mounts it. One helper, so the four renders below cannot drift apart on this.
+async function homeInToast(): Promise<React.ComponentType<Record<string, unknown>>> {
   const { default: AccountantHome } = await import("../../src/modules/accountant/pages/AccountantHome");
+  const { ToastProvider } = await import("../../src/components/ui/Toast");
+  const Wrapped = (props: Record<string, unknown>) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    React.createElement(ToastProvider, null, React.createElement(AccountantHome as any, props));
+  return Wrapped;
+}
+
+test("[WERKVOORRAAD] de home toont de werkvoorraad als getallen, niet als tegels zonder tekst", async () => {
+  const AccountantHome = await homeInToast();
 
   const html = renderToStaticMarkup(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2302,7 +2314,7 @@ test("[WERKVOORRAAD] de home toont de werkvoorraad als getallen, niet als tegels
 });
 
 test("[WERKVOORRAAD] nul-omdat-niets en nul-omdat-geen-machtiging zijn twee verschillende zinnen", async () => {
-  const { default: AccountantHome } = await import("../../src/modules/accountant/pages/AccountantHome");
+  const AccountantHome = await homeInToast();
 
   // Wél gemachtigd, niets te doen. Dit is een gerustheid en hoort zo te lezen.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2335,7 +2347,7 @@ test("[WERKVOORRAAD] nul-omdat-niets en nul-omdat-geen-machtiging zijn twee vers
 });
 
 test("[WERKVOORRAAD] een onbekende stand toont geen geruststellende nul", async () => {
-  const { default: AccountantHome } = await import("../../src/modules/accountant/pages/AccountantHome");
+  const AccountantHome = await homeInToast();
 
   // complete=false betekent: een van de reads faalde. Nul is dan geen feit maar een gebrek aan
   // feiten, en een werkbord dat dat als "niets te doen" toont, liegt op de plek waar het niet mag.
@@ -2362,7 +2374,7 @@ test("[WERKVOORRAAD] een onbekende stand toont geen geruststellende nul", async 
 });
 
 test("[WERKVOORRAAD] een boekhouder zonder enige machtiging krijgt geen leeg werkbord te zien", async () => {
-  const { default: AccountantHome } = await import("../../src/modules/accountant/pages/AccountantHome");
+  const AccountantHome = await homeInToast();
 
   // Nieuwe boekhouder: klanten gekoppeld, nog niets gemachtigd. Twee blokken met nul erin zeggen
   // hem niets — de weg naar een machtiging loopt via de schermen zelf, waar de knop staat.

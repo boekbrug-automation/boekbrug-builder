@@ -215,7 +215,10 @@ const PARENT_RULES: ParentRule[] = [
   // settings child, and it is reached from the settings list.
   {
     match: /^\/dashboard\/settings\/team$/,
-    parent: () => '/dashboard/settings',
+    // [FROM-HOME] Two doors: the settings list and the home's Team card. Unmarked → settings, as
+    // before; ?from=home → the home. The second-door case the logboek note below spells out — mark
+    // it, rather than send one group of visitors back through a screen they never saw.
+    parent: (_, role, search) => (search?.get('from') === 'home' ? getHomePath(role) : '/dashboard/settings'),
   },
 
   // ── bank/categoriseren → bank ────────────────────────────────────────────

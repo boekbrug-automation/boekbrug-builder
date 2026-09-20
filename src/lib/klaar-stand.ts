@@ -18,6 +18,21 @@
 // administratie. So an absent report keeps the original question, which is honest: we do not know
 // yet, open it and find out.
 
+import type { YearQuarter } from "./quarter";
+
+/**
+ * [KLAAR-KWARTAAL] The door's destination: the SAME period the verdict on it was measured for.
+ *
+ * The home asked /api/readiness for the CURRENT quarter and opened /dashboard/klaar bare, which
+ * initialises on lastCompletedQuarter() — so the line on the button and the page it opened spoke
+ * about two different quarters, precisely the drift quarter.ts exists to prevent. The period now
+ * travels in the URL and the page reads it back through quarterFromParams(): one source
+ * (lastCompletedQuarter) and one carrier (this path), so the two cannot come apart again.
+ */
+export function klaarPath(period: YearQuarter): string {
+  return `/dashboard/klaar?year=${period.year}&quarter=${period.quarter}`;
+}
+
 /** The three verdicts readiness produces, plus the honest fourth: we have not measured yet. */
 export type KlaarStand = "ready" | "almost" | "attention" | "unknown";
 

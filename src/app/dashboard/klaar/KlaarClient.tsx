@@ -8,7 +8,8 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import Link from 'next/link'
-import { lastCompletedQuarter } from '@/lib/quarter'
+import { useSearchParams } from 'next/navigation'
+import { quarterFromParams } from '@/lib/quarter'
 import { M3, FONT, FONT_NUM, COLUMN } from '@/lib/design/tokens'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { translator } from '@/lib/i18n/t'
@@ -74,7 +75,11 @@ const DIM_ICON: Record<DimensionKey, string> = {
 
 export default function KlaarClient() {
   const t = translator(useLocale())
-  const init = lastCompletedQuarter()
+  const searchParams = useSearchParams()
+  // [KLAAR-KWARTAAL] The period in the URL first — the home's door carries the quarter its verdict
+  // was measured for (klaarPath) — and otherwise the app-wide default, from the same function the
+  // home uses. Both surfaces therefore name ONE quarter, whichever way this screen was opened.
+  const init = quarterFromParams((k) => searchParams.get(k))
   const [year, setYear] = useState(init.year)
   // Typed number (not the lib's 1|2|3|4) so the quarter picker's setQuarter(q) accepts it.
   const [quarter, setQuarter] = useState<number>(init.quarter)

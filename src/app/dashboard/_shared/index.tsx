@@ -21,6 +21,9 @@ import { M3, FONT, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 import type { InvoiceStatusFilter, AccountantStatusFilter } from '@/hooks/useInfiniteInvoices'
 import type { ProfileRow, NotificationRow } from '@/types/rows'
 import { safeNotificationLink } from '@/lib/notification-link'
+// [MELDING-WAARHEID] The local view of "read", and how it is taken back when the store refuses.
+import { markedRead, rolledBack, isUnread, unreadIds, type ReadOverride } from '@/lib/notification-read'
+import { useToast } from '@/components/ui/Toast'
 // [LOGO-INITIALEN] Dezelfde functie als de factuur-PDF. Stond hier als een eigen regel die
 // "Kiwi Food Market" tot KF maakte terwijl de PDF er KM van maakte — één bedrijf, twee monogrammen.
 import { deriveInitials } from '@/lib/logo-initials'
@@ -359,7 +362,7 @@ export function NotificationsBell({
   notifications: NotificationRow[]
   showNotifications: boolean
   onToggle: () => void
-  onMarkAllRead?: () => void
+  onMarkAllRead?: () => Promise<boolean>
   // [NO-SILENT-EMPTY] De meldingen konden niet worden gelezen. Zonder deze stand toont de bel
   // "Geen meldingen" — de enige zin die dit paneel nooit mag zeggen als het het niet weet.
   loadError?: string | null
@@ -369,8 +372,9 @@ export function NotificationsBell({
 }) {
   const t = translator(useLocale())
   const router = useRouter()
+  const showToast = useToast()
   const bellRef = useRef<HTMLDivElement>(null)
-  const [readOverride, setReadOverride] = React.useState<Record<string, boolean>>({})
+  const [readOverride, setReadOverride] = React.useState<ReadOverride>({})
 
   useEffect(() => {
     if (!showNotifications) return
@@ -381,15 +385,46 @@ export function NotificationsBell({
     return () => document.removeEventListener('mousedown', handler)
   }, [showNotifications])
 
+  // [MELDING-WAARHEID] Optimistic, with an explicit rollback — see src/lib/notification-read.ts.
+  // The PATCH's answer used to go unread (a bare fetch in a try whose catch was empty), so a 401
+  // or a 500 left the row shown as read while it was not. Anything but a confirmed 2xx takes the
+  // local mark back and says so; the row is then unread again, which is the truth.
   async function markAsRead(id: string) {
-    setReadOverride(prev => ({ ...prev, [id]: true }))
+    setReadOverride(prev => markedRead(prev, [id]))
+    let stored = false
     try {
-      await fetch(`/api/notifications/${id}`, {
+      const res = await fetch(`/api/notifications/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ read: true }),
       })
-    } catch { /* silent — optimistic already applied */ }
+      stored = res.ok
+    } catch {
+      stored = false
+    }
+    if (!stored) {
+      setReadOverride(prev => rolledBack(prev, [id]))
+      showToast(t('kop.gelezenMislukt'), { tone: 'error' })
+    }
+  }
+
+  // [MELDING-WAARHEID] "Alles gelezen": the badge answers at once, and stays cleared only once the
+  // store confirmed it. The home's markAllRead reads the outcome of its UPDATE and returns it; a
+  // false takes back exactly the ids marked here — not an older mark the store did accept.
+  async function markAllReadLocally() {
+    if (!onMarkAllRead) return
+    const ids = unreadIds(notifications, readOverride)
+    setReadOverride(prev => markedRead(prev, ids))
+    let stored = false
+    try {
+      stored = await onMarkAllRead()
+    } catch {
+      stored = false
+    }
+    if (!stored) {
+      setReadOverride(prev => rolledBack(prev, ids))
+      showToast(t('kop.gelezenMislukt'), { tone: 'error' })
+    }
   }
 
   return (
@@ -415,7 +450,7 @@ export function NotificationsBell({
           notifications
         </span>
         {(() => {
-          const effectiveUnread = notifications.filter(n => !(readOverride[n.id] ?? n.read)).length
+          const effectiveUnread = unreadIds(notifications, readOverride).length
           return effectiveUnread > 0 ? (
             <span style={{
               position: 'absolute', top: 4, insetInlineEnd: 4,
@@ -442,17 +477,9 @@ export function NotificationsBell({
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #E0E0E0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
             <p style={{ fontSize: 14, fontWeight: 600, color: '#202124', margin: 0 }}>{t('kop.meldingen')}</p>
             {/* [BRIDGE-NOTIF] explicit mark-all-read — user stays in control, no auto-clear on open */}
-            {onMarkAllRead && notifications.some(n => !(readOverride[n.id] ?? n.read)) && (
+            {onMarkAllRead && unreadIds(notifications, readOverride).length > 0 && (
               <button
-                onClick={() => {
-                  // optimistic local clear so the badge/highlight update instantly
-                  setReadOverride(prev => {
-                    const next = { ...prev }
-                    notifications.forEach(n => { next[n.id] = true })
-                    return next
-                  })
-                  onMarkAllRead()
-                }}
+                onClick={() => void markAllReadLocally()}
                 style={{
                   background: 'none', border: 'none', cursor: 'pointer',
                   fontSize: 12, fontWeight: 500, color: '#1A73E8',
@@ -481,7 +508,7 @@ export function NotificationsBell({
                 // the value in this column is not necessarily one this app composed. The push
                 // side has always checked it; the screen did not, and did router.push() on it raw.
                 const href = safeNotificationLink(n.link)
-                const ongelezen = !(readOverride[n.id] ?? n.read)
+                const ongelezen = isUnread(n, readOverride)
                 // [MELDING-TIK] Every row responds to a tap, not only the ones that go somewhere.
                 // Measured on production: 295 of 1031 notifications (28,6%) carry no link at all —
                 // "Inkoopfactuur betaald" has one on none of its 96 rows. A tap on those did
@@ -537,12 +564,14 @@ export function NotificationsBell({
 
 function AccountantNavLinks() {
   const router = useRouter()
+  const t = translator(useLocale())
 
   const links = [
     // [ROLE-PARITY] 'Werkplek' link removed — the werkplek tools now live as a tile
     // grid on the accountant home, and the logo already returns there, so a nav
     // link to it was redundant. 'Klanten' stays as the one quick portfolio jump.
-    { label: 'Klanten',  href: '/dashboard/clients/beheer' },
+    // [TAAL] The same key the accountant's phone bar uses for this door.
+    { label: t('nav.clients'), href: '/dashboard/clients/beheer' },
   ]
 
   return (
@@ -587,9 +616,12 @@ function AccountantNavLinks() {
 
 function ZzpNavLinks() {
   const router = useRouter()
+  const t = translator(useLocale())
 
   const links = [
-    { label: 'Vandaag', href: '/dashboard/vandaag' },
+    // [TAAL] The same key the sub-page bar and the phone bar use for this screen — one screen,
+    // one key, so the three cannot come to call it two different things in any language.
+    { label: t('chrome.vandaag'), href: '/dashboard/vandaag' },
   ]
 
   return (
@@ -638,7 +670,7 @@ interface DashboardHeaderProps {
   onMessagesClick: () => void
   onLogout: () => void
   // [BRIDGE-NOTIF] explicit "mark all read" — replaces the old auto-clear on open
-  onMarkAllRead?: () => void
+  onMarkAllRead?: () => Promise<boolean>
   // [NO-SILENT-EMPTY] Doorgegeven aan de bel: melden dat de meldingen niet gelezen konden worden.
   notificationsError?: string | null
 }

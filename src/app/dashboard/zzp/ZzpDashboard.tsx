@@ -47,7 +47,9 @@
 import { useRouter } from 'next/navigation'
 import { useEffect, useState, type ReactNode } from 'react'
 // [KLAAR-STAND] The component holds no language of its own: this returns a key and a colour.
-import { klaarRegel, type KlaarBron } from '@/lib/klaar-stand'
+import { klaarRegel, klaarPath, type KlaarBron } from '@/lib/klaar-stand'
+// [KLAAR-KWARTAAL] The app-wide default quarter — the one the owner is asked to hand over.
+import { lastCompletedQuarter, type YearQuarter } from '@/lib/quarter'
 import { createClient } from '@/lib/supabase'
 import { DashboardHeader, type HeaderProfile } from '../_shared'
 import IntakeButton from '@/components/intake/IntakeButton'
@@ -57,7 +59,8 @@ import IntakeButton from '@/components/intake/IntakeButton'
 import DailyTruth from './DailyTruth'
 // [BRUG-RETOUR] De terugweg van de brug: een vraag van de boekhouder hoort op de home,
 // niet alleen in een notificatie die je één keer ziet.
-import { VRAAG_STATUS, vragenBannerTekst } from '@/lib/vragen'
+import { VRAAG_STATUS, openQuestionCount, vragenBannerRegel, type OpenQuestionCount } from '@/lib/vragen'
+import { useToast } from '@/components/ui/Toast'
 import type { NotificationRow } from '@/types/rows'
 // [DESIGN] Palette and radius come from the shared source now
 // (src/lib/design/tokens.ts). This file used to declare its own copy; see the
@@ -80,6 +83,7 @@ export function ZzpDashboard(
 ) {
   const router   = useRouter()
   const t        = translator(useLocale())
+  const showToast = useToast()
   const supabase = createClient()
 
   const [notifications, setNotifications]         = useState<NotificationRow[]>([])
@@ -90,12 +94,22 @@ export function ZzpDashboard(
   // [BOEK-029] BOEK-011 integration — pending incoming invoices count
   const [pendingCount, setPendingCount]           = useState<number>(0)
   // [BRUG-RETOUR] Openstaande vragen van de boekhouder over eigen documenten.
-  const [vragenCount, setVragenCount]             = useState<number>(0)
+  // [VRAGEN-TELLING] Both kinds the questions page lists, or the honest admission that we could
+  // not count them. null = not asked yet, and then nothing is drawn.
+  const [vragenStand, setVragenStand]             = useState<OpenQuestionCount | null>(null)
   // [KLAAR-STAND] The readiness verdict, or null while unknown — see klaar-stand.ts.
   const [klaarRapport, setKlaarRapport]           = useState<KlaarBron | null>(null)
+  // [KLAAR-KWARTAAL] The period that verdict was measured for; the door carries the same one.
+  const [klaarPeriod, setKlaarPeriod]             = useState<YearQuarter | null>(null)
 
   async function loadGlobal() {
-    const [{ data: link }, { data: notifData, error: notifErr }, { count, error: berichtenErr }, { count: vragen, error: vragenErr }] = await Promise.all([
+    const [
+      { data: link },
+      { data: notifData, error: notifErr },
+      { count, error: berichtenErr },
+      { count: documentVragen, error: documentVragenErr },
+      { count: invoiceVragen, error: invoiceVragenErr },
+    ] = await Promise.all([
       supabase.from('accountant_clients').select('accountant_id').eq('zzper_id', profile.id).maybeSingle(),
       supabase.from('notifications').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }).limit(20),
       supabase.from('messages').select('id', { count: 'exact', head: true }).eq('receiver_id', profile.id).eq('read', false),
@@ -103,6 +117,12 @@ export function ZzpDashboard(
       // van deze gebruiker; er is hier geen eigenaarskolom om op te filteren.
       supabase.from('accountant_subject_status').select('subject_id', { count: 'exact', head: true })
         .eq('subject_type', 'document').eq('status', VRAAG_STATUS),
+      // [VRAGEN-TELLING] And the questions about INVOICES — the second kind /dashboard/vragen has
+      // listed since [FACTUURVRAAG], which this count never saw. Its own query, never an OR on
+      // subject_type: the rows come through a second RLS policy (acc_status_client_read_invoice),
+      // and one query that needs both fails whole where that policy is not rolled out yet.
+      supabase.from('accountant_subject_status').select('subject_id', { count: 'exact', head: true })
+        .eq('subject_type', 'invoice').eq('status', VRAAG_STATUS),
     ])
     if (link?.accountant_id) setAccountantId(link.accountant_id)
     // [NO-SILENT-EMPTY] `if (notifData)` alleen liet een mislukte lezing als "Geen meldingen" op
@@ -121,20 +141,35 @@ export function ZzpDashboard(
     // niet. Een badge die wegblijft is stil; een badge die 0 zegt is een bewering — en de tweede
     // teller gaat over een openstaande VRAAG van de boekhouder, waar niet op reageren geld kost.
     setUnreadMessages(berichtenErr ? 0 : count || 0)
-    setVragenCount(vragenErr ? 0 : vragen || 0)
-    if (berichtenErr || vragenErr) {
+    // [VRAGEN-TELLING] Added up in one pure function — and a failed half is an UNKNOWN answer,
+    // never a smaller number. The banner then says it could not look, instead of staying away
+    // from a home that may have a question waiting on it.
+    setVragenStand(openQuestionCount(
+      { count: documentVragen, error: documentVragenErr },
+      { count: invoiceVragen, error: invoiceVragenErr },
+    ))
+    if (berichtenErr || documentVragenErr || invoiceVragenErr) {
       console.error('[NO-SILENT-EMPTY] tellers op het startscherm niet te lezen', {
-        berichten: berichtenErr?.message, vragen: vragenErr?.message,
+        berichten: berichtenErr?.message,
+        documentVragen: documentVragenErr?.message,
+        factuurVragen: invoiceVragenErr?.message,
       })
     }
 
-    // [KLAAR-STAND] The verdict for the CURRENT quarter, so the button below can answer instead of
-    // ask. Same endpoint /dashboard/klaar opens with; a failure leaves the report null, and
-    // klaarRegel then keeps the question — never a green on a quarter nobody measured.
+    // [KLAAR-STAND] The verdict, so the button below can answer instead of ask. A failure leaves
+    // the report null, and klaarRegel then keeps the question — never a green on a quarter nobody
+    // measured.
+    //
+    // [KLAAR-KWARTAAL] For the quarter the owner is actually asked to hand over: the LAST COMPLETED
+    // one, the app-wide default from quarter.ts, on the Amsterdam day. This used to ask for the
+    // CURRENT quarter off the device clock while /dashboard/klaar opened on lastCompletedQuarter(),
+    // so the line on the button and the page behind it spoke about two different quarters. Now one
+    // call decides the period, the fetch uses it, and the door carries it (klaarPath), so the page
+    // reads back exactly what was measured.
+    const period = lastCompletedQuarter()
+    setKlaarPeriod(period)
     try {
-      const nu = new Date()
-      const kwartaal = Math.floor(nu.getMonth() / 3) + 1
-      const res = await fetch(`/api/readiness?year=${nu.getFullYear()}&quarter=${kwartaal}`)
+      const res = await fetch(`/api/readiness?year=${period.year}&quarter=${period.quarter}`)
       if (res.ok) {
         const json = await res.json()
         setKlaarRapport(json?.report ?? null)
@@ -162,11 +197,14 @@ export function ZzpDashboard(
   // React-compiler niet te volgen (en breekt zodra iemand er een closure-waarde in gebruikt).
   useEffect(() => { void (async () => { await loadGlobal() })() }, [])
 
-  async function markAllRead() {
+  async function markAllRead(): Promise<boolean> {
     // Het scherm mag pas "gelezen" tonen als het ook echt is opgeslagen. De uitkomst werd hier
     // genegeerd: de bel ging op nul, en bij de volgende keer openen stonden dezelfde meldingen
     // er weer ongelezen bij — zonder dat iets uitlegde waarom. Bij een bel die zegt dat je
     // boekhouder iets van je wil, is dat het verkeerde soort ruis om te negeren.
+    //
+    // [MELDING-WAARHEID] The outcome is RETURNED as well: the bell marks its rows read the moment
+    // the button is pressed and takes that back on a false — see src/lib/notification-read.ts.
     const { error } = await supabase
       .from('notifications')
       .update({ read: true })
@@ -174,15 +212,20 @@ export function ZzpDashboard(
       .eq('read', false)
     if (error) {
       console.error('[HOME] meldingen als gelezen markeren mislukt:', error.message)
-      return
+      return false
     }
     setNotifications(prev => prev.map(n => ({ ...n, read: true })))
+    return true
   }
 
-  const firstName = profile.full_name?.split(' ')[0] ?? 'daar'
+  // [GROET] The first name, or the catalogue's "daar" when the profile has none. `''` is not
+  // nullish, so an owner with an empty name used to be greeted with an emoji and nothing else.
+  const firstName = profile.full_name?.trim().split(/\s+/)[0] || t('bh.home.groet.daar')
 
   // [KLAAR-STAND] Derived in render, never stored: one source of truth for the line.
   const klaarStand = klaarRegel(klaarRapport)
+  // [VRAGEN-TELLING] Likewise: a key and its count, derived in render from the one answer.
+  const vragenRegel = vragenStand?.known ? vragenBannerRegel(vragenStand.count) : null
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#F8F9FA', fontFamily: FONT, WebkitFontSmoothing: 'antialiased' }}>
@@ -194,20 +237,31 @@ export function ZzpDashboard(
         onToggleNotifications={() => { setShowNotifications(p => !p) }}
         onMarkAllRead={markAllRead}
         onMessagesClick={() => accountantId ? router.push(`/dashboard/messages/${accountantId}`) : router.push('/dashboard/messages')}
-        onLogout={async () => { await supabase.auth.signOut(); router.push('/login') }}
+        onLogout={async () => {
+          // [UITLOGGEN] signOut() keeps the local session when the server refused, so navigating to
+          // /login as if it worked only bounced the owner straight back here, with no word. Say it,
+          // and stay signed in — which is the truth.
+          const { error } = await supabase.auth.signOut()
+          if (error) {
+            console.error('[HOME] uitloggen mislukt:', error.message)
+            showToast(t('kop.uitloggenMislukt'), { tone: 'error' })
+            return
+          }
+          router.push('/login')
+        }}
       />
 
       <main style={{ maxWidth: COLUMN.hub, margin: '0 auto', padding: '32px 16px 100px' }}>
 
         {/* Greeting */}
-        <p style={{ fontSize: 12, color: '#5F6368', marginBottom: 2, fontWeight: 500, letterSpacing: 0.2 }}>GOEDENDAG</p>
+        <p style={{ fontSize: 12, color: '#5F6368', marginBottom: 2, fontWeight: 500, letterSpacing: 0.2, textTransform: 'uppercase' }}>{t('start.goedendag')}</p>
         <h1 style={{ fontSize: 28, fontWeight: 700, color: M3.onSurface, marginBottom: 28, letterSpacing: -0.5 }}>
           {firstName} 👋
         </h1>
         {/* [BRUG-RETOUR] Een mens wacht op je. Dit staat bewust bóven de cijfers: een vraag
             van je boekhouder is het enige op deze pagina waar iemand anders op zit te
             wachten. Verschijnt alleen als er echt iets openstaat — nooit als lege balk. */}
-        {vragenCount > 0 && (
+        {vragenRegel && (
           <button
             onClick={() => router.push('/dashboard/vragen')}
             style={{
@@ -220,13 +274,37 @@ export function ZzpDashboard(
             <span className="material-symbols-outlined" style={{ fontSize: 24, color: '#7a4f00' }} aria-hidden>help</span>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={{ display: 'block', fontSize: 15.5, fontWeight: 700, color: '#5a3e00' }}>
-                {vragenBannerTekst(vragenCount)}
+                {t(vragenRegel.key, vragenRegel.params)}
               </span>
               <span style={{ display: 'block', fontSize: 12.5, color: '#7a4f00', marginTop: 2 }}>
                 {t('start.vraag')}
               </span>
             </span>
             <span className="material-symbols-outlined icon-dir" style={{ fontSize: 20, color: '#7a4f00' }} aria-hidden>chevron_right</span>
+          </button>
+        )}
+        {/* [NO-SILENT-EMPTY] The count could not be read. Not the amber banner — nothing is known
+            to be waiting — and not silence either, which on this screen reads as "nothing waits".
+            A muted row that says so, and opens the questions screen, which reports its own reads. */}
+        {vragenStand?.known === false && (
+          <button
+            onClick={() => router.push('/dashboard/vragen')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 12, width: '100%', textAlign: 'start',
+              padding: '13px 16px', borderRadius: R.lg, cursor: 'pointer', fontFamily: 'inherit',
+              border: `1px solid ${M3.outlineVariant}`, background: M3.surface, marginBottom: 18,
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 22, color: M3.onSurfaceVariant }} aria-hidden>help</span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: M3.onSurface }}>
+                {t('start.vragen.onbekend')}
+              </span>
+              <span style={{ display: 'block', fontSize: 12.5, color: '#5F6368', marginTop: 2 }}>
+                {t('start.vragen.onbekend.sub')}
+              </span>
+            </span>
+            <span className="material-symbols-outlined icon-dir" style={{ fontSize: 20, color: '#80868b' }} aria-hidden>chevron_right</span>
           </button>
         )}
 
@@ -240,7 +318,7 @@ export function ZzpDashboard(
             handover. Deliberately prominent (not a menu row) — it's the answer the
             store owner actually comes for. */}
         <button
-          onClick={() => router.push('/dashboard/klaar')}
+          onClick={() => router.push(klaarPath(klaarPeriod ?? lastCompletedQuarter()))}
           style={{
             display: 'flex', alignItems: 'center', gap: 14, width: '100%', textAlign: 'start',
             padding: '18px 18px', borderRadius: R.lg, cursor: 'pointer', fontFamily: 'inherit',
@@ -433,7 +511,9 @@ export function ZzpDashboard(
               <ActionCard
                 icon={doorLook('/dashboard/settings/team').icon} iconBg={doorLook('/dashboard/settings/team').tint} iconColor="#fff"
                 label={t('start.tegel.team')} sub={t('start.team.sub')}
-                onClick={() => router.push('/dashboard/settings/team')}
+                // [FROM-HOME] Marked: this screen's parent is Instellingen, which the visitor who
+                // tapped a home tile never passed. The parent rule reads the marker and returns here.
+                onClick={() => router.push('/dashboard/settings/team?from=home')}
               />
             </div>
           </section>
