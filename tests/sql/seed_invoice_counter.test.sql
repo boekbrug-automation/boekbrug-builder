@@ -1,4 +1,4 @@
--- migrations: seed_invoice_counter.sql
+-- migrations: seed_invoice_counter.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] seed_invoice_counter, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

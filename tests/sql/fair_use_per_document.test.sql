@@ -1,4 +1,4 @@
--- migrations: fair_use_usage.sql, ontvangen_fair_use_per_document.sql
+-- migrations: fair_use_usage.sql, ontvangen_fair_use_per_document.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] One received document costs at most one aiDocument — against a real PostgreSQL.
 -- Run: npm run test:sql

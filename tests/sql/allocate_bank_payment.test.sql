@@ -1,4 +1,4 @@
--- migrations: allocate_bank_payment.sql, bank_rpc_never_payable_states.sql
+-- migrations: allocate_bank_payment.sql, bank_rpc_never_payable_states.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] allocate_bank_payment, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

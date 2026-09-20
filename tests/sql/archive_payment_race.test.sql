@@ -1,4 +1,4 @@
--- migrations: invoice_manual_payments.sql, invoice_manual_payment_idempotency_scope.sql
+-- migrations: invoice_manual_payments.sql, invoice_manual_payment_idempotency_scope.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [SEAM] Archiving an invoice while a payment lands on it, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

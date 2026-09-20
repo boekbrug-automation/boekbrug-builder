@@ -1,4 +1,4 @@
--- migrations: bank_confirm_atomic.sql, bank_rpc_never_payable_states.sql
+-- migrations: bank_confirm_atomic.sql, bank_rpc_never_payable_states.sql, rpc_anon_revoke.sql, confirm_bank_payment_regrant.sql
 -- =====================================================================
 -- [SEAM] confirm_bank_payment, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)

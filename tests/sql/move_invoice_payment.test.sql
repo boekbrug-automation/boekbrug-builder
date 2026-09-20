@@ -1,4 +1,4 @@
--- migrations: invoice_move_payment.sql, invoice_move_payment_creditnota_guard.sql
+-- migrations: invoice_move_payment.sql, invoice_move_payment_creditnota_guard.sql, rpc_anon_revoke.sql
 -- =====================================================================
 -- [MOVE-PAYMENT] move_invoice_payment, against a real PostgreSQL.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)
