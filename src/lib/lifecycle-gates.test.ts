@@ -38065,3 +38065,143 @@ test("[KANTOOR-PERIODE] an item that leads somewhere looks different from one th
   assert.match(regel, /color: M3\.onSurface \}\}>\{item\.text\}<\/span>/, "the plain finding changed ink");
   assert.doesNotMatch(regel, /disabled|cursor: 'not-allowed'/, "a dead affordance appeared");
 });
+
+// ─── [KWT-TABS] The invoice evidence is three views, not three walls ──────────────────────────
+//
+// The accountant's quarter screen rendered Debiteuren, Crediteuren and Voldaan one under the
+// other. They are not a sequence — they are the same quarter seen three ways — and for a retail
+// client that stack is several screens long, so the accountant scrolled past two complete lists to
+// reach the one they opened the screen for.
+//
+// Turning them into tabs is presentation only, and it is presentation with four ways to go quietly
+// wrong. Each of these gates holds one of them:
+//
+//   · a tab that fetches. The rows are already in memory; a tab keyed into an effect would turn
+//     every click into two Supabase queries and a reconciliation read.
+//   · a tab that eats the period. `q` and `year` ARE this screen; dropping them on a view change
+//     would move the accountant to another quarter without saying so.
+//   · a tab that beats the deep link. Batch 2 promises a notification lands on its invoice, and
+//     `tab=debiteuren&focus=<a purchase invoice>` must not honour the tab and hide the row.
+//   · a tab that hides the work. Aandachtspunten, the figures and the actions are Batch 3's
+//     hierarchy and stay in the open. Only the evidence is tabbed.
+//
+// The rules themselves are proven in src/lib/period-invoice-tabs.test.ts and the DOM contract in
+// tests/render/kwartaal-factuur-tabs.test.tsx. These watch the WIRING, which neither can see.
+
+test("[KWT-TABS] switching view reads nothing — the rows are already here", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // The selected view reaches no effect. Every read on this screen is keyed on the PERIOD, and a
+  // tab in one of those dependency arrays is a request per click — for rows the page holds.
+  for (const deps of page.matchAll(/\}, \[([^\]]*)\]\)/g)) {
+    for (const naam of ["actieveTab", "focusTab", "urlTab", "tabTellingen"])
+      assert.ok(!deps[1].includes(naam),
+        `an effect re-runs on the selected tab (deps: [${deps[1].trim()}]) — every click would refetch`);
+  }
+  // The two invoice queries and the reconciled figures stay where they were: one effect, on the
+  // period. Counted, because a second copy is how "one fetch per tab" would arrive.
+  for (const bron of ["/api/result", "/api/aangifte"])
+    assert.equal((page.match(new RegExp(bron.replace(/\//g, "\\/"), "g")) ?? []).length, 1,
+      `${bron} is read more than once`);
+  // The panel projects what is in memory; it does not go and get it.
+  assert.match(page, /const zichtbareRijen = invoiceTabRows\(shown, actieveTab\)/,
+    "the selected view is no longer a projection over the rows already read");
+});
+
+test("[KWT-TABS] choosing a view keeps the period, the deep link and the search", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // Built from the URL that is there, not from scratch. A hand-written `?q=${q}&year=${year}` is
+  // how `focus` — and anything added later — gets dropped without anybody noticing.
+  assert.match(page, /router\.push\(invoiceTabHref\(pathname, searchParams\.toString\(\), key\), \{ scroll: false \}\)/,
+    "the tab href no longer carries the rest of the query string, or the page scrolls on a view change");
+  // Pushed, so Back returns to the view the accountant came from.
+  assert.doesNotMatch(page, /router\.replace\(invoiceTabHref/, "a view change stopped being reversible");
+
+  // The tab is read FROM the URL rather than held only in memory, or a refresh and a shared link
+  // would both land somewhere else than the screen the accountant is looking at.
+  assert.match(page, /const urlTab = readInvoiceTab\(searchParams\.get\('tab'\)\)/,
+    "the selected view no longer survives a refresh");
+
+  // Search, sort and the open row belong to the page, above the panel — so switching view is not a
+  // page reload. A `key` on the panel would remount the subtree and throw all three away.
+  for (const state of ["const [search, setSearch]", "const [sortAsc, setSortAsc]", "const [expandedId, setExpandedId]"])
+    assert.ok(page.includes(state), `${state} left the page — a tab switch would now reset it`);
+  const paneel = page.indexOf('role="tabpanel"');
+  assert.ok(paneel > 0, "there is no tabpanel — this gate is measuring nothing");
+  const paneelKop = page.slice(paneel, page.indexOf(">", paneel));
+  assert.doesNotMatch(paneelKop, /\bkey=/, "the panel is keyed on the tab — every switch remounts the rows");
+});
+
+test("[KWT-TABS] a focused invoice outranks the tab, and is mounted before it is measured", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // Focus first, URL second. The other order hides the row a notification exists to show.
+  assert.match(page, /const actieveTab: InvoiceTabKey = focusTab \?\? urlTab/,
+    "the URL's tab now outranks the focused invoice — a deep link can land on the wrong list");
+  // Resolved from the ROW, through the section predicates, so the tab and the list agree.
+  assert.match(page, /const focusSectie = focusInvoiceTab\(focusId, invoices\)/,
+    "the focused invoice's section is no longer read off the row itself");
+
+  // [GATE-VENSTER] Real code at both ends, both asserted found, the end searched after the start.
+  const start = page.indexOf("const focusSectie = focusInvoiceTab(");
+  assert.notEqual(start, -1, "the focus effect is not where this gate expects it");
+  const eind = page.indexOf("setHighlightId(null)", start);
+  assert.notEqual(eind, -1, "the end of the focus effect is not where this gate expects it");
+  const effect = page.slice(start, eind);
+  assert.ok(effect.length > 200 && effect.length < 1200, `the focus window is ${effect.length} characters`);
+
+  // The panel has to switch BEFORE the row is measured: landRowUnderChrome() reads a bounding box,
+  // and a row inside an unmounted panel has none. So the tab is set first, the scroll is scheduled
+  // after — in that order, in one effect.
+  const zet = effect.indexOf("setFocusTab(focusSectie)");
+  const land = effect.indexOf("landRowUnderChrome(");
+  assert.ok(zet > 0 && land > zet,
+    "the focused row is measured before its panel is selected — it would land on nothing");
+  assert.ok(effect.indexOf("setExpandedId(focusId)") > zet,
+    "the row is expanded before its panel is selected");
+});
+
+test("[KWT-TABS] a count is only ever drawn over a read that answered", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // [NO-SILENT-EMPTY] «Crediteuren 0» over a failed read says this client booked no purchase
+  // invoices this quarter. Null means "draw no number", and both the pending read (`lezing` null)
+  // and the failed one (`lezing.error`) must reach it.
+  assert.match(page, /countInvoiceTabs\(lezing && !lezing\.error \? shown : null\)/,
+    "the tab counts can now be taken from a read that failed or never answered");
+  // Counted over `shown`, so a search narrows the numbers with the lists rather than promising
+  // eight invoices and opening on none.
+  assert.doesNotMatch(page, /countInvoiceTabs\((?:invoices|sorted)\b/, "the counts stopped following the search");
+
+  // The heading above the strip obeys the same rule. It used to read "Facturen (0)" directly above
+  // the sentence explaining that nothing could be read.
+  assert.match(page, /\{!loadError && \(\s*<span[^>]*>\s*\(\{invoices\.length\}\)/,
+    "the invoice total is printed again over a read that failed");
+});
+
+test("[KWT-TABS] a view change never throws away a proposal the accountant has typed", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // VoorstelFormulier owns its own draft — five amounts and the REASON the client will read — so
+  // unmounting its row takes them with it. It opens only on a booked, unpaid purchase invoice,
+  // which is only ever in Crediteuren, so leaving that view is the one move that loses the work.
+  const form = code("src/app/dashboard/clients/[id]/VoorstelFormulier.tsx");
+  assert.match(form, /const \[reden, setReden\] = useState\(''\)/,
+    "the draft moved out of the form — this gate is watching the wrong thing");
+
+  // [GATE-VENSTER] Real code at both ends, both asserted found, the end searched after the start.
+  const start = page.indexOf("async function naarTab(");
+  assert.notEqual(start, -1, "the tab navigation is not where this gate expects it");
+  const eind = page.indexOf("router.push(invoiceTabHref(", start);
+  assert.notEqual(eind, -1, "the tab navigation no longer navigates");
+  const venster = page.slice(start, eind);
+  assert.ok(venster.length > 100 && venster.length < 900, `the navigation window is ${venster.length} characters`);
+
+  // The question comes BEFORE the navigation, and a refusal leaves the screen exactly as it was.
+  assert.match(venster, /if \(voorstelOpenVoor\) \{/, "an open proposal no longer stops a view change");
+  assert.match(venster, /await dialog\.confirm\(\{/, "the draft is discarded without a word");
+  assert.match(venster, /if \(!weg\) return/, "declining the question navigates anyway");
+  // …and nothing is written either way: this refuses a navigation, it does not undo anything.
+  assert.doesNotMatch(venster, /fetch\(|supabase/, "a view change started writing to the server");
+});

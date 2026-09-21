@@ -15263,6 +15263,9 @@ export const MESSAGES = {
   'bh.kwt.sectie.crediteurenSub': { nl: 'ontvangen — nog te betalen', ar: 'واردة — لم تُدفع بعد', en: 'received — not yet paid' },
   'bh.kwt.sectie.voldaan': { nl: 'Voldaan', ar: 'مسدَّدة', en: 'Settled' },
   'bh.kwt.sectie.voldaanSub': { nl: 'betaald', ar: 'مدفوعة', en: 'paid' },
+  // [KWT-TABS] The selected view is empty while the quarter is not. Its own sentence, because
+  // 'Geen facturen in Q3 2026' would be a claim about the whole quarter made by one of three tabs.
+  'bh.kwt.sectie.geen': { nl: 'Geen facturen in deze lijst', ar: 'لا فواتير في هذه القائمة', en: 'No invoices in this list' },
   'bh.kwt.kop': { nl: 'Q{q} {jaar}', ar: 'الربع {q} {jaar}', en: 'Q{q} {jaar}' },
   'bh.kwt.kop.metKlant': { nl: 'Q{q} {jaar} — {klant}', ar: 'الربع {q} {jaar} — {klant}', en: 'Q{q} {jaar} — {klant}' },
   'bh.kwt.sorteerOudste': { nl: 'Oudste ↑', ar: 'الأقدم ↑', en: 'Oldest ↑' },
@@ -15317,6 +15320,12 @@ export const MESSAGES = {
   'bh.kwt.voorstel.status.accepted': { nl: 'Voorstel overgenomen', ar: 'قُبل الاقتراح', en: 'Proposal accepted' },
   'bh.kwt.voorstel.status.declined': { nl: 'Voorstel afgewezen', ar: 'رُفض الاقتراح', en: 'Proposal declined' },
   'bh.kwt.voorstel.status.stale': { nl: 'Voorstel vervallen', ar: 'انتهت صلاحية الاقتراح', en: 'Proposal lapsed' },
+  // [KWT-TABS] The proposal form holds its own draft, so the row unmounting takes the typed reason
+  // with it. It can only be open on a purchase invoice, so leaving Crediteuren is the one move
+  // that loses it — and on this screen work may not disappear without a word.
+  'bh.kwt.voorstel.wegVraag': { nl: 'Voorstel niet verstuurd', ar: 'لم يُرسَل الاقتراح', en: 'Proposal not sent' },
+  'bh.kwt.voorstel.wegUitleg': { nl: 'Je correctie is nog niet verstuurd. Ga je naar een andere lijst, dan is hij weg.', ar: 'تصحيحك لم يُرسَل بعد. إذا انتقلت إلى قائمة أخرى فسيضيع.', en: 'Your correction has not been sent yet. If you go to another list, it is gone.' },
+  'bh.kwt.voorstel.wegKnop': { nl: 'Voorstel weggooien', ar: 'حذف الاقتراح', en: 'Discard the proposal' },
   'bh.det.laden': { nl: 'Laden...', ar: 'جارٍ التحميل…', en: 'Loading...' },
   'bh.det.ontkoppelTitel': { nl: 'Klant ontkoppelen?', ar: 'إلغاء ربط العميل؟', en: 'Unlink client?' },
   'bh.det.ontkoppelUitleg': { nl: 'Je verliest de toegang tot de administratie van {naam}. Hij houdt alles zelf; later opnieuw koppelen kan.', ar: 'ستفقد الوصول إلى دفاتر {naam}. يحتفظ هو بكل شيء؛ ويمكن الربط من جديد لاحقًا.', en: 'You lose access to the books of {naam}. They keep everything; you can link again later.' },

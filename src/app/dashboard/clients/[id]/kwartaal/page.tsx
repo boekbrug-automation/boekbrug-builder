@@ -10,8 +10,16 @@
 
 import { useState, useEffect, useMemo, useRef } from 'react'
 import Aandachtspunten from '@/components/kantoor/Aandachtspunten'
+// [KWT-TABS] The invoice evidence is three sibling views of one dataset, not three stacked lists.
+// The rules for choosing between them — including that a ?focus= deep link outranks ?tab= — live
+// in the pure module; the strip that renders them holds no language of its own.
+import FactuurTabs from '@/components/kantoor/FactuurTabs'
+import {
+  countInvoiceTabs, focusInvoiceTab, invoiceSection, invoiceTabHref, invoiceTabId,
+  invoiceTabPanelId, invoiceTabRows, readInvoiceTab, type InvoiceTabKey,
+} from '@/lib/period-invoice-tabs'
 import { createClient } from '@/lib/supabase'
-import { useRouter, useParams, useSearchParams } from 'next/navigation'
+import { useRouter, useParams, usePathname, useSearchParams } from 'next/navigation'
 import { useSubPageHeader } from '@/components/nav/SubPageHeaderContext'
 import { rowMatchesQuery } from '@/lib/search'
 import type { InvoiceRow, ProfileRow } from '@/types/rows'
@@ -27,6 +35,9 @@ import { acceptStamped, periodIdentity, readFor, stampFor, type Stamped } from '
 import type { SeriesReport } from '@/lib/invoice-continuity'
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
+// [KWT-TABS] Direction travels with the words: in Arabic the tab strip lays out right to left and
+// ArrowRight therefore means the PREVIOUS tab.
+import { LOCALE_META } from '@/lib/i18n/locale'
 import { isOverdue } from '@/components/invoice/InvoiceRow'
 // [TEKST-SELECTIE] Een sleep die tekst selecteert is geen tik op de rij: de kaart klapte
 // open en dicht terwijl de eigenaar een factuurnummer probeerde te kopiëren.
@@ -84,6 +95,10 @@ const QUARTER_RANGES: Record<number, { start: string; end: string; label: string
   4: { start: '-10-01', end: '-12-31', label: 'okt – dec' },
 }
 
+// [KWT-TABS] The invoice heading names the tab strip below it (aria-labelledby), so a screen
+// reader announces "Facturen, tab 2 of 3" rather than three unattached controls.
+const FACTUREN_KOP_ID = 'kwt-facturen-kop'
+
 // [BOEK-028] Fixed Dutch formatting — never changes
 const NL_NUMBER = new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR' })
 // [TZ] timeZone PINNED. fmt() is called with BOTH a date-only column (invoice_date — midnight
@@ -109,15 +124,11 @@ function getBtwRate(inv: KwartaalInvoice): number {
   return Math.round(((inv.btw_amount ?? 0) / inv.total_ex_btw) * 100)
 }
 
-// [BRIDGE-A] Accounting split — section definitions (accountant terminology)
-const SECTIONS = [
-  { key: 'debiteuren',  titleKey: 'bh.kwt.sectie.debiteuren',  subKey: 'bh.kwt.sectie.debiteurenSub',
-    filter: (i: KwartaalInvoice) => i.direction === 'outgoing' && i.status === 'sent' },
-  { key: 'crediteuren', titleKey: 'bh.kwt.sectie.crediteuren', subKey: 'bh.kwt.sectie.crediteurenSub',
-    filter: (i: KwartaalInvoice) => i.direction === 'incoming' && i.status === 'received' },
-  { key: 'voldaan',     titleKey: 'bh.kwt.sectie.voldaan',     subKey: 'bh.kwt.sectie.voldaanSub',
-    filter: (i: KwartaalInvoice) => i.status === 'paid' },
-] as const
+// [BRIDGE-A][KWT-TABS] The accounting split MOVED to src/lib/period-invoice-tabs.ts, unchanged —
+// the same three predicates, in the same order. It moved because the tab an invoice belongs to and
+// the list it is rendered in have to be one answer: two copies of "outgoing and sent" would drift,
+// and the drift would put a receivable under Crediteuren, where an accountant would book it wrong.
+// It also made the rules testable without a browser, which is the half that was never checked.
 
 // [OVER-DATUM] Verlopen wordt bij het tonen berekend, nooit opgeslagen — maar door de ENE bron.
 //
@@ -173,6 +184,7 @@ export default function KwartaalPage() {
   const toast = useToast()
   const router       = useRouter()
   const params       = useParams()
+  const pathname     = usePathname()
   const searchParams = useSearchParams()
   const supabase     = createClient()
 
@@ -264,6 +276,54 @@ export default function KwartaalPage() {
   const focusId = searchParams.get('focus')
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+
+  // ── [KWT-TABS] Which of the three invoice views is on screen ───────────────
+  //
+  // The URL is the answer, so the view survives a refresh, travels in a shared link and comes back
+  // under the browser's Back button. An unreadable `tab` is not an error worth a screen about:
+  // readInvoiceTab falls to Debiteuren, which is a real answer.
+  //
+  // `focusTab` is the one thing allowed to outrank it, and only until the accountant says
+  // otherwise. Batch 2 promises that a notification lands on its invoice; a link carrying
+  // `focus=<a purchase invoice>&tab=debiteuren` — a stale bookmark, a link built before the
+  // invoice was paid — would honour the tab and hide the row the link exists for. It is held in
+  // state rather than written into the URL so the panel switches in the SAME render as the reveal:
+  // landRowUnderChrome() measures a row, and a row in an unmounted panel has no box to measure.
+  const urlTab = readInvoiceTab(searchParams.get('tab'))
+  const [focusTab, setFocusTab] = useState<InvoiceTabKey | null>(null)
+  const actieveTab: InvoiceTabKey = focusTab ?? urlTab
+
+  /** Choosing a view. Only `tab` changes — `q`, `year` and `focus` are this screen's identity and
+   *  its deep link, and a query string that quietly drops half of itself turns a view change into
+   *  a navigation. Pushed, not replaced, so Back returns to the view the accountant came from; and
+   *  `scroll: false` because the rows move, not the page. */
+  const kiesTab = (key: InvoiceTabKey) => { void naarTab(key) }
+
+  async function naarTab(key: InvoiceTabKey) {
+    if (key === actieveTab) return
+    // [KWT-TABS] The one thing a view change can destroy. VoorstelFormulier holds its own draft —
+    // the amounts AND the reason the accountant has typed for the client to read — so unmounting
+    // its row takes them with it. The form only opens on a booked, unpaid PURCHASE invoice, which
+    // is only ever in Crediteuren, so leaving that view is the single move that loses it.
+    //
+    // Never in silence. On a screen whose job is asserting what has been checked, work that
+    // disappears without a word is the defect; one question is not the friction it looks like.
+    // Nothing is written here either way — this refuses a navigation, it does not undo anything.
+    if (voorstelOpenVoor) {
+      const weg = await dialog.confirm({
+        title: t('bh.kwt.voorstel.wegVraag'),
+        message: t('bh.kwt.voorstel.wegUitleg'),
+        confirmLabel: t('bh.kwt.voorstel.wegKnop'),
+        danger: true,
+      })
+      if (!weg) return
+      setVoorstelOpenVoor(null)
+    }
+    // From here on the accountant's own choice wins: otherwise the focused invoice would drag the
+    // panel back every time they looked at another view.
+    setFocusTab(null)
+    router.push(invoiceTabHref(pathname, searchParams.toString(), key), { scroll: false })
+  }
 
   useEffect(() => {
     // [KANTOOR-PERIODE] The cancellation half of the contract. React runs this cleanup before the
@@ -506,10 +566,20 @@ export default function KwartaalPage() {
 
   // [BRIDGE-NOTIF] When invoices are loaded and a ?focus= row exists, reveal it.
   useEffect(() => {
-    if (!focusId || loading) return
-    if (!invoices.some(i => i.id === focusId)) return
+    if (loading) return
+    // [KWT-TABS] Which view the deep link forces — read off the ROW, through the same predicates
+    // the list renders, so the tab and the list cannot disagree about where an invoice lives.
+    //
+    // Null is set deliberately, not skipped. It is the answer when the link carries no focus, and
+    // when the focused invoice is not in this quarter — and it is what clears the previous
+    // period's answer when the accountant moves to another quarter, so a Q2 section can never pin
+    // the panel in Q3. With focusTab null the URL's own tab governs again.
+    const focusSectie = focusInvoiceTab(focusId, invoices)
     // De onthulling hoort bij dezelfde beweging als het scrollen: binnen de wikkel draait
     // ze in dezelfde tick, maar telt ze niet als synchrone setState in de effect-body.
+    void (async () => { setFocusTab(focusSectie) })()
+    if (!focusId) return
+    if (!invoices.some(i => i.id === focusId)) return
     void (async () => {
       setExpandedId(focusId)
       setHighlightId(focusId)
@@ -539,6 +609,20 @@ export default function KwartaalPage() {
   const shown = rawKw
     ? sorted.filter((inv) => rowMatchesQuery(rawKw, [inv.invoice_number, inv.client_name], [getAmount(inv)]))
     : sorted
+
+  // [KWT-TABS] What each tab will actually show — or NOTHING at all. countInvoiceTabs answers null
+  // for a read that failed and for one that has not come back, and the strip then draws no number:
+  // «Crediteuren 0» over a dead socket says this client booked no purchase invoices this quarter,
+  // which is a claim about someone else's administration that a failed read may not make. Unknown
+  // is not zero — the same rule the list itself obeys ([NO-SILENT-EMPTY]).
+  //
+  // Counted over `shown` rather than over the raw rows, so a search narrows the numbers together
+  // with the lists. A tab that advertises eight invoices and then opens on none is the same lie in
+  // miniature, and it is the one the accountant would hit every time they typed in the box.
+  const tabTellingen = countInvoiceTabs(lezing && !lezing.error ? shown : null)
+
+  /** The rows of the view on screen — the section's own predicate, applied once. */
+  const zichtbareRijen = invoiceTabRows(shown, actieveTab)
 
   // [TRUST-ACCOUNTANT] The invoices-only client-side totals were removed — the quarter
   // tiles now use the reconciled /api/result + /api/aangifte figures (see `recon`), so
@@ -787,11 +871,16 @@ export default function KwartaalPage() {
         <div style={{ backgroundColor: M3.surface, borderRadius: R.lg, boxShadow: EL1, overflow: 'hidden' }}>
 
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #E0E0E0' }}>
-            <h2 style={{ fontSize: 16, fontWeight: 600, color: '#202124', margin: 0 }}>
+            <h2 id={FACTUREN_KOP_ID} style={{ fontSize: 16, fontWeight: 600, color: '#202124', margin: 0 }}>
               {t('bh.kwt.facturen')}
-              <span style={{ fontSize: 14, fontWeight: 400, marginInlineStart: 6, color: '#5F6368' }}>
-                ({invoices.length})
-              </span>
+              {/* [KWT-TABS] The total, and only when there was something to total. A failed read
+                  left this heading saying "Facturen (0)" directly above the sentence explaining
+                  that nothing could be read — the same unknown-as-zero the tab counts refuse. */}
+              {!loadError && (
+                <span style={{ fontSize: 14, fontWeight: 400, marginInlineStart: 6, color: '#5F6368' }}>
+                  ({invoices.length})
+                </span>
+              )}
             </h2>
           </div>
 
@@ -827,23 +916,45 @@ export default function KwartaalPage() {
             <p style={{ fontSize: 14, color: '#5F6368', textAlign: 'center', padding: '48px 0' }}>
               {t('bh.kwt.geenFacturen', { q, jaar: year })}
             </p>
-          ) : shown.length === 0 ? (
-            <p style={{ fontSize: 14, color: '#5F6368', textAlign: 'center', padding: '48px 0' }}>
-              {t('bh.kwt.geenGevonden', { zoek: rawKw })}
-            </p>
           ) : (
-            <div style={{ borderTop: '1px solid #E0E0E0' }}>
-              {/* [BRIDGE-A] Accounting sections — empty sections hidden */}
-              {SECTIONS.map(section => {
-                const rows = shown.filter(section.filter)
-                if (rows.length === 0) return null
-                return (
-                  <div key={section.key}>
-                    <div style={{ padding: '10px 16px', backgroundColor: '#F8F9FA', borderBottom: '1px solid #E0E0E0', display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                      <h3 style={{ fontSize: 13, fontWeight: 600, color: '#202124', margin: 0 }}>{t(section.titleKey)}</h3>
-                      <span style={{ fontSize: 12, color: '#5F6368' }}>({rows.length}) · {t(section.subKey)}</span>
-                    </div>
-                    {rows.map(invoice => {
+            <>
+              {/* [KWT-TABS] The evidence, one view at a time. Debiteuren, Crediteuren and Voldaan
+                  are the same quarter seen three ways — sibling views, not a sequence — and they
+                  used to be rendered one under the other. For a retail quarter that is a wall
+                  several screens long, and the accountant scrolled past two complete lists to
+                  reach the one they opened the screen for.
+
+                  Only the evidence is tabbed. Aandachtspunten, the three figures, the documents
+                  and the quarter package all stay above this card, in the open, exactly where
+                  Batch 3 put them: a tab is for arranging siblings, never for putting a finding
+                  somewhere the accountant has to think to look. */}
+              <FactuurTabs
+                active={actieveTab}
+                counts={tabTellingen}
+                onSelect={kiesTab}
+                t={t}
+                dir={LOCALE_META[locale].dir}
+                labelledBy={FACTUREN_KOP_ID}
+              />
+              <div
+                role="tabpanel"
+                id={invoiceTabPanelId(actieveTab)}
+                aria-labelledby={invoiceTabId(actieveTab)}
+                tabIndex={0}
+              >
+                {/* What this view means, in the section's own words — the same sentence that used
+                    to sit beside its heading when the three lists were stacked. */}
+                <p style={{ margin: 0, padding: '8px 16px', fontSize: 12, color: '#5F6368', backgroundColor: '#F8F9FA', borderBottom: '1px solid #E0E0E0' }}>
+                  {t(invoiceSection(actieveTab).subKey)}
+                </p>
+                {zichtbareRijen.length === 0 ? (
+                  <p style={{ fontSize: 14, color: '#5F6368', textAlign: 'center', padding: '48px 0' }}>
+                    {/* An empty view is not an empty quarter: the other two tabs may be full, and
+                        "Geen facturen in Q3 2026" would be a claim about all three. */}
+                    {rawKw ? t('bh.kwt.geenGevonden', { zoek: rawKw }) : t('bh.kwt.sectie.geen')}
+                  </p>
+                ) : (
+                    zichtbareRijen.map(invoice => {
                 const amount      = getAmount(invoice)
                 const isExpanded  = expandedId === invoice.id
                 const isUpdating  = updatingId === invoice.id
@@ -1063,11 +1174,10 @@ export default function KwartaalPage() {
 
                   </div>
                 )
-                    })}
-                  </div>
-                )
-              })}
-            </div>
+                    })
+                )}
+              </div>
+            </>
           )}
         </div>
 
