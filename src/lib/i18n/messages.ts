@@ -335,7 +335,12 @@ export const MESSAGES = {
   'nieuw.eenheid.annuleer': { nl: 'Annuleren', ar: 'إلغاء', en: 'Cancel' },
   'nieuw.catalogus.in': { nl: 'In catalogus', ar: 'في الكتالوج', en: 'In the catalogue' },
   'nieuw.catalogus.bewaar': { nl: 'Bewaar in catalogus', ar: 'احفظ في الكتالوج', en: 'Save to catalogue' },
-  'nieuw.catalogus.aanvullen': { nl: 'Aanvullen', ar: 'أضف للكتالوج', en: 'Add to catalogue' },
+  // [VERKOPER-COMPLEET] 'nieuw.catalogus.aanvullen' stond hier en was de enige tekst op de link
+  // «je gegevens missen → Aanvullen». De naam kwam uit de catalogus en de vertalingen ook: een
+  // Engelse ondernemer las «Add to catalogue» naast «Your details are missing», en een Arabische
+  // «أضف للكتالوج» — over zijn eigen KVK-nummer. Die link wijst nu naar het aanvulpaneel op dit
+  // scherm in plaats van naar Instellingen, en draagt 'nieuw.verkoper.aanvullen', waarvan de drie
+  // talen over hetzelfde gaan.
 
   // [VERTAAL] De ondernemer typt de omschrijving in zijn eigen taal en de knop zet hem om naar
   // het Nederlands — want de KLANT leest die regel op de factuur. Dat is precies de scheiding uit
@@ -10530,6 +10535,55 @@ export const MESSAGES = {
     nl: 'Je gegevens missen: {list}. Een factuur is wettelijk pas volledig met deze gegevens.',
     ar: 'بياناتك ناقصة: {list}. الفاتورة لا تكتمل قانونيًا إلا بهذه البيانات.',
     en: 'Your details are missing: {list}. An invoice is only legally complete with these details.',
+  },
+  // [VERKOPER-COMPLEET] Het aanvulpaneel bij de verstuurknop. De VELDNAMEN staan hier niet: die
+  // zijn inst.bedrijfsnaam / inst.adres / inst.kvkNummer / inst.btwNummer — exact dezelfde vier
+  // profielvelden als op het instellingenscherm, dus exact dezelfde woorden. Een tweede set labels
+  // voor hetzelfde veld is hoe twee schermen over hetzelfde ding verschillend gaan praten.
+  'nieuw.verkoper.titel': {
+    nl: 'Nog één ding voordat deze factuur weggaat',
+    ar: 'أمر أخير قبل إرسال هذه الفاتورة',
+    en: 'One last thing before this invoice goes out',
+  },
+  'nieuw.verkoper.uitleg': {
+    nl: 'Dit hoort wettelijk op elke factuur (art. 35a Wet OB). Daarna staat het er vanzelf op.',
+    ar: 'هذا إلزامي قانونًا على كل فاتورة (المادة 35a من قانون ضريبة المبيعات). بعد ذلك يظهر تلقائيًا.',
+    en: 'This is legally required on every invoice (art. 35a Wet OB). After this it appears automatically.',
+  },
+  'nieuw.verkoper.overgenomen': {
+    nl: 'Overgenomen uit de factuur die je eerder maakte — controleer het even.',
+    ar: 'مأخوذ من الفاتورة التي أنشأتها سابقًا — راجعه من فضلك.',
+    en: 'Taken from the invoice you made earlier — please check it.',
+  },
+  'nieuw.verkoper.opslaanEnVerstuur': {
+    nl: 'Opslaan en versturen',
+    ar: 'حفظ وإرسال',
+    en: 'Save and send',
+  },
+  'nieuw.verkoper.bezig': {
+    nl: 'Bezig met opslaan…',
+    ar: 'جارٍ الحفظ…',
+    en: 'Saving…',
+  },
+  'nieuw.verkoper.terug': {
+    nl: 'Terug naar de factuur',
+    ar: 'العودة إلى الفاتورة',
+    en: 'Back to the invoice',
+  },
+  'nieuw.verkoper.aanvullen': {
+    nl: 'Aanvullen',
+    ar: 'استكمال',
+    en: 'Complete these',
+  },
+  'nieuw.verkoper.onleesbaar': {
+    nl: 'We konden je bedrijfsgegevens niet lezen. Er is niets verstuurd en geen factuurnummer uitgegeven.',
+    ar: 'تعذّرت قراءة بيانات شركتك. لم يُرسل شيء ولم يُصدر رقم فاتورة.',
+    en: 'We could not read your company details. Nothing was sent and no invoice number was issued.',
+  },
+  'nieuw.verkoper.opslaanMislukt': {
+    nl: 'Opslaan is niet gelukt. Wat je hebt ingevuld staat er nog — probeer het opnieuw.',
+    ar: 'فشل الحفظ. ما أدخلته ما زال موجودًا — حاول مرة أخرى.',
+    en: 'Saving failed. What you entered is still here — please try again.',
   },
   'nieuw.klant.euBtwInfo': {
     nl: 'Klant in een ander EU-land: bij een intracommunautaire prestatie zet je 0% BTW. “Btw verlegd” komt dan automatisch op de factuur en de klant komt in je ICP-opgaaf.',

@@ -615,3 +615,138 @@ test("[KLAAR-URL] the readiness page keeps its period in the URL and nowhere els
   assert.match(page, /gaNaar\(Math\.max\(2000, year - 1\), quarter\)/, "the year-back button no longer navigates");
   assert.doesNotMatch(page, /window\.history|history\.pushState|history\.replaceState/, "browser history is not business state");
 });
+
+// ─── [VERKOPER-COMPLEET] The wiring of the send-time seller completion ────────────────────────
+//
+// The DECISIONS all live in seller-completeness.ts and every branch of them is executed in
+// seller-completeness.test.ts. What no unit test can see is the ORDER those decisions run in, and
+// order is the whole safety of this batch: a legal invoice number is forward-only (art. 35 Wet OB),
+// so "ask, then save, then send, then number" is a different product from "number, then ask".
+//
+// tsc does not model when a call happens, eslint does not read call order, and the render suite
+// never presses a button. So these four facts are held here, and each is cut on real code with
+// inOrder(), which fails loudly when a marker has moved rather than quietly measuring to the end
+// of the file.
+
+test("[VERKOPER-COMPLEET] the send door still refuses an incomplete seller, before it mints a number", () => {
+  const route = code("src/app/api/invoice/send/route.ts");
+
+  // 1 — the refusal is still there, and still a refusal. This batch made the SCREEN ask nicely;
+  // it must not have made the DOOR ask nicely. A request that arrives without the screen — a
+  // script, a retry, an old tab — is refused exactly as it always was.
+  assert.match(route, /missing_seller_fields: missingSeller/, "the send door stopped naming the missing seller fields");
+  assert.match(route, /status: 400/, "the seller refusal is no longer a refusal");
+  assert.match(
+    route,
+    /Vul eerst je \$\{missingSeller\.join\(', '\)\} in bij Instellingen — wettelijk verplicht op een factuur \(Art\. 35a Wet OB 1968\)\./,
+    "the refusal sentence changed — it is live text an owner reads",
+  );
+
+  // 2 — ONE definition. The four inline checks that used to stand here are gone: while they
+  // existed, the screen and the door could disagree about what "complete" means, and the day they
+  // do is the day a first invoice cannot be sent and nothing can say why.
+  assert.match(route, /missingSellerFields\(sellerProfile as SellerFacts \| null\)/, "the door derives completeness some other way again");
+  assert.doesNotMatch(route, /missingSeller\.push\(/, "the door grew its own copy of the rule beside the shared module");
+
+  // 3 — and it happens BEFORE the number. This is the invariant of §9: a refused completion must
+  // never leave a gap in the sequence. `generateInvoiceNumber` is the only thing in this route
+  // that draws from the counter.
+  inOrder(route, "missingSellerFields(", "const generated = await generateInvoiceNumber(",
+    "send/route.ts", "a seller check after the number is minted burns a sequence number on every incomplete profile");
+
+  // …and still before the KOR and verlegd checks, which read the very profile row this reads.
+  inOrder(route, "missingSellerFields(", "const korCheck = checkKorInvoice(",
+    "send/route.ts", "the seller check must stay the first thing done with the seller's profile");
+});
+
+test("[VERKOPER-COMPLEET] the send door tells a failed profile read apart from an empty profile", () => {
+  const route = code("src/app/api/invoice/send/route.ts");
+
+  // [PROFILE-READ] The bug this closes: `const { data: sellerProfile }` made supabase-js's one
+  // failure shape — { data: null, error } — arrive as a profile with nothing in it, and the owner
+  // was then told to go and fill in a BTW-nummer that has been on file for a year.
+  assert.match(route, /const sellerRead = classifyProfileRead\(/, "the seller profile is read without being classified again");
+  assert.match(route, /if \(sellerRead\.kind === 'failed'\)/, "a failed seller read is no longer handled at all");
+  assert.match(route, /code: 'profiel_onleesbaar'/, "the unreadable answer lost the code the screen keys on");
+  assert.match(route, /status: 503/, "an unreadable profile is being reported as something other than a temporary failure");
+  assert.match(route, /const sellerProfile = sellerRead\.kind === 'row' \? sellerRead\.row : null/,
+    "the classified read is being flattened back into a nullable row some other way");
+
+  // Refusing on a failed read must happen BEFORE the completeness question, or the false
+  // "your details are missing" is produced anyway and the 503 never runs.
+  inOrder(route, "sellerRead.kind === 'failed'", "missingSellerFields(",
+    "send/route.ts", "an unreadable profile would be reported as four missing fields");
+  // And before the number, like everything else in this block.
+  inOrder(route, "sellerRead.kind === 'failed'", "const generated = await generateInvoiceNumber(",
+    "send/route.ts", "a database hiccup would consume an invoice number");
+});
+
+test("[VERKOPER-COMPLEET] the screen asks before it creates anything, and never after", () => {
+  const page = code("src/app/dashboard/invoice/new/page.tsx");
+
+  // The gate is the LAST thing before the irreversible half of handleSubmit. Everything above it
+  // is a form the owner can still change; below it a draft row is written and the send door is
+  // asked for a legal number.
+  assert.match(page, /const poort = await verkoperPoort\(\)/, "the send no longer passes the seller gate");
+  assert.match(page, /if \(poort === 'stop'\) return/, "the gate's verdict is ignored — a stop would fall through into the send");
+  inOrder(page, "const poort = await verkoperPoort()", "await fetch('/api/invoice/draft'",
+    "invoice/new/page.tsx", "the draft is created before the owner is asked, so a stop leaves a rejected concept behind");
+  inOrder(page, "const poort = await verkoperPoort()", "await fetch('/api/invoice/send'",
+    "invoice/new/page.tsx", "the send door is called before the owner is asked — the 400 comes back and the completion is pointless");
+
+  // Only on the irreversible button. Saving a CONCEPT with an empty profile must stay possible —
+  // nothing leaves the building — and an OFFERTE goes through send-offerte, which mints no number
+  // and which art. 35a therefore says nothing about.
+  assert.match(page, /if \(mode === 'sent' && invoiceType !== 'offerte'\) \{\s*\n\s*setLoading\(true\)\s*\n\s*const poort = await verkoperPoort\(\)/,
+    "the gate now runs on a draft save or on an offerte, which asks a legal question of a document that is not a legal invoice");
+
+  // The decision itself is not re-derived on the screen: the shipped classifiers are called, and
+  // it is their answer that opens the panel. A hand-rolled `json.status === …` here is how the
+  // screen starts asking for a field the door does not want.
+  assert.match(page, /const poort = classifySellerGate\(res\.status, json\)/, "the screen judges the gate answer by itself again");
+  assert.match(page, /if \(!saveAllowsSend\(uitkomst\)\)/, "the screen decides by itself whether a save may lead to a send");
+  assert.match(page, /openVerkoperPaneel\(poort\.fields\)/, "the panel is opened with a field list the screen made up");
+  assert.match(page, /openVerkoperPaneel\(uitkomst\.fields\)/);
+
+  // And the completion continues through the EXISTING send path — no second implementation, and
+  // above all no number of its own.
+  assert.match(page, /await handleSubmit\('sent'\)/, "the completion no longer continues into the existing send");
+  assert.doesNotMatch(page, /\/api\/invoice\/numbering', \{\s*method/, "the screen started writing numbering configuration");
+});
+
+test("[VERKOPER-COMPLEET] the completion route is the owner's, refuses on a failed read, and writes only what is missing", () => {
+  const route = code("src/app/api/invoice/verkoper/route.ts");
+
+  // [ACTING-FOR] A sales member reads THEIR profile row, never their employer's. Without this
+  // guard the screen would ask a member for their employer's BTW-id and then write it onto the
+  // member's own row — the right answer stored against the wrong person.
+  const guards = route.match(/const w = await requireOwner\(/g) ?? [];
+  assert.equal(guards.length, 2, "both GET and POST must be owner-only");
+  assert.match(route, /if \(w\.response\) return w\.response/);
+
+  // [PROFILE-READ] Never a write on a read that failed, and never a form either.
+  assert.match(route, /const read = classifyProfileRead\(/, "the profile is read without being classified");
+  assert.match(route, /if \(read\.kind === 'failed'\)/);
+  assert.match(route, /code: 'profiel_onleesbaar'/);
+  inOrder(route, "read.kind === 'failed'", ".update(patch)",
+    "api/invoice/verkoper/route.ts", "a save built on an unreadable profile can overwrite a value it never saw");
+
+  // The precedence rule, made structural rather than trusted: a field that is NOT missing cannot
+  // reach the patch at all, so no prefill — handoff or otherwise — can land on a saved value.
+  assert.match(route, /if \(!missing\.includes\(field\)\) continue/,
+    "the route writes fields it was handed rather than only the fields that are missing — a stale handoff can now overwrite a saved BTW-id");
+  inOrder(route, "const missing = missingSellerFields(read.facts)", "patch[field] = cleaned.value",
+    "api/invoice/verkoper/route.ts", "the writable set must be decided from the profile, not from the request body");
+
+  // All or nothing: a partial write leaves the owner on a form that forgot half of what they typed.
+  inOrder(route, "if (Object.keys(problems).length > 0)", ".update(patch)",
+    "api/invoice/verkoper/route.ts", "a field that failed validation would be saved alongside the ones that passed");
+
+  // An UPDATE that matched nothing is not a success — otherwise the screen sends and the door
+  // refuses with the very fields the owner just typed.
+  assert.match(route, /if \(!written \|\| written\.length === 0\)/, "a write that touched no row is being reported as saved");
+
+  // It does not issue anything. The one authority stays the send door.
+  assert.doesNotMatch(route, /invoice_number|next_invoice_seq|generateInvoiceNumber/,
+    "the completion route grew an opinion about invoice numbering");
+});
