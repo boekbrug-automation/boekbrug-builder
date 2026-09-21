@@ -29,6 +29,7 @@ import { isOverdue } from '@/components/invoice/InvoiceRow'
 import { onRowTap } from '@/lib/row-tap'
 import DateFieldNL from '@/components/ui/DateFieldNL'
 import { VoorstelFormulier, type VoorstelStatus } from '../VoorstelFormulier'
+import { askInvoiceQuestion, INVOICE_QUESTION_ROUTE } from '@/lib/accountant-invoice-question-flow'
 
 // De kwartaalpagina leest alleen deze velden van een factuur. Ze expliciet noemen maakt
 // zichtbaar waar de pagina van afhangt — en dat `total_inc_btw` en `btw_amount` in de
@@ -381,7 +382,15 @@ export default function KwartaalPage() {
 
   // [BOEK-028] accountant_status update
   // [BOEK-006] action can be null = "niet verwerkt" (neutral, accountant hasn't acted)
+  // [VRAAG-EERST] 'vraag' is not a status this screen may set on its own. Since [VRAAG-SYNC] the
+  // status and the question are one fact, written together by /api/accountant/invoice-question,
+  // and a status without words is refused. So a question takes its own path (askQuestion below):
+  // the dialog first, then one write — and it never reaches the status route.
   async function handleAction(invoiceId: string, action: ActionValue | null) {
+    if (action === 'vraag') {
+      await askQuestion(invoiceId)
+      return
+    }
     setUpdatingId(invoiceId)
 
     // NOTE: 'voldaan' is a UI-only label, NOT a DB status (violates CHECK).
@@ -414,12 +423,12 @@ export default function KwartaalPage() {
       // whole job is asserting what has been checked, a status that undoes
       // itself without a word is the one thing that must never happen.
       toast(t('bh.kwt.statusNietOpgeslagen'), { tone: 'error' })
-    } else if (action === 'verwerkt' || action === 'vraag') {
-      // [READINESS-P3] Close the trust loop with the client — for BOTH 'verwerkt'
-      // AND 'vraag'. Previously only 'verwerkt' notified, so a 'vraag' silently
-      // told the client nothing (they learned of a question only by luck).
-      // Non-blocking; the status change already succeeded. clientId IS the ZZP'er's
-      // profile id; the route verifies the accountant↔client link + writes via
+    } else if (action === 'verwerkt') {
+      // [READINESS-P3] Close the trust loop with the client. Only 'verwerkt' is announced from
+      // here: a 'vraag' is announced by /api/accountant/invoice-question itself, in the same
+      // request that writes it, so a second notification from this screen would tell the client
+      // the same thing twice. Non-blocking; the status change already succeeded. clientId IS the
+      // ZZP'er's profile id; the route verifies the accountant↔client link + writes via
       // service_role.
       const inv = invoices.find(x => x.id === invoiceId)
       // The notification below is written into the CLIENT's own app, in the client's language —
@@ -432,38 +441,11 @@ export default function KwartaalPage() {
       const target = inv?.direction === 'outgoing'
         ? `/dashboard/facturen?focus=${invoiceId}`
         : `/dashboard/incoming/manage?focus=${invoiceId}`
-
-      let title: string
-      let body: string
-      if (action === 'verwerkt') {
-        const amount = typeof inv?.total_inc_btw === 'number' && inv.total_inc_btw > 0
-          ? ` · ${new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR' }).format(inv.total_inc_btw)}`
-          : ''
-        title = 'Factuur verwerkt' // [TAAL-DB] stored notification — the client's screen, not this one
-        body = `Je boekhouder heeft ${nrLabel}${party}${amount} verwerkt.` // [TAAL-DB]
-      } else {
-        // 'vraag' — capture an optional free-text question to send to the client.
-        // This text lands on the client's own screen as a notification, so it is
-        // written in the app's dialog: a textarea with the 200-character limit
-        // shown as you type, rather than a one-line browser prompt that silently
-        // truncated whatever did not fit.
-        const uitleg = inv?.invoice_number
-          ? t('bh.kwt.vraag.uitleg', { nummer: inv.invoice_number, partij: party })
-          : t('bh.kwt.vraag.uitlegZonderNummer', { partij: party })
-        const q = (await dialog.prompt({
-          title: t('bh.kwt.vraag.titel'),
-          message: uitleg,
-          placeholder: t('bh.kwt.vraag.placeholder'),
-          multiline: true,
-          maxLength: 200,
-          confirmLabel: t('bh.kwt.vraag.versturen'),
-          required: false,
-        }))?.trim()
-        title = 'Vraag van je boekhouder' // [TAAL-DB] stored notification — the client's screen
-        body = q
-          ? q.slice(0, 200)
-          : `Je boekhouder heeft een vraag over ${nrLabel}${party}.` // [TAAL-DB]
-      }
+      const amount = typeof inv?.total_inc_btw === 'number' && inv.total_inc_btw > 0
+        ? ` · ${new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR' }).format(inv.total_inc_btw)}`
+        : ''
+      const title = 'Factuur verwerkt' // [TAAL-DB] stored notification — the client's screen, not this one
+      const body = `Je boekhouder heeft ${nrLabel}${party}${amount} verwerkt.` // [TAAL-DB]
       try {
         await fetch('/api/notifications/notify-client', {
           method: 'POST',
@@ -471,6 +453,53 @@ export default function KwartaalPage() {
           body: JSON.stringify({ clientId, title, body, type: 'status', link: target }),
         })
       } catch { /* non-blocking — status already saved */ }
+    }
+    setUpdatingId(null)
+  }
+
+  // [VRAAG-EERST] The dialog first. Cancelling means nothing happened — no write, no chip, no
+  // notification. Then exactly one POST to /api/accountant/invoice-question, which owns the atomic
+  // write (the invoice status and this accountant's question row, in one transaction), the
+  // client's notification and the audit row. The chip turns to 'vraag' only after the server has
+  // accepted the question, so the accountant never sees a question state the database does not
+  // have. The order and the single write are proven on the pure flow in
+  // src/lib/accountant-invoice-question-flow.test.ts; the wiring here is pinned by [VRAAG-EERST]
+  // in lifecycle-gates.
+  async function askQuestion(invoiceId: string) {
+    const inv = invoices.find(x => x.id === invoiceId)
+    const party = typeof inv?.client_name === 'string' && inv.client_name.trim()
+      ? ` (${inv.client_name.trim()})`
+      : ''
+    const uitleg = inv?.invoice_number
+      ? t('bh.kwt.vraag.uitleg', { nummer: inv.invoice_number, partij: party })
+      : t('bh.kwt.vraag.uitlegZonderNummer', { partij: party })
+    const outcome = await askInvoiceQuestion({
+      clientId,
+      invoiceId,
+      prompt: () => dialog.prompt({
+        title: t('bh.kwt.vraag.titel'),
+        message: uitleg,
+        placeholder: t('bh.kwt.vraag.placeholder'),
+        multiline: true,
+        maxLength: 200,
+        confirmLabel: t('bh.kwt.vraag.versturen'),
+        required: true,
+      }),
+      post: async (body) => {
+        setUpdatingId(invoiceId)
+        return fetch(INVOICE_QUESTION_ROUTE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+      },
+    })
+    if (outcome.kind === 'asked') {
+      setInvoices(prev => prev.map(i =>
+        i.id === invoiceId ? { ...i, accountant_status: 'vraag' } : i
+      ))
+    } else if (outcome.kind === 'failed') {
+      toast(t('bh.bev.vraag.mislukt'), { tone: 'error' })
     }
     setUpdatingId(null)
   }
