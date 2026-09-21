@@ -18,6 +18,7 @@ import {
   focusInvoiceTab,
   invoiceSection,
   invoiceTabHref,
+  invoiceTabFocusAfter,
   invoiceTabId,
   invoiceTabKeyAction,
   invoiceTabOf,
@@ -26,6 +27,7 @@ import {
   isInvoiceTabKey,
   neighbourInvoiceTab,
   readInvoiceTab,
+  resolveInvoiceTab,
   type InvoiceTabKey,
 } from "./period-invoice-tabs";
 
@@ -140,16 +142,22 @@ test("[KWT-TABS] an unreadable tab parameter falls to Debiteuren, never to an em
   assert.equal(isInvoiceTabKey(3), false);
 });
 
-test("[KWT-TABS] choosing a view changes the tab and nothing else", () => {
-  // `q` and `year` are the period this screen IS; `focus` is a deep link the accountant may still
-  // want to follow back. A query string that quietly drops half of itself turns a view change into
-  // a navigation to another quarter.
-  const href = invoiceTabHref(PAD, "q=3&year=2026&focus=inv-9", "crediteuren");
+test("[KWT-TABS] choosing a view keeps the period and spends the deep link", () => {
+  // `q` and `year` are the period this screen IS, and anything else in the address is somebody
+  // else's: a query string that quietly drops half of itself turns a view change into a
+  // navigation to another quarter.
+  //
+  // `focus` is the deliberate exception. It is an ENTRY instruction, not page state, and it
+  // outranks the tab on every render — so leaving it in would have the accountant arguing with
+  // their own address bar: the URL saying tab=voldaan while the screen showed Crediteuren, and a
+  // refresh landing somewhere else again.
+  const href = invoiceTabHref(PAD, "q=3&year=2026&focus=inv-9&sorteer=oud", "crediteuren");
   const na = new URLSearchParams(href.split("?")[1]);
   assert.equal(href.split("?")[0], PAD, "the route changed");
   assert.equal(na.get("q"), "3");
   assert.equal(na.get("year"), "2026");
-  assert.equal(na.get("focus"), "inv-9");
+  assert.equal(na.get("sorteer"), "oud", "an unrelated parameter was dropped");
+  assert.equal(na.get("focus"), null, "the deep link outlived the choice that answered it");
   assert.equal(na.get("tab"), "crediteuren");
 
   // An existing tab is replaced, not appended — two `tab` values and the reader picks the first.
@@ -165,6 +173,58 @@ test("[KWT-TABS] choosing a view changes the tab and nothing else", () => {
     invoiceTabHref(PAD, new URLSearchParams({ year: "2026" }), "voldaan"),
     `${PAD}?year=2026&tab=voldaan`,
   );
+});
+
+// ─── One address, one view, every time ────────────────────────────────────────────────────────
+
+test("[KWT-TABS] the visible view is a function of the address and the rows", () => {
+  // The determinism contract, stated as the property it is: same inputs, same answer, with no
+  // state anywhere that could make one URL render two different screens. The first version kept
+  // the focus-derived tab in React state, and Back restored a focused URL while the state said
+  // otherwise — so the same address showed Crediteuren or Debiteuren depending on how you got
+  // there. A view that cannot be predicted from its own address cannot be shared or bookmarked.
+  const rows = [VERKOOP_OPEN, INKOOP_OPEN, BETAALD_UIT];
+  const zichtbaar = (tabParam: string | null, focusId: string | null) =>
+    resolveInvoiceTab({ tabParam, focusId, rows });
+
+  // The walk the brief describes, in order.
+  assert.equal(zichtbaar("debiteuren", "i1"), "crediteuren", "the deep link lost to a stale tab");
+  const naKeuze = new URLSearchParams(invoiceTabHref(PAD, "tab=debiteuren&focus=i1", "voldaan").split("?")[1]);
+  assert.equal(naKeuze.get("tab"), "voldaan");
+  assert.equal(naKeuze.get("focus"), null);
+  assert.equal(zichtbaar(naKeuze.get("tab"), naKeuze.get("focus")), "voldaan", "the manual choice did not stick");
+  // Back returns the earlier address — and it resolves exactly as it did the first time.
+  assert.equal(zichtbaar("debiteuren", "i1"), "crediteuren", "Back did not restore the focused view");
+
+  // A refresh is the same call again. Ten of them cannot disagree.
+  for (const [tab, focus] of [["debiteuren", "i1"], ["voldaan", null], [null, null], ["rommel", "b1"]] as const) {
+    const eerste = zichtbaar(tab, focus);
+    for (let i = 0; i < 10; i++)
+      assert.equal(zichtbaar(tab, focus), eerste, `?tab=${tab}&focus=${focus} drifted on a refresh`);
+  }
+
+  // The pieces it is built from, still each doing their own job.
+  assert.equal(resolveInvoiceTab({ tabParam: "rommel", focusId: null, rows }), "debiteuren");
+  assert.equal(resolveInvoiceTab({ tabParam: "voldaan", focusId: "elders", rows }), "voldaan",
+    "a focus that is not in this quarter overruled the tab anyway");
+  assert.equal(resolveInvoiceTab({ tabParam: "voldaan", focusId: "i1", rows: null }), "voldaan",
+    "the rows are not read yet — nothing can be resolved, so the URL must govern");
+});
+
+test("[KWT-TABS] focus follows what happened, not what was attempted", () => {
+  // Activation can be declined: the screen may ask a question and the accountant may answer no.
+  // Focusing the destination anyway leaves aria-selected on one tab and the keyboard on another,
+  // and the next arrow key then steps from a tab nobody can see is current.
+  assert.equal(invoiceTabFocusAfter("voldaan", "crediteuren", true), "voldaan");
+  assert.equal(invoiceTabFocusAfter("voldaan", "crediteuren", false), "crediteuren",
+    "a refused activation moved the keyboard off the tab that is still selected");
+  // The rule holds for every pair, in both answers — mouse and key press resolve through this
+  // same function, so the two cannot drift apart.
+  for (const geprobeerd of INVOICE_TAB_KEYS)
+    for (const actief of INVOICE_TAB_KEYS) {
+      assert.equal(invoiceTabFocusAfter(geprobeerd, actief, true), geprobeerd);
+      assert.equal(invoiceTabFocusAfter(geprobeerd, actief, false), actief);
+    }
 });
 
 // ─── The deep link outranks the tab ───────────────────────────────────────────────────────────

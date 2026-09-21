@@ -14,6 +14,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 
 import FactuurTabs from "../../src/components/kantoor/FactuurTabs";
+import { VoorstelFormulier } from "../../src/app/dashboard/clients/[id]/VoorstelFormulier";
 import { translator } from "../../src/lib/i18n/t";
 import { INVOICE_TAB_KEYS, invoiceTabId, invoiceTabPanelId } from "../../src/lib/period-invoice-tabs";
 
@@ -25,7 +26,7 @@ function render(over: Partial<React.ComponentProps<typeof FactuurTabs>> = {}) {
     React.createElement(FactuurTabs, {
       active: "debiteuren",
       counts: TELLING,
-      onSelect: () => {},
+      onSelect: () => true,
       t: translator("nl"),
       dir: "ltr",
       labelledBy: KOP,
@@ -145,10 +146,73 @@ test("[KWT-TABS] no label breaks into a second line, and no tab is dropped to fi
   }
 });
 
+// ─── Activation is a request, and focus follows the answer ────────────────────────────────────
+
+test("[KWT-TABS] the strip asks to activate and obeys the answer, for mouse and key alike", () => {
+  // A refusal that still moved the keyboard would leave aria-selected on one tab and the focus
+  // ring on another. renderToStaticMarkup runs no handlers, so the wiring is read at the source —
+  // the decision itself is a pure function with its own exhaustive test.
+  const strip = readFile("src/components/kantoor/FactuurTabs.tsx");
+  assert.match(strip, /onSelect: \(key: InvoiceTabKey\) => boolean \| Promise<boolean>/,
+    "activation stopped reporting whether it happened");
+  assert.match(strip, /const geaccepteerd = await onSelect\(key\)/,
+    "the strip no longer waits for the answer — an async refusal would move focus anyway");
+  assert.match(strip, /tabRefs\.current\[invoiceTabFocusAfter\(key, active, geaccepteerd\)\]\?\.focus\(\)/,
+    "focus is placed without consulting the answer");
+  // One path for both. A separate onClick that called onSelect directly is how the mouse and the
+  // keyboard start disagreeing about which tab is current.
+  assert.match(strip, /onClick=\{\(\) => \{ void ga\(section\.key\) \}\}/, "the mouse bypasses the shared path");
+  assert.match(strip, /onKeyDown=\{onKey\}/);
+  assert.doesNotMatch(strip, /onClick=\{\(\) => onSelect\(/, "the mouse activates without obeying the answer");
+});
+
+// ─── An unsent proposal outlives the row it was typed in ──────────────────────────────────────
+
+test("[KWT-TABS] the proposal form renders the draft it is handed, so a remount shows the typing", () => {
+  // This is the whole of fix 3 in one render. The row unmounts whenever another view is shown —
+  // by a click, by an arrow key, by Back, by Forward, by a ?focus= deep link resolving elsewhere —
+  // and none of those but the first can be intercepted. Because the screen owns the draft, the
+  // form that comes back is handed what was typed, exactly as below.
+  const concept = {
+    ex: "123,45", btw: "25,92", inc: "149,37",
+    datum: "2026-07-14", vervalt: "2026-08-14",
+    reden: "Het bedrag hoort bij de vorige maand.",
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(VoorstelFormulier, {
+      clientId: "c-1",
+      invoice: { id: "i1", total_ex_btw: 1, btw_amount: 1, total_inc_btw: 1, invoice_date: "2026-01-01", due_date: "2026-02-01" },
+      t: translator("nl") as never,
+      DateField: ({ value }: { value: string }) => React.createElement("input", { readOnly: true, value }),
+      concept,
+      onConcept: () => {},
+      onClose: () => {},
+      onSent: () => {},
+      onError: () => {},
+    } as never),
+  );
+  for (const [veld, waarde] of Object.entries(concept))
+    assert.ok(html.includes(waarde), `${veld} is not on the screen — the draft was rendered from the invoice, not from what was typed`);
+  // …and the invoice's own numbers are NOT what is shown: a remount that re-prefilled from the
+  // row would look perfectly fine and would have silently thrown the correction away.
+  assert.doesNotMatch(html, /value="1"/, "the form fell back to the invoice and lost the typing");
+
+  // The form may not keep a second copy of any of it, or there would be two answers to what the
+  // accountant typed and the one that survives a remount would be the empty one.
+  const form = readFile("src/app/dashboard/clients/[id]/VoorstelFormulier.tsx");
+  for (const veld of ["ex", "btw", "inc", "datum", "vervalt", "reden"])
+    assert.doesNotMatch(form, new RegExp(`useState\\(.*\\b${veld}\\b`, "i"), `${veld} went back into the form's own state`);
+  assert.match(form, /const \{ ex, btw, inc, datum, vervalt, reden \} = concept/, "the form stopped reading the handed-in draft");
+});
+
 // ─── The screen around it ─────────────────────────────────────────────────────────────────────
 
+function readFile(path: string): string {
+  return readFileSync(path, "utf8");
+}
+
 function readPage(): string {
-  return readFileSync("src/app/dashboard/clients/[id]/kwartaal/page.tsx", "utf8");
+  return readFile("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
 }
 
 test("[KWT-TABS] the quarter screen renders one panel, and Batch 3 stays outside it", () => {

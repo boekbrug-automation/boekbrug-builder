@@ -11,6 +11,11 @@
 // accountant tabs three times to get past the strip, and a screen reader announces three unrelated
 // controls instead of "tab 2 of 3, selected".
 //
+// ACTIVATION IS A REQUEST, NOT AN ORDER. `onSelect` answers whether the view actually changed, and
+// the keyboard follows that answer rather than the attempt — for a click exactly as for an arrow
+// key. A strip that focused the tab it failed to open would show `aria-selected` on one tab and
+// the focus ring on another, and the accountant's next arrow key would step from the wrong place.
+//
 // It holds no language of its own: every word comes out of the catalogue through `t`, and the
 // component receives which view is active rather than deciding. Direction travels with the words —
 // in Arabic the strip lays out right to left and the arrow keys mirror with it, because
@@ -30,6 +35,7 @@ import type { Translator } from '@/lib/i18n/t'
 import { M3 } from '@/lib/design/tokens'
 import {
   INVOICE_SECTIONS,
+  invoiceTabFocusAfter,
   invoiceTabId,
   invoiceTabKeyAction,
   invoiceTabPanelId,
@@ -41,7 +47,15 @@ export interface FactuurTabsProps {
   active: InvoiceTabKey
   /** Rows per view, or null when the read did not answer — then no number is drawn. */
   counts: Record<InvoiceTabKey, number> | null
-  onSelect: (key: InvoiceTabKey) => void
+  /**
+   * Activate a view, and say whether that ACTUALLY happened.
+   *
+   * The screen is allowed to decline — it may have a question to ask first, and the accountant may
+   * answer no. The strip has to know, because focus follows what happened rather than what was
+   * attempted: a refusal that left the keyboard on the tab it failed to open would put
+   * `aria-selected` on one tab and the focus ring on another.
+   */
+  onSelect: (key: InvoiceTabKey) => boolean | Promise<boolean>
   t: Translator
   /** Text direction of the interface, so the arrow keys mean what the screen shows. */
   dir: 'ltr' | 'rtl'
@@ -52,12 +66,24 @@ export interface FactuurTabsProps {
 export default function FactuurTabs({ active, counts, onSelect, t, dir, labelledBy }: FactuurTabsProps) {
   const tabRefs = useRef<Partial<Record<InvoiceTabKey, HTMLButtonElement | null>>>({})
 
-  /** Move the selection AND the focus — automatic activation, which is what a tab set with no
-   *  network cost per view should do: the rows are already in memory, so arrowing through the
-   *  three views costs nothing and asking for a second keypress to confirm is friction. */
-  const ga = (key: InvoiceTabKey) => {
-    onSelect(key)
-    tabRefs.current[key]?.focus()
+  /**
+   * Ask for a view, then put the keyboard where the answer says it belongs.
+   *
+   * Automatic activation, which is what a tab set with no network cost per view should do: the
+   * rows are already in memory, so arrowing through the three views costs nothing and asking for a
+   * second keypress to confirm would be friction.
+   *
+   * The focus step waits for the answer rather than running beside it. It used to fire the instant
+   * onSelect was CALLED, so a screen that declined asynchronously — a question the accountant
+   * answered no to — left the strip selected on one tab and focused on another, and the next arrow
+   * key stepped from a tab nobody could see was current. `active` is read from this render, which
+   * is exactly right on a refusal: the view that was selected still is.
+   *
+   * One path for the mouse and the keyboard, so the two cannot drift apart.
+   */
+  const ga = async (key: InvoiceTabKey) => {
+    const geaccepteerd = await onSelect(key)
+    tabRefs.current[invoiceTabFocusAfter(key, active, geaccepteerd)]?.focus()
   }
 
   // Which key means which tab — including the mirroring Arabic needs — is decided in the pure
@@ -67,7 +93,7 @@ export default function FactuurTabs({ active, counts, onSelect, t, dir, labelled
     const next = invoiceTabKeyAction(e.key, active, dir)
     if (!next) return
     e.preventDefault()
-    ga(next)
+    void ga(next)
   }
 
   return (
@@ -100,7 +126,7 @@ export default function FactuurTabs({ active, counts, onSelect, t, dir, labelled
             aria-controls={invoiceTabPanelId(section.key)}
             // Roving tabindex: the strip is ONE tab stop, and the arrow keys move inside it.
             tabIndex={selected ? 0 : -1}
-            onClick={() => onSelect(section.key)}
+            onClick={() => { void ga(section.key) }}
             onKeyDown={onKey}
             style={{
               flexShrink: 0,

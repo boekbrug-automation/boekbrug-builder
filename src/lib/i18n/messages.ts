@@ -15320,12 +15320,14 @@ export const MESSAGES = {
   'bh.kwt.voorstel.status.accepted': { nl: 'Voorstel overgenomen', ar: 'قُبل الاقتراح', en: 'Proposal accepted' },
   'bh.kwt.voorstel.status.declined': { nl: 'Voorstel afgewezen', ar: 'رُفض الاقتراح', en: 'Proposal declined' },
   'bh.kwt.voorstel.status.stale': { nl: 'Voorstel vervallen', ar: 'انتهت صلاحية الاقتراح', en: 'Proposal lapsed' },
-  // [KWT-TABS] The proposal form holds its own draft, so the row unmounting takes the typed reason
-  // with it. It can only be open on a purchase invoice, so leaving Crediteuren is the one move
-  // that loses it — and on this screen work may not disappear without a word.
-  'bh.kwt.voorstel.wegVraag': { nl: 'Voorstel niet verstuurd', ar: 'لم يُرسَل الاقتراح', en: 'Proposal not sent' },
-  'bh.kwt.voorstel.wegUitleg': { nl: 'Je correctie is nog niet verstuurd. Ga je naar een andere lijst, dan is hij weg.', ar: 'تصحيحك لم يُرسَل بعد. إذا انتقلت إلى قائمة أخرى فسيضيع.', en: 'Your correction has not been sent yet. If you go to another list, it is gone.' },
-  'bh.kwt.voorstel.wegKnop': { nl: 'Voorstel weggooien', ar: 'حذف الاقتراح', en: 'Discard the proposal' },
+  // [KWT-TABS] Said once when the accountant leaves a view with an unsent proposal open in it.
+  // It promises nothing about losing the draft, because the draft is NOT lost — the screen holds
+  // it, so it survives every way the visible tab can change, Back and Forward included. This asks
+  // only because someone who typed a correction and then picked another view has probably
+  // mis-clicked, and a word is worth more than a silent disappearance from the screen.
+  'bh.kwt.voorstel.verlatenVraag': { nl: 'Voorstel nog niet verstuurd', ar: 'الاقتراح لم يُرسَل بعد', en: 'Proposal not sent yet' },
+  'bh.kwt.voorstel.verlatenUitleg': { nl: 'Je correctie blijft bewaard, maar je ziet hem pas terug bij deze factuur.', ar: 'سيبقى تصحيحك محفوظًا، لكنك لن تراه إلا عند العودة إلى هذه الفاتورة.', en: 'Your correction is kept, but you will only see it again at this invoice.' },
+  'bh.kwt.voorstel.verlatenKnop': { nl: 'Verdergaan', ar: 'متابعة', en: 'Continue' },
   'bh.det.laden': { nl: 'Laden...', ar: 'جارٍ التحميل…', en: 'Loading...' },
   'bh.det.ontkoppelTitel': { nl: 'Klant ontkoppelen?', ar: 'إلغاء ربط العميل؟', en: 'Unlink client?' },
   'bh.det.ontkoppelUitleg': { nl: 'Je verliest de toegang tot de administratie van {naam}. Hij houdt alles zelf; later opnieuw koppelen kan.', ar: 'ستفقد الوصول إلى دفاتر {naam}. يحتفظ هو بكل شيء؛ ويمكن الربط من جديد لاحقًا.', en: 'You lose access to the books of {naam}. They keep everything; you can link again later.' },

@@ -23,6 +23,14 @@
 //     `?focus=` names a purchase invoice and `?tab=` says debiteuren, honouring the tab would hide
 //     the invoice the link exists to show. `focusInvoiceTab` resolves the section from the row
 //     itself, and the screen selects it.
+//   · THE ADDRESS DECIDES, NOTHING ELSE. `resolveInvoiceTab` is a function of the URL and the
+//     rows, with no state behind it, so the same address always renders the same view — on a
+//     refresh, on Back, on Forward, on a link someone pasted. Picking a tab by hand SPENDS the
+//     deep link (`invoiceTabHref` deletes `focus`), which is what lets the accountant's choice
+//     stand without the screen having to remember that they made one.
+//   · A REFUSED ACTIVATION MOVES NOTHING. Selecting a tab can be declined, and `aria-selected` on
+//     one tab with the keyboard on another is a strip with two truths. `invoiceTabFocusAfter`
+//     answers where focus belongs, for the mouse and the keyboard alike.
 //
 // What this module does NOT do: decide what an invoice IS. No status is derived here, no amount,
 // no period. It arranges rows that were already classified.
@@ -169,6 +177,46 @@ export function neighbourInvoiceTab(current: InvoiceTabKey, step: 1 | -1): Invoi
 }
 
 /**
+ * The view on screen, as a function of the URL and the rows — and of nothing else.
+ *
+ * This is the whole determinism contract in one place, and it is a FUNCTION rather than a piece of
+ * state on purpose. The first version held the focus-derived tab in `useState`, and that made the
+ * screen's answer depend on which effects had run: the Back button restored a URL carrying
+ * `?focus=`, the state said null because the accountant had since picked a tab by hand, and the
+ * same URL therefore rendered two different views depending on how you arrived at it. A view that
+ * cannot be predicted from its own address cannot be shared, bookmarked or reasoned about.
+ *
+ * So: same URL plus same rows, same visible tab, every time — on a refresh, on Back, on Forward,
+ * on a link pasted into a chat. `focus` wins while it is in the URL, because it is an entry
+ * instruction; picking a tab by hand CONSUMES it (see invoiceTabHref), which is what lets the
+ * accountant's own choice stand without any state to remember that they made one.
+ */
+export function resolveInvoiceTab(input: {
+  tabParam: string | null | undefined
+  focusId: string | null | undefined
+  rows: readonly (SectionInvoice & { id: string })[] | null | undefined
+}): InvoiceTabKey {
+  return focusInvoiceTab(input.focusId, input.rows) ?? readInvoiceTab(input.tabParam)
+}
+
+/**
+ * Where the keyboard must be after an attempt to activate a tab.
+ *
+ * Activation can be REFUSED — the screen may ask a question first and the accountant may say no —
+ * and focus has to follow what actually happened, not what was attempted. Moving focus onto a tab
+ * that was not selected leaves the strip with two truths: `aria-selected` on one tab and the
+ * keyboard on another, so the next arrow key steps from somewhere the accountant cannot see.
+ * Click and key press resolve through this same rule, or the mouse and the keyboard disagree.
+ */
+export function invoiceTabFocusAfter(
+  attempted: InvoiceTabKey,
+  active: InvoiceTabKey,
+  accepted: boolean,
+): InvoiceTabKey {
+  return accepted ? attempted : active
+}
+
+/**
  * What a key press means in the tab strip, or null when the key is not ours to take.
  *
  * Pure, and separate from the component, because the half that is wrong in a way nobody reports is
@@ -210,12 +258,20 @@ export function invoiceTabPanelId(key: InvoiceTabKey): string {
 }
 
 /**
- * The same URL, with `tab` set to this view.
+ * The same URL, with `tab` set to this view — and `focus` spent.
  *
- * Every other parameter travels unchanged — `q` and `year` are the period this screen IS, and
- * `focus` is a deep link the accountant may still want to follow back. Selecting a tab is a view
- * change, not a navigation to somewhere else, and a query string that quietly drops half of itself
- * turns one into the other.
+ * `q` and `year` are the period this screen IS, and every other parameter is somebody else's;
+ * they travel unchanged, because a query string that quietly drops half of itself turns a view
+ * change into a navigation.
+ *
+ * `focus` is the exception, and dropping it is the point rather than an oversight. A deep link is
+ * an ENTRY INSTRUCTION — "open on this invoice" — not permanent page state. Left in the URL it
+ * outranks the tab on every later render (that is what makes the deep link work), so an accountant
+ * who then picks a view by hand would be arguing with their own address bar: the URL would say
+ * `tab=voldaan` while the screen showed Crediteuren, and a refresh would land somewhere else again.
+ * Choosing a tab is the accountant saying the instruction has been carried out. It stays in
+ * history, so Back returns to the focused URL and the deep link resolves again exactly as it did
+ * the first time.
  */
 export function invoiceTabHref(
   pathname: string,
@@ -225,6 +281,7 @@ export function invoiceTabHref(
   const params = new URLSearchParams(
     typeof search === 'string' ? search.replace(/^\?/, '') : (search ?? undefined),
   )
+  params.delete('focus')
   params.set('tab', tab)
   const qs = params.toString()
   return qs ? `${pathname}?${qs}` : pathname

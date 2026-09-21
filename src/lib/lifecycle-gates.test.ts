@@ -38094,7 +38094,7 @@ test("[KWT-TABS] switching view reads nothing — the rows are already here", ()
   // The selected view reaches no effect. Every read on this screen is keyed on the PERIOD, and a
   // tab in one of those dependency arrays is a request per click — for rows the page holds.
   for (const deps of page.matchAll(/\}, \[([^\]]*)\]\)/g)) {
-    for (const naam of ["actieveTab", "focusTab", "urlTab", "tabTellingen"])
+    for (const naam of ["actieveTab", "tabTellingen", "zichtbareRijen"])
       assert.ok(!deps[1].includes(naam),
         `an effect re-runs on the selected tab (deps: [${deps[1].trim()}]) — every click would refetch`);
   }
@@ -38108,20 +38108,28 @@ test("[KWT-TABS] switching view reads nothing — the rows are already here", ()
     "the selected view is no longer a projection over the rows already read");
 });
 
-test("[KWT-TABS] choosing a view keeps the period, the deep link and the search", () => {
+test("[KWT-TABS] choosing a view keeps the period, spends the deep link and keeps the search", () => {
   const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
 
   // Built from the URL that is there, not from scratch. A hand-written `?q=${q}&year=${year}` is
-  // how `focus` — and anything added later — gets dropped without anybody noticing.
+  // how a parameter added later gets dropped without anybody noticing.
   assert.match(page, /router\.push\(invoiceTabHref\(pathname, searchParams\.toString\(\), key\), \{ scroll: false \}\)/,
     "the tab href no longer carries the rest of the query string, or the page scrolls on a view change");
-  // Pushed, so Back returns to the view the accountant came from.
+  // Pushed, so Back returns to the view — deep link and all — the accountant came from.
   assert.doesNotMatch(page, /router\.replace\(invoiceTabHref/, "a view change stopped being reversible");
 
-  // The tab is read FROM the URL rather than held only in memory, or a refresh and a shared link
-  // would both land somewhere else than the screen the accountant is looking at.
-  assert.match(page, /const urlTab = readInvoiceTab\(searchParams\.get\('tab'\)\)/,
-    "the selected view no longer survives a refresh");
+  // …and `focus` is SPENT by the choice that answered it. Left in, it outranks the tab on every
+  // later render, so the URL would say tab=voldaan while the screen showed Crediteuren and a
+  // refresh would land somewhere else again. Asserted where it happens, on the pure helper.
+  const lib = code("src/lib/period-invoice-tabs.ts");
+  const href = lib.indexOf("export function invoiceTabHref(");
+  assert.notEqual(href, -1, "the tab href helper is not where this gate expects it");
+  const eind = lib.indexOf("return qs ?", href);
+  assert.notEqual(eind, -1, "the tab href helper no longer returns a href");
+  const body = lib.slice(href, eind);
+  assert.match(body, /params\.delete\('focus'\)/, "a manual choice no longer spends the deep link");
+  assert.match(body, /params\.set\('tab', tab\)/);
+  assert.doesNotMatch(body, /params\.delete\('(q|year)'\)/, "the period is being dropped on a view change");
 
   // Search, sort and the open row belong to the page, above the panel — so switching view is not a
   // page reload. A `key` on the panel would remount the subtree and throw all three away.
@@ -38133,33 +38141,37 @@ test("[KWT-TABS] choosing a view keeps the period, the deep link and the search"
   assert.doesNotMatch(paneelKop, /\bkey=/, "the panel is keyed on the tab — every switch remounts the rows");
 });
 
-test("[KWT-TABS] a focused invoice outranks the tab, and is mounted before it is measured", () => {
+test("[KWT-TABS] one address renders one view, and the screen remembers nothing about it", () => {
   const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
 
-  // Focus first, URL second. The other order hides the row a notification exists to show.
-  assert.match(page, /const actieveTab: InvoiceTabKey = focusTab \?\? urlTab/,
-    "the URL's tab now outranks the focused invoice — a deep link can land on the wrong list");
-  // Resolved from the ROW, through the section predicates, so the tab and the list agree.
-  assert.match(page, /const focusSectie = focusInvoiceTab\(focusId, invoices\)/,
-    "the focused invoice's section is no longer read off the row itself");
+  // The visible tab is resolved DURING RENDER from the URL and the rows, and from nothing else.
+  // The first version kept it in useState, and that is precisely how one address came to render
+  // two different views: Back restored a URL carrying ?focus= while the state, cleared by an
+  // earlier manual pick, said otherwise.
+  assert.match(page, /const actieveTab: InvoiceTabKey = resolveInvoiceTab\(\{\s*tabParam: searchParams\.get\('tab'\),\s*focusId,\s*rows: invoices,\s*\}\)/,
+    "the selected view is no longer a pure function of the address and the rows");
+  // No state behind it. A setter here is a second answer to which tab is showing, and the two
+  // would disagree on exactly the paths nobody clicks through by hand.
+  assert.doesNotMatch(page, /setFocusTab|\[focusTab,|const urlTab =/,
+    "the selected view went back into component state — Back and a refresh can disagree again");
 
-  // [GATE-VENSTER] Real code at both ends, both asserted found, the end searched after the start.
-  const start = page.indexOf("const focusSectie = focusInvoiceTab(");
+  // Resolving during render is also what makes the deep-link landing work: by the time the effect
+  // runs, the focused row is mounted in its own panel and has a box for landRowUnderChrome() to
+  // measure. [GATE-VENSTER] Real code at both ends, both asserted found, the end after the start.
+  const start = page.indexOf("if (!focusId || !invoices.some(i => i.id === focusId)) {");
   assert.notEqual(start, -1, "the focus effect is not where this gate expects it");
-  const eind = page.indexOf("setHighlightId(null)", start);
+  const eind = page.indexOf("setHighlightId(null), 3200)", start);
   assert.notEqual(eind, -1, "the end of the focus effect is not where this gate expects it");
   const effect = page.slice(start, eind);
   assert.ok(effect.length > 200 && effect.length < 1200, `the focus window is ${effect.length} characters`);
-
-  // The panel has to switch BEFORE the row is measured: landRowUnderChrome() reads a bounding box,
-  // and a row inside an unmounted panel has none. So the tab is set first, the scroll is scheduled
-  // after — in that order, in one effect.
-  const zet = effect.indexOf("setFocusTab(focusSectie)");
-  const land = effect.indexOf("landRowUnderChrome(");
-  assert.ok(zet > 0 && land > zet,
-    "the focused row is measured before its panel is selected — it would land on nothing");
-  assert.ok(effect.indexOf("setExpandedId(focusId)") > zet,
-    "the row is expanded before its panel is selected");
+  assert.ok(effect.indexOf("setExpandedId(focusId)") < effect.indexOf("landRowUnderChrome("),
+    "the row is measured before it is expanded");
+  assert.doesNotMatch(effect, /setFocusTab|invoiceTabHref/,
+    "the focus effect started deciding the tab — that decision belongs in the render, or the row is not mounted when it is measured");
+  // A spent deep link takes its highlight with it. This effect's cleanup has already cancelled the
+  // fade, so a ring left standing here would sit on that row for the rest of the session.
+  assert.ok(effect.indexOf("void (async () => { setHighlightId(null) })()") < effect.indexOf("setExpandedId(focusId)"),
+    "nothing clears the highlight when the focus is gone — the ring never fades");
 });
 
 test("[KWT-TABS] a count is only ever drawn over a read that answered", () => {
@@ -38180,28 +38192,48 @@ test("[KWT-TABS] a count is only ever drawn over a read that answered", () => {
     "the invoice total is printed again over a read that failed");
 });
 
-test("[KWT-TABS] a view change never throws away a proposal the accountant has typed", () => {
+test("[KWT-TABS] an unsent proposal outlives the row it was typed in", () => {
   const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
-
-  // VoorstelFormulier owns its own draft — five amounts and the REASON the client will read — so
-  // unmounting its row takes them with it. It opens only on a booked, unpaid purchase invoice,
-  // which is only ever in Crediteuren, so leaving that view is the one move that loses the work.
   const form = code("src/app/dashboard/clients/[id]/VoorstelFormulier.tsx");
-  assert.match(form, /const \[reden, setReden\] = useState\(''\)/,
-    "the draft moved out of the form — this gate is watching the wrong thing");
 
-  // [GATE-VENSTER] Real code at both ends, both asserted found, the end searched after the start.
+  // THE GUARANTEE, and it is not the question below. The row carrying the form unmounts whenever
+  // another view is shown, and only one of those paths can be intercepted: Back, Forward and a
+  // ?focus= deep link resolving elsewhere all change the visible tab without passing through any
+  // handler this screen owns. So the draft lives ABOVE the panel, where nothing that changes the
+  // tab can reach it.
+  assert.match(page, /const \[voorstelConcept, setVoorstelConcept\] = useState<VoorstelConcept \| null>\(null\)/,
+    "the typed correction went back inside the row — Back and Forward would silently discard it");
+  assert.match(page, /concept=\{voorstelConcept\}/, "the form is no longer handed the screen's draft");
+  assert.match(page, /onConcept=\{setVoorstelConcept\}/, "what is typed no longer reaches the screen");
+  // The form keeps no second copy: two answers to what was typed, and the one that survives a
+  // remount would be the empty one.
+  for (const veld of ["ex", "btw", "inc", "datum", "vervalt", "reden"])
+    assert.doesNotMatch(form, new RegExp(`useState\\(.*\\b${veld}\\b`, "i"),
+      `${veld} is state inside the form again — it dies with the row`);
+  assert.match(form, /const \{ ex, btw, inc, datum, vervalt, reden \} = concept/,
+    "the form stopped rendering the draft it is handed");
+
+  // MEMORY ONLY. This batch adds no persistence and no correction lifecycle: an unsent proposal is
+  // gone when the screen is, which is what an unsent proposal should be.
+  const venster = page.slice(page.indexOf("const [voorstelConcept"), page.indexOf("const [sortAsc"));
+  assert.ok(venster.length > 200, "the draft declaration is not where this gate expects it");
+  assert.doesNotMatch(venster, /localStorage|sessionStorage|supabase|fetch\(/,
+    "the draft started being persisted — that is a lifecycle, and this batch adds none");
+
+  // …and the one path that CAN ask, does. [GATE-VENSTER] Real code at both ends, both found.
   const start = page.indexOf("async function naarTab(");
   assert.notEqual(start, -1, "the tab navigation is not where this gate expects it");
   const eind = page.indexOf("router.push(invoiceTabHref(", start);
   assert.notEqual(eind, -1, "the tab navigation no longer navigates");
-  const venster = page.slice(start, eind);
-  assert.ok(venster.length > 100 && venster.length < 900, `the navigation window is ${venster.length} characters`);
-
-  // The question comes BEFORE the navigation, and a refusal leaves the screen exactly as it was.
-  assert.match(venster, /if \(voorstelOpenVoor\) \{/, "an open proposal no longer stops a view change");
-  assert.match(venster, /await dialog\.confirm\(\{/, "the draft is discarded without a word");
-  assert.match(venster, /if \(!weg\) return/, "declining the question navigates anyway");
-  // …and nothing is written either way: this refuses a navigation, it does not undo anything.
-  assert.doesNotMatch(venster, /fetch\(|supabase/, "a view change started writing to the server");
+  const nav = page.slice(start, eind);
+  assert.ok(nav.length > 100 && nav.length < 900, `the navigation window is ${nav.length} characters`);
+  assert.match(nav, /if \(voorstelOpenVoor\) \{/, "an open proposal no longer stops a view change");
+  assert.match(nav, /await dialog\.confirm\(\{/, "the accountant leaves an open proposal without a word");
+  // A refusal REPORTS itself, or the strip moves the keyboard onto a tab it did not open.
+  assert.match(nav, /if \(!door\) return false/, "declining navigates anyway, or does not say it declined");
+  assert.match(page, /async function naarTab\(key: InvoiceTabKey\): Promise<boolean>/,
+    "activation stopped telling the strip whether it happened");
+  // Nothing is written either way: this refuses a navigation, it does not undo anything.
+  assert.doesNotMatch(nav, /fetch\(|supabase|setVoorstelConcept\(null\)/,
+    "a view change writes to the server, or throws the draft away after asking");
 });

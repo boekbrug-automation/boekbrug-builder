@@ -15,8 +15,8 @@ import Aandachtspunten from '@/components/kantoor/Aandachtspunten'
 // in the pure module; the strip that renders them holds no language of its own.
 import FactuurTabs from '@/components/kantoor/FactuurTabs'
 import {
-  countInvoiceTabs, focusInvoiceTab, invoiceSection, invoiceTabHref, invoiceTabId,
-  invoiceTabPanelId, invoiceTabRows, readInvoiceTab, type InvoiceTabKey,
+  countInvoiceTabs, invoiceSection, invoiceTabHref, invoiceTabId, invoiceTabPanelId,
+  invoiceTabRows, resolveInvoiceTab, type InvoiceTabKey,
 } from '@/lib/period-invoice-tabs'
 import { createClient } from '@/lib/supabase'
 import { useRouter, useParams, usePathname, useSearchParams } from 'next/navigation'
@@ -43,7 +43,9 @@ import { isOverdue } from '@/components/invoice/InvoiceRow'
 // open en dicht terwijl de eigenaar een factuurnummer probeerde te kopiëren.
 import { onRowTap } from '@/lib/row-tap'
 import DateFieldNL from '@/components/ui/DateFieldNL'
-import { VoorstelFormulier, type VoorstelStatus } from '../VoorstelFormulier'
+import {
+  VoorstelFormulier, voorstelConceptVan, type VoorstelConcept, type VoorstelStatus,
+} from '../VoorstelFormulier'
 import { askInvoiceQuestion, INVOICE_QUESTION_ROUTE } from '@/lib/accountant-invoice-question-flow'
 
 // De kwartaalpagina leest alleen deze velden van een factuur. Ze expliciet noemen maakt
@@ -216,6 +218,18 @@ export default function KwartaalPage() {
   // [VOORSTEL] The latest proposal per invoice (its status), and which row has the form open.
   const [voorstelStatus, setVoorstelStatus] = useState<Record<string, VoorstelStatus>>({})
   const [voorstelOpenVoor, setVoorstelOpenVoor] = useState<string | null>(null)
+  // [KWT-TABS] …and WHAT HAS BEEN TYPED INTO IT, which used to live inside the form itself.
+  //
+  // With the three invoice lists behind tabs, the row carrying the form unmounts whenever another
+  // view is shown — and not every way that happens can be intercepted. A click can be asked about;
+  // the browser's Back and Forward buttons cannot, and neither can a `?focus=` deep link resolving
+  // to a view of its own. A confirmation therefore cannot be the guarantee. Holding the draft
+  // above the panel is: the amounts and the reason survive every one of those paths, because
+  // nothing that changes the visible tab touches this state.
+  //
+  // Memory only — no column, no localStorage, no draft lifecycle. It is gone when the screen is,
+  // which is exactly what an unsent proposal should be.
+  const [voorstelConcept, setVoorstelConcept] = useState<VoorstelConcept | null>(null)
   // [TRUST-ACCOUNTANT] The quarter tiles must show the SAME reconciled, turnover-aware
   // figures as the owner's /klaar, the Brug hub and the ZIP — not an invoices-only
   // client-side sum (which, for a retail/cash client, is a fraction of the real omzet
@@ -276,54 +290,6 @@ export default function KwartaalPage() {
   const focusId = searchParams.get('focus')
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
-
-  // ── [KWT-TABS] Which of the three invoice views is on screen ───────────────
-  //
-  // The URL is the answer, so the view survives a refresh, travels in a shared link and comes back
-  // under the browser's Back button. An unreadable `tab` is not an error worth a screen about:
-  // readInvoiceTab falls to Debiteuren, which is a real answer.
-  //
-  // `focusTab` is the one thing allowed to outrank it, and only until the accountant says
-  // otherwise. Batch 2 promises that a notification lands on its invoice; a link carrying
-  // `focus=<a purchase invoice>&tab=debiteuren` — a stale bookmark, a link built before the
-  // invoice was paid — would honour the tab and hide the row the link exists for. It is held in
-  // state rather than written into the URL so the panel switches in the SAME render as the reveal:
-  // landRowUnderChrome() measures a row, and a row in an unmounted panel has no box to measure.
-  const urlTab = readInvoiceTab(searchParams.get('tab'))
-  const [focusTab, setFocusTab] = useState<InvoiceTabKey | null>(null)
-  const actieveTab: InvoiceTabKey = focusTab ?? urlTab
-
-  /** Choosing a view. Only `tab` changes — `q`, `year` and `focus` are this screen's identity and
-   *  its deep link, and a query string that quietly drops half of itself turns a view change into
-   *  a navigation. Pushed, not replaced, so Back returns to the view the accountant came from; and
-   *  `scroll: false` because the rows move, not the page. */
-  const kiesTab = (key: InvoiceTabKey) => { void naarTab(key) }
-
-  async function naarTab(key: InvoiceTabKey) {
-    if (key === actieveTab) return
-    // [KWT-TABS] The one thing a view change can destroy. VoorstelFormulier holds its own draft —
-    // the amounts AND the reason the accountant has typed for the client to read — so unmounting
-    // its row takes them with it. The form only opens on a booked, unpaid PURCHASE invoice, which
-    // is only ever in Crediteuren, so leaving that view is the single move that loses it.
-    //
-    // Never in silence. On a screen whose job is asserting what has been checked, work that
-    // disappears without a word is the defect; one question is not the friction it looks like.
-    // Nothing is written here either way — this refuses a navigation, it does not undo anything.
-    if (voorstelOpenVoor) {
-      const weg = await dialog.confirm({
-        title: t('bh.kwt.voorstel.wegVraag'),
-        message: t('bh.kwt.voorstel.wegUitleg'),
-        confirmLabel: t('bh.kwt.voorstel.wegKnop'),
-        danger: true,
-      })
-      if (!weg) return
-      setVoorstelOpenVoor(null)
-    }
-    // From here on the accountant's own choice wins: otherwise the focused invoice would drag the
-    // panel back every time they looked at another view.
-    setFocusTab(null)
-    router.push(invoiceTabHref(pathname, searchParams.toString(), key), { scroll: false })
-  }
 
   useEffect(() => {
     // [KANTOOR-PERIODE] The cancellation half of the contract. React runs this cleanup before the
@@ -567,19 +533,21 @@ export default function KwartaalPage() {
   // [BRIDGE-NOTIF] When invoices are loaded and a ?focus= row exists, reveal it.
   useEffect(() => {
     if (loading) return
-    // [KWT-TABS] Which view the deep link forces — read off the ROW, through the same predicates
-    // the list renders, so the tab and the list cannot disagree about where an invoice lives.
-    //
-    // Null is set deliberately, not skipped. It is the answer when the link carries no focus, and
-    // when the focused invoice is not in this quarter — and it is what clears the previous
-    // period's answer when the accountant moves to another quarter, so a Q2 section can never pin
-    // the panel in Q3. With focusTab null the URL's own tab governs again.
-    const focusSectie = focusInvoiceTab(focusId, invoices)
+    if (!focusId || !invoices.some(i => i.id === focusId)) {
+      // [KWT-TABS] There is nothing to reveal: the deep link was spent by a manual tab choice
+      // (which drops `?focus=`), or it names an invoice from another quarter. Take the ring off
+      // with it. React has just run this effect's CLEANUP, which cancelled the fade timer — so a
+      // highlight left standing here would sit on that row for the rest of the session, and the
+      // accountant would come back to a blue ring around an invoice nothing is asking about.
+      void (async () => { setHighlightId(null) })()
+      return
+    }
+    // [KWT-TABS] The panel this row lives in is already selected: actieveTab resolves the focused
+    // invoice's section during RENDER, so by the time this effect runs the row is mounted and has
+    // a box for landRowUnderChrome() to measure. No tab is set from here, and nothing about the
+    // view is remembered — see the note above actieveTab.
     // De onthulling hoort bij dezelfde beweging als het scrollen: binnen de wikkel draait
     // ze in dezelfde tick, maar telt ze niet als synchrone setState in de effect-body.
-    void (async () => { setFocusTab(focusSectie) })()
-    if (!focusId) return
-    if (!invoices.some(i => i.id === focusId)) return
     void (async () => {
       setExpandedId(focusId)
       setHighlightId(focusId)
@@ -609,6 +577,65 @@ export default function KwartaalPage() {
   const shown = rawKw
     ? sorted.filter((inv) => rowMatchesQuery(rawKw, [inv.invoice_number, inv.client_name], [getAmount(inv)]))
     : sorted
+
+  // ── [KWT-TABS] Which of the three invoice views is on screen ───────────────
+  //
+  // BELOW the workspace memo on purpose, with the other values derived from the rows. Resolving
+  // the tab means handing `invoices` to a function, and doing that ABOVE the memo makes the React
+  // Compiler treat `lezing` as possibly mutated afterwards — it then refuses to preserve the
+  // memoisation of `werk` and skips optimising this component, as an eslint error naming a memo
+  // this change never touched. Nothing about the behaviour depends on the position; the compiler's
+  // reading of it does, and the diagnostic points somewhere else entirely, so: keep it here.
+  //
+  // A FUNCTION OF THE ADDRESS, and of nothing this component remembers. Same URL plus same rows,
+  // same visible tab — on a refresh, on Back, on Forward, on a link pasted into a chat.
+  //
+  // The first version kept the focus-derived tab in state, and that was the bug: Back restored a
+  // URL carrying `?focus=`, the state said null because the accountant had since picked a tab by
+  // hand, and one address rendered two different views depending on how you reached it. Nothing is
+  // remembered here now, so there is nothing to disagree with the URL — and resolving during
+  // render (rather than in an effect) also means the focused row is mounted in the same paint that
+  // selects its panel, which is what landRowUnderChrome() needs to have a box to measure.
+  //
+  // `focus` wins while it is there, because it is an ENTRY INSTRUCTION: Batch 2 promises a
+  // notification lands on its invoice, and a stale `tab=debiteuren` beside it must not hide a
+  // purchase invoice. Picking a view by hand SPENDS it — see invoiceTabHref.
+  const actieveTab: InvoiceTabKey = resolveInvoiceTab({
+    tabParam: searchParams.get('tab'),
+    focusId,
+    rows: invoices,
+  })
+
+  /**
+   * Choosing a view, and saying whether it happened.
+   *
+   * `q`, `year` and anything else in the address travel unchanged; only `tab` is set and `focus`
+   * is spent. Pushed, not replaced, so Back returns to the view — deep link and all — that the
+   * accountant came from; `scroll: false` because the rows move, not the page.
+   *
+   * The boolean is the strip's contract: a refusal must leave the keyboard where it was, or
+   * `aria-selected` and the focus ring end up on two different tabs.
+   */
+  async function naarTab(key: InvoiceTabKey): Promise<boolean> {
+    if (key === actieveTab) return true
+    // [KWT-TABS] A courtesy, not the guarantee. What actually protects an unsent proposal is that
+    // its draft lives on THIS component (voorstelConcept) and therefore survives the row
+    // unmounting — which it has to, because Back, Forward and a `?focus=` deep link all change the
+    // visible tab without ever passing through here. This question exists because an accountant
+    // who typed a correction and then clicked another view has almost certainly mis-clicked, and
+    // one word is worth more than a silent disappearance from the screen. Nothing is written
+    // either way, and declining changes nothing at all — including the draft.
+    if (voorstelOpenVoor) {
+      const door = await dialog.confirm({
+        title: t('bh.kwt.voorstel.verlatenVraag'),
+        message: t('bh.kwt.voorstel.verlatenUitleg'),
+        confirmLabel: t('bh.kwt.voorstel.verlatenKnop'),
+      })
+      if (!door) return false
+    }
+    router.push(invoiceTabHref(pathname, searchParams.toString(), key), { scroll: false })
+    return true
+  }
 
   // [KWT-TABS] What each tab will actually show — or NOTHING at all. countInvoiceTabs answers null
   // for a read that failed and for one that has not come back, and the strip then draws no number:
@@ -931,7 +958,7 @@ export default function KwartaalPage() {
               <FactuurTabs
                 active={actieveTab}
                 counts={tabTellingen}
-                onSelect={kiesTab}
+                onSelect={naarTab}
                 t={t}
                 dir={LOCALE_META[locale].dir}
                 labelledBy={FACTUREN_KOP_ID}
@@ -1136,23 +1163,31 @@ export default function KwartaalPage() {
                                   {t(VOORSTEL_STATUS_KEY[voorstelStatus[invoice.id]])}
                                 </span>
                               )}
-                              {voorstelOpenVoor === invoice.id ? (
+                              {voorstelOpenVoor === invoice.id && voorstelConcept ? (
                                 <VoorstelFormulier
                                   clientId={clientId}
                                   invoice={invoice}
                                   t={t}
                                   DateField={DateFieldNL}
-                                  onClose={() => setVoorstelOpenVoor(null)}
+                                  /* [KWT-TABS] The typed amounts and reason, held by this screen so
+                                     they outlive the row — see the note above voorstelConcept. */
+                                  concept={voorstelConcept}
+                                  onConcept={setVoorstelConcept}
+                                  onClose={() => { setVoorstelOpenVoor(null); setVoorstelConcept(null) }}
                                   onSent={() => {
                                     setVoorstelStatus((s) => ({ ...s, [invoice.id]: 'open' }))
                                     setVoorstelOpenVoor(null)
+                                    setVoorstelConcept(null)
                                     toast(t('bh.kwt.voorstel.verstuurd'))
                                   }}
                                   onError={(msg: string | null) => toast(msg || t('bh.kwt.voorstel.fout'), { tone: 'error' })}
                                 />
                               ) : voorstelStatus[invoice.id] !== 'open' && (
                                 <button
-                                  onClick={() => setVoorstelOpenVoor(invoice.id)}
+                                  onClick={() => {
+                                    setVoorstelOpenVoor(invoice.id)
+                                    setVoorstelConcept(voorstelConceptVan(invoice))
+                                  }}
                                   style={{ width: '100%', padding: '8px 16px', borderRadius: 8, backgroundColor: '#FFFFFF', color: '#1A73E8', fontSize: 13, fontWeight: 500, border: '1px solid #1A73E8', cursor: 'pointer' }}>
                                   {t('bh.kwt.voorstel.knop')}
                                 </button>
