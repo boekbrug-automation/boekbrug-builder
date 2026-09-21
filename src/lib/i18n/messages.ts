@@ -15249,6 +15249,14 @@ export const MESSAGES = {
   'bh.kwt.actie.verwerkt': { nl: 'Verwerkt', ar: 'تمت المعالجة', en: 'Processed' },
   'bh.kwt.actie.inBehandeling': { nl: 'In behandeling', ar: 'قيد المعالجة', en: 'In progress' },
   'bh.kwt.actie.vraag': { nl: 'Vraag', ar: 'سؤال', en: 'Question' },
+  // [KANTOOR-PERIODE] Structural labels for the period workspace — they name a SPAN, never a
+  // problem. Every diagnosis on that block is the sentence its own source wrote.
+  'kw.werk.kop': { nl: 'Aandachtspunten', ar: 'نقاط تحتاج انتباهًا', en: 'Points of attention' },
+  'kw.werk.scope.administratie': { nl: 'Administratiebreed', ar: 'على مستوى الإدارة كلها', en: 'Across the administration' },
+  'kw.werk.scope.nummering': { nl: 'Nummering', ar: 'الترقيم', en: 'Numbering' },
+  // The drawer is checked on the CURRENT quarter by /api/money-audit, never on the selected one —
+  // so the label says which quarter it is about instead of letting the page imply the wrong one.
+  'kw.werk.scope.kas': { nl: 'Kas · huidig kwartaal', ar: 'الصندوق · الربع الحالي', en: 'Cash · current quarter' },
   'bh.kwt.sectie.debiteuren': { nl: 'Debiteuren', ar: 'الذمم المدينة', en: 'Receivables' },
   'bh.kwt.sectie.debiteurenSub': { nl: 'verzonden — nog te ontvangen', ar: 'مُرسَلة — لم تُحصَّل بعد', en: 'sent — not yet received' },
   'bh.kwt.sectie.crediteuren': { nl: 'Crediteuren', ar: 'الذمم الدائنة', en: 'Payables' },

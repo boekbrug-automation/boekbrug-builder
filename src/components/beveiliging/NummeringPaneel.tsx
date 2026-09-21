@@ -36,6 +36,9 @@ import { translator } from "@/lib/i18n/t";
 import { useLocale } from "@/lib/i18n/use-locale";
 import type { MessageKey } from "@/lib/i18n/messages";
 import type { SeriesReport } from "@/lib/invoice-continuity";
+// [KANTOOR-PERIODE] The sentences below are composed in ONE place now, because the period
+// workspace shows the same findings and a second copy is how a third vocabulary is born.
+import { numberingLines, numberingProblems, numberingUnreadableText } from "@/lib/numbering-lines";
 
 type Report = {
   series: SeriesReport[];
@@ -47,12 +50,6 @@ type Report = {
 
 /** Three states, never blurred — the same discipline as every other panel in this app. */
 type Load = { state: "reading" } | { state: "unreadable" } | { state: "ok"; report: Report };
-
-/** The series name an owner recognises: the document type plus its year. */
-function seriesLabel(s: SeriesReport, t: (k: "doorlopend.reeks.factuur" | "doorlopend.reeks.creditnota") => string): string {
-  const name = s.type === "creditnota" ? t("doorlopend.reeks.creditnota") : t("doorlopend.reeks.factuur");
-  return s.year === null ? name : `${name} ${s.year}`;
-}
 
 /** Who is reading: the owner about their own series, or the accountant about a client's. */
 export type PanelAudience = "owner" | "accountant";
@@ -130,9 +127,7 @@ export function NummeringUitslag({
     );
   }
 
-  const problems = report.series.filter(
-    (s) => s.missing.length > 0 || s.duplicates.length > 0 || (s.burnedAtEnd ?? 0) > 0,
-  );
+  const problems = numberingProblems(report.series);
 
   // Clean, and the whole check ran: one line, no box. The owner has now seen that it is watched.
   if (report.clean && problems.length === 0) {
@@ -157,18 +152,17 @@ export function NummeringUitslag({
     <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2">
       <p className="text-sm font-semibold text-amber-900">{t(acc ? "doorlopend.gatenTitelAcc" : "doorlopend.gatenTitel")}</p>
 
-      {problems.map((s) => (
-        <p key={`${s.type}-${s.year ?? "x"}`} className="text-sm text-amber-900 leading-relaxed">
-          <span className="font-semibold">{seriesLabel(s, t)}</span>{" "}
-          {s.missing.length > 0 && t("doorlopend.ontbreekt", { nummers: s.missing.join(", ") })}{" "}
+      {/* [KANTOOR-PERIODE] Same pieces, same order, same bold label — only their composition moved
+          to numbering-lines.ts so the period workspace can read the identical sentences. */}
+      {numberingLines(report.series, t, audience).map((line) => (
+        <p key={line.key} className="text-sm text-amber-900 leading-relaxed">
+          <span className="font-semibold">{line.label}</span>{" "}
+          {line.missing}{" "}
           {/* [REEKS-ZONDER-FACTUUR] Twee zinnen, want het zijn twee dingen. "Aan het eind van de
               reeks" veronderstelt een reeks; issued 0 betekent dat er nooit iets in geschreven is,
               en dat is een ander bericht met een ander antwoord erop. */}
-          {(s.burnedAtEnd ?? 0) > 0 &&
-            (s.issued === 0
-              ? t(acc ? "doorlopend.reeksLeegAcc" : "doorlopend.reeksLeeg", { aantal: s.burnedAtEnd as number })
-              : t(acc ? "doorlopend.eindeReeksAcc" : "doorlopend.eindeReeks", { aantal: s.burnedAtEnd as number }))}{" "}
-          {s.duplicates.length > 0 && t("doorlopend.dubbel", { nummers: s.duplicates.join(", ") })}
+          {line.burned}{" "}
+          {line.duplicates}
         </p>
       ))}
 
@@ -176,7 +170,7 @@ export function NummeringUitslag({
         // Not a gap and not dropped: a number in a format we do not know. Naming them lets the owner
         // recognise his own imported history instead of wondering what we mean.
         <p className="text-sm text-amber-900 leading-relaxed">
-          {t(acc ? "doorlopend.onleesbaarAcc" : "doorlopend.onleesbaar", { nummers: report.unreadable.slice(0, 8).join(", ") })}
+          {numberingUnreadableText(report.unreadable, t, audience)}
         </p>
       )}
 

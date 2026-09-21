@@ -25081,13 +25081,21 @@ test("[REEKS-ZONDER-FACTUUR] the counters are read for series the invoices never
 });
 
 test("[REEKS-ZONDER-FACTUUR] the screen says which of the two it is", () => {
-  const ui = code("src/components/beveiliging/NummeringPaneel.tsx");
+  // [KANTOOR-PERIODE] The composition moved out of NummeringPaneel and into numbering-lines.ts,
+  // because the accountant's period workspace shows the same finding and a second copy of these
+  // sentences is how a third vocabulary is born. The DECISION this gate watches did not move: an
+  // empty series and a burned tail stay two different messages, with two different answers to
+  // them. It is now watched where it is made.
+  const ui = code("src/lib/numbering-lines.ts");
 
   assert.match(
-    ui, /s\.issued === 0[\s\S]{0,120}?doorlopend\.reeksLeeg/,
+    ui, /s\.issued === 0[\s\S]{0,160}?doorlopend\.reeksLeeg/,
     "an empty series is reported with the end-of-series sentence again — which says the counter " +
       "stands higher than the owner's highest invoice, in a series where there is no invoice at all",
   );
+  // And both readers take their line from there rather than writing one.
+  assert.match(code("src/components/beveiliging/NummeringPaneel.tsx"), /numberingLines\(report\.series, t, audience\)/);
+  assert.match(code("src/lib/period-workspace.ts"), /numberingLines\(series, t, "accountant"\)/);
 });
 
 // ─── [GENEGEERD-TELT] Een genegeerde regel die toch in de kosten bleef staan ──────────
@@ -37590,13 +37598,19 @@ test("[ONTVANGEN-BESLUIT] the question is shown where it is a question, not wher
 // screens cannot quietly put the paragraphs back.
 
 test("[KANTOOR-RUST] the shared checks speak to the accountant in the accountant's voice", () => {
-  // The quarter workspace hands both panels the audience they are read by. Without it the panels
-  // default to the owner's voice — correct on /klaar, wrong-role on a client's quarter.
-  const kwartaal = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
-  assert.match(kwartaal, /<NummeringPaneel clientId=\{clientId\} audience="accountant" \/>/,
-    "the numbering panel on the accountant's quarter screen no longer says who is reading it");
-  assert.match(kwartaal, /<GeldPaneel clientId=\{clientId\} audience="accountant" \/>/,
-    "the money panel on the accountant's quarter screen no longer says who is reading it");
+  // [KANTOOR-PERIODE] The two panels no longer stand on the client's quarter screen — their
+  // findings are inside Aandachtspunten now, and a second mount would fetch the same two routes
+  // twice. The INVARIANT this gate was written for is unchanged and still pinned: whatever shows
+  // these checks to the boekhouder asks for the accountant's voice, never the owner's default.
+  const werkblad = code("src/lib/period-workspace.ts");
+  assert.match(werkblad, /numberingLines\(series, t, "accountant"\)/,
+    "the numbering findings on the accountant's quarter screen no longer say who is reading them");
+  assert.match(werkblad, /findingText\(f, "accountant"\)/,
+    "the money findings on the accountant's quarter screen no longer say who is reading them");
+  assert.doesNotMatch(werkblad, /"owner"/, "the owner's voice reached the accountant's workspace");
+  // …and the panels keep their accountant audience where they are still mounted with one.
+  const paneel = code("src/components/beveiliging/NummeringPaneel.tsx");
+  assert.match(paneel, /audience\?: PanelAudience/, "the panels stopped taking an audience at all");
 
   // And the accountant's sentences never address the owner, and never send the boekhouder to
   // "je boekhouder". Checked on the catalogue, because that is where a rewrite would put it back.
@@ -37838,4 +37852,140 @@ test("[KANTOOR-LINKS] an answer carries a typed invoice, never a parsed sentence
   const vragen = code("src/app/dashboard/vragen/VragenClient.tsx");
   assert.match(vragen, /about: \{ type: 'invoice', id: vraag\.invoice\.id \}/);
   assert.match(vragen, /isFactuur && vraag\.invoice\?\.id/, "a document question would now claim an invoice");
+});
+
+// ─── [KANTOOR-PERIODE] The period is a workspace, and it still only reports ────────────────────
+//
+// Batch 3 put the known work above the figures on the client's quarter. The whole risk of that
+// move is that a PRESENTATION layer starts behaving like a source: inventing a period for a
+// finding that has none, writing a third sentence for a problem that already has one, or
+// remembering that somebody ticked something. These gates hold the three.
+
+test("[KANTOOR-PERIODE] the workspace reuses source sentences and invents none", () => {
+  const ws = code("src/lib/period-workspace.ts");
+
+  // Every family's text comes out of its own source, through the function that owns that voice.
+  assert.match(ws, /text: m\.title/, "readiness' own title is no longer what is shown");
+  assert.match(ws, /text: r\.title/, "the risk's own title is no longer what is shown");
+  assert.match(ws, /text: findingText\(f, "accountant"\)/, "Geld stopped speaking with findingText");
+  assert.match(ws, /text: numberingLineText\(line\)/, "the numbering line is composed somewhere else now");
+  assert.equal(
+    (ws.match(/text: findingText\(f, "accountant"\)/g) ?? []).length,
+    2, // the administration-wide violations and the drawer
+    "a money family stopped using the accountant sentence",
+  );
+  assert.doesNotMatch(ws, /findingText\([^)]*"owner"/, "the owner's sentence reached the accountant's screen");
+
+  // The ONE composed string is an invoice's identity — its existing status word and its own
+  // number and counterparty. Everything else would be a third vocabulary.
+  assert.match(ws, /t\("bh\.kwt\.actie\.vraag"\), inv\.invoice_number, inv\.client_name/);
+
+  // Readiness' owner-facing halves never travel.
+  assert.doesNotMatch(ws, /\.detail\b/, "the owner-voiced readiness detail is read again");
+  assert.doesNotMatch(ws, /\bfix\b/, "readiness' owner-route fix href is read again");
+  assert.doesNotMatch(ws, /\.score\b|\.status\b/, "the readiness score or status is read again");
+});
+
+test("[KANTOOR-PERIODE] workKey groups, and never decides what is true", () => {
+  const ws = code("src/lib/period-workspace.ts");
+  // Every use of it sits inside a groupKey — not an equality test, not a merge, not a lookup.
+  const uses = ws.match(/workKey\(/g) ?? [];
+  assert.ok(uses.length >= 2, "the readiness grouping key is gone");
+  const inGroupKey = ws.match(/groupKey: `[^`]*workKey\(/g) ?? [];
+  assert.equal(inGroupKey.length, uses.length, "workKey is used somewhere that is not a groupKey");
+  // …and the key is namespaced by source family, so a fold can never span two of them.
+  for (const familie of ["readiness-missing:", "readiness-risk:", "geld:", "kas:", "nummering:"]) {
+    assert.ok(ws.includes(`groupKey: \`${familie}`) || ws.includes(`groupKey: "${familie}`),
+      `${familie} group keys are no longer namespaced`);
+  }
+  // groupWork() is the CROSS-CLIENT helper and deduplicates one client per kind; inside one
+  // client's period that would silently delete findings.
+  assert.doesNotMatch(ws, /groupWork/, "the cross-client grouper reached a single client's period");
+});
+
+test("[KANTOOR-PERIODE] a money finding is never given a period, and the drawer keeps its own", () => {
+  const ws = code("src/lib/period-workspace.ts");
+  // [GATE-VENSTER] Real code at both ends, both asserted found, the end searched after the start.
+  const start = ws.indexOf("const geldItems: WorkItem[] = []");
+  assert.notEqual(start, -1, "the money branch is not where this gate expects it");
+  const end = ws.indexOf("const nummeringItems: WorkItem[] = []", start);
+  assert.notEqual(end, -1, "the end of the money branch is not where this gate expects it");
+  const geld = ws.slice(start, end);
+  assert.ok(geld.length > 400, "the money window is too small to be the block it claims");
+
+  // /api/money-audit returns no date. Anything here that touched the selected period would be
+  // this screen inventing the one fact an accountant files on.
+  assert.doesNotMatch(geld, /\byear\b|\bquarter\b|\bperiod\b/, "the money branch reached for a period");
+  assert.match(geld, /scope: "administratie"/);
+  // The drawer is computed on the CURRENT Amsterdam quarter by the route, so it never lands
+  // under the selected one.
+  assert.match(geld, /scope: "kas"/);
+  assert.doesNotMatch(geld, /scope: "kwartaal"/, "a money finding was placed in the selected quarter");
+  // Neither family gets a destination: entityId is a bank transaction, one half of a pair, or a
+  // date, and the accountant has no screen for any of those.
+  assert.doesNotMatch(geld, /href:/, "a Geld finding was given a target Batch 2 never proved");
+});
+
+test("[KANTOOR-PERIODE] the block counts nothing globally and remembers nothing", () => {
+  const blok = code("src/components/kantoor/Aandachtspunten.tsx");
+
+  // No total. The only count is the local fold, through the key the werkboard already uses.
+  assert.doesNotMatch(blok, /aandachtspunten', \{ n/i);
+  const tellingen = blok.match(/t\('bh\.werk\.meer'/g) ?? [];
+  assert.equal(tellingen.length, 2, "the fold counts changed shape");
+  // A progress measure in the TEXT — not in the CSS, where `borderRadius: '50%'` lives.
+  const tekst = blok.replace(/style=\{\{[^}]*\}\}/g, "");
+  assert.doesNotMatch(tekst, /%|percenta|voortgang|opgelost|afgerond/i, "a progress measure appeared");
+  assert.doesNotMatch(tekst, /\bscore\b/i, "a score appeared");
+  assert.doesNotMatch(blok, /views\.length|items\.length\}|\.length\}\s*aandacht/i, "a global count appeared");
+
+  // Read-only, in the file and in the routes it may touch.
+  for (const bestand of ["src/components/kantoor/Aandachtspunten.tsx", "src/lib/period-workspace.ts"]) {
+    const src = code(bestand);
+    assert.doesNotMatch(src, /\.(insert|update|upsert|delete)\(/, `${bestand} writes to the database`);
+    assert.doesNotMatch(src, /method:\s*'(POST|PATCH|PUT|DELETE)'|method:\s*"(POST|PATCH|PUT|DELETE)"/, `${bestand} sends a write`);
+    assert.doesNotMatch(src, /localStorage|sessionStorage/, `${bestand} remembers something`);
+  }
+
+  // Clean and fully read is silence — never a green card the size of a warning.
+  assert.match(blok, /if \(!workspaceHasContent\(views\)\) return null/);
+});
+
+test("[KANTOOR-PERIODE] the quarter screen opens on the work, and the panels moved into it", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // The two standalone panels are gone from THIS screen — their findings are in the block, and
+  // two mounts would fetch the same routes a second time.
+  assert.doesNotMatch(page, /<NummeringPaneel/, "the numbering panel is mounted twice again");
+  assert.doesNotMatch(page, /<GeldPaneel/, "the money panel is mounted twice again");
+  // …and they are untouched where the OWNER reads them.
+  const klaar = code("src/app/dashboard/klaar/KlaarClient.tsx");
+  assert.match(klaar, /<NummeringPaneel \/>/, "the owner's numbering panel disappeared");
+  assert.match(klaar, /<GeldPaneel \/>/, "the owner's money panel disappeared");
+
+  // Order: known work → the figures → the actions → the evidence.
+  const werk = page.indexOf("<Aandachtspunten");
+  const cijfers = page.indexOf("bh.kwt.omzet");
+  const documenten = page.indexOf("bh.kwt.documenten");
+  // The heading of the invoice list as RENDERED. Not `bh.kwt.sectie.debiteuren`: that one also
+  // lives in the SECTIONS constant at the top of the file, so it would place the evidence above
+  // everything and the order assertion would pass for the wrong reason.
+  const facturen = page.indexOf("bh.kwt.facturen");
+  for (const [naam, i] of [["Aandachtspunten", werk], ["figures", cijfers], ["Documenten", documenten], ["invoices", facturen]] as const) {
+    assert.notEqual(i, -1, `${naam} is not where this gate expects it`);
+  }
+  assert.ok(werk < cijfers, "the figures come before the known work");
+  assert.ok(cijfers < documenten, "the actions come before the figures");
+  assert.ok(documenten < facturen, "the invoice evidence comes before the actions");
+
+  // The three figures are the three that were there. Resultaat was never on this page and Batch 3
+  // does not add it.
+  assert.match(page, /bh\.kwt\.btwSaldo/);
+  assert.doesNotMatch(page, /bh\.kwt\.resultaat/, "a fourth figure was added to this screen");
+
+  // One request per source, started together, each allowed to fail alone.
+  assert.match(page, /Promise\.allSettled\(/, "the three sources no longer fail independently");
+  for (const route of ["/api/readiness", "/api/money-audit", "/api/invoice/continuity"]) {
+    assert.equal((page.match(new RegExp(route.replace(/\//g, "\\/"), "g")) ?? []).length, 1, `${route} is fetched more than once`);
+  }
 });

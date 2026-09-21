@@ -8,9 +8,8 @@
 // Inline expand on row click — no page navigation
 // Action dropdown: Verwerkt / In behandeling / Vraag (Not Found removed)
 
-import { useState, useEffect, useRef } from 'react'
-import { NummeringPaneel } from '@/components/beveiliging/NummeringPaneel'
-import { GeldPaneel } from '@/components/beveiliging/GeldPaneel'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import Aandachtspunten from '@/components/kantoor/Aandachtspunten'
 import { createClient } from '@/lib/supabase'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import { useSubPageHeader } from '@/components/nav/SubPageHeaderContext'
@@ -22,6 +21,8 @@ import { EL1, M3, R, COLUMN, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 // [FOCUS-KOP] Where a deep-linked row must come to rest — see the header of that file.
 import { landRowUnderChrome } from '@/lib/focus-scroll'
 import { brugDocumentsHref } from '@/lib/accountant-deep-links'
+import { buildWorkspace, type MoneyFinding, type SourceRead } from '@/lib/period-workspace'
+import type { SeriesReport } from '@/lib/invoice-continuity'
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { isOverdue } from '@/components/invoice/InvoiceRow'
@@ -35,6 +36,13 @@ import { askInvoiceQuestion, INVOICE_QUESTION_ROUTE } from '@/lib/accountant-inv
 // De kwartaalpagina leest alleen deze velden van een factuur. Ze expliciet noemen maakt
 // zichtbaar waar de pagina van afhangt — en dat `total_inc_btw` en `btw_amount` in de
 // database leeg mogen zijn, wat de rekenhulpen hieronder nu netjes afvangen.
+/** [KANTOOR-PERIODE] The three payloads the attention block is built from, as read. */
+interface WorkspaceBronnen {
+  readiness: SourceRead<{ missing: { title: string }[]; risks: { title: string }[] }>
+  geld: SourceRead<{ violations: MoneyFinding[]; drawer: MoneyFinding[]; drawerChecked: boolean }>
+  nummering: SourceRead<{ series: SeriesReport[]; unreadable: string[]; countersRead: boolean }>
+}
+
 type KwartaalInvoice = Pick<InvoiceRow,
   'id' | 'direction' | 'status' | 'due_date' | 'invoice_date' | 'invoice_number' |
   'invoice_type' | 'client_name' | 'total_ex_btw' | 'btw_amount' | 'total_inc_btw' |
@@ -153,7 +161,9 @@ function ActionBadge({ value }: { value: string | null }) {
 
 export default function KwartaalPage() {
   const locale = useLocale()
-  const t = translator(locale)
+  // [KANTOOR-PERIODE] Stable per locale: the workspace memo downstream depends on `t`, and a fresh
+  // translator every render would rebuild it on every keystroke in the search box.
+  const t = useMemo(() => translator(locale), [locale])
   const dialog = useDialog()
   const toast = useToast()
   const router       = useRouter()
@@ -186,6 +196,12 @@ export default function KwartaalPage() {
   // nor 5g). Sourced from /api/result (omzet/kosten) + /api/aangifte (5g saldo), the
   // exact endpoints the Brug KwartaalPanel already uses. One client, one truth.
   const [recon, setRecon] = useState<{ omzet: number; kosten: number; saldo: number } | null>(null)
+
+  // [KANTOOR-PERIODE] The known work, above the figures. Three reads, each allowed to fail ALONE:
+  // a money audit that did not answer must not erase a numbering gap, and a readiness that did not
+  // answer must not erase a money finding. Availability may degrade; financial truth may not.
+  // Null until the reads settle, so the block does not flash an empty "nothing to do".
+  const [bronnen, setBronnen] = useState<WorkspaceBronnen | null>(null)
   const [sortAsc, setSortAsc] = useState(false)
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -340,6 +356,90 @@ export default function KwartaalPage() {
     }
     load()
   }, [clientId, q, year])
+
+  // ── [KANTOOR-PERIODE] The three sources behind Aandachtspunten ──────────────
+  //
+  // One request each, all three started together, and every one of them allowed to come back
+  // empty-handed on its own. `lees` never throws and never rejects, so a dead socket on the money
+  // audit is a Geld that says "unknown" — not a page that loses its numbering findings with it.
+  //
+  // Not fetched per row, and not re-fetched when the locale changes: the SENTENCES come out of
+  // these payloads through buildWorkspace() below, which is a memo over the same raw reads.
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      const lees = async <T,>(url: string, pick: (json: Record<string, unknown>) => T): Promise<SourceRead<T>> => {
+        try {
+          const res = await fetch(url)
+          const json = await res.json().catch(() => null)
+          if (!res.ok || !json?.ok) return { ok: false }
+          return { ok: true, value: pick(json) }
+        } catch {
+          return { ok: false }
+        }
+      }
+      const klant = encodeURIComponent(clientId)
+      const settled = await Promise.allSettled([
+        lees(`/api/readiness?clientId=${klant}&year=${year}&quarter=${q}`, (j) => {
+          // Titles only. The score, the status, the owner-facing `detail` and the owner-route
+          // `fix` href are deliberately never read here — see [KANTOOR-RUST] batch 1.
+          const r = (j.report ?? {}) as { missing?: { title?: unknown }[]; risks?: { title?: unknown }[] }
+          const titels = (list?: { title?: unknown }[]) =>
+            (Array.isArray(list) ? list : [])
+              .map((m) => (typeof m?.title === 'string' ? { title: m.title } : null))
+              .filter((m): m is { title: string } => m !== null)
+          return { missing: titels(r.missing), risks: titels(r.risks) }
+        }),
+        lees(`/api/money-audit?clientId=${klant}`, (j) => ({
+          violations: Array.isArray(j.violations) ? (j.violations as MoneyFinding[]) : [],
+          drawer: Array.isArray(j.drawer) ? (j.drawer as MoneyFinding[]) : [],
+          // Careful direction: an answer that did not say the drawer ran did not run it.
+          drawerChecked: j.drawerChecked === true,
+        })),
+        lees(`/api/invoice/continuity?clientId=${klant}`, (j) => ({
+          series: Array.isArray(j.series) ? (j.series as SeriesReport[]) : [],
+          unreadable: Array.isArray(j.unreadable) ? (j.unreadable as string[]) : [],
+          countersRead: j.countersRead === true,
+        })),
+      ])
+      if (!alive) return
+      const uit = <T,>(r: PromiseSettledResult<SourceRead<T>>): SourceRead<T> =>
+        r.status === 'fulfilled' ? r.value : { ok: false }
+      setBronnen({
+        readiness: uit(settled[0] as PromiseSettledResult<SourceRead<{ missing: { title: string }[]; risks: { title: string }[] }>>),
+        geld: uit(settled[1] as PromiseSettledResult<SourceRead<{ violations: MoneyFinding[]; drawer: MoneyFinding[]; drawerChecked: boolean }>>),
+        nummering: uit(settled[2] as PromiseSettledResult<SourceRead<{ series: SeriesReport[]; unreadable: string[]; countersRead: boolean }>>),
+      })
+    })()
+    return () => { alive = false }
+  }, [clientId, q, year])
+
+  // The four scopes, from the raw reads plus the invoice rows this page already holds. No fourth
+  // request: the open questions are `accountant_status === 'vraag'` on rows that are right here.
+  const werk = useMemo(() => {
+    if (!bronnen) return null
+    return buildWorkspace(
+      {
+        clientId,
+        year,
+        quarter: q,
+        readiness: bronnen.readiness,
+        geld: bronnen.geld,
+        nummering: bronnen.nummering,
+        // [NO-SILENT-EMPTY] A failed invoice read is not "no open questions"; it is unknown, and
+        // buildWorkspace says so with the page's own read-failure sentence.
+        vragen: loadError
+          ? { ok: false }
+          : {
+              ok: true,
+              value: invoices
+                .filter((inv) => inv.accountant_status === 'vraag')
+                .map((inv) => ({ id: inv.id, invoice_number: inv.invoice_number, client_name: inv.client_name })),
+            },
+      },
+      t,
+    )
+  }, [bronnen, invoices, loadError, clientId, q, year, t])
 
   // [BRIDGE-NOTIF] When invoices are loaded and a ?focus= row exists, reveal it.
   useEffect(() => {
@@ -536,6 +636,39 @@ export default function KwartaalPage() {
 
       <div style={{ maxWidth: COLUMN.work, margin: '0 auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
 
+        {/* ── [KANTOOR-PERIODE] Het bekende werk, bovenaan ──────────────────────
+            De boekhouder opende dit scherm op knoppen, dan twee waarschuwingspanelen, dan cijfers,
+            en las daarna een paar honderd factuurregels om het WERK te ontdekken. Wat de app al
+            weet staat nu eerst; de cijfers eronder; de facturen als bewijs.
+
+            Vier bereiken, want de bronnen meten niet hetzelfde: readiness is dit kwartaal, de
+            geldaudit de hele administratie, de nummering per (jaar, reeks), en de kaslade het
+            HUIDIGE kwartaal (money-audit/route.ts rekent met amsterdamYear()). Alles onder één
+            kwartaalkop zetten zou de enige leugen zijn waar een boekhouder naar handelt.
+
+            Geen totaalgetal, geen groen vakje als alles klopt, en niets dat wordt onthouden —
+            zie de kop van Aandachtspunten.tsx. De oude NummeringPaneel/GeldPaneel staan hier niet
+            meer: hun bevindingen zitten in dit blok, en twee mounts zouden dezelfde routes een
+            tweede keer ophalen. Op de schermen van de EIGENAAR blijven ze onveranderd staan. */}
+        {werk && <Aandachtspunten views={werk} t={t} kwartaalLabel={`Q${q} ${year}`} />}
+
+        {/* Quarter summary */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+          {[
+            // [TRUST-ACCOUNTANT] Reconciled, turnover-aware figures (same as the ZIP +
+            // owner). While they load, show "…" rather than a wrong invoices-only sum.
+            { label: t('bh.kwt.omzet'),  value: recon ? NL_NUMBER.format(recon.omzet) : '…',  color: M3.success },
+            { label: t('bh.kwt.kosten'), value: recon ? NL_NUMBER.format(recon.kosten) : '…', color: M3.error },
+            { label: t('bh.kwt.btwSaldo'), value: recon ? NL_NUMBER.format(recon.saldo) : '…', color: '#7b1fa2' },
+          ].map(s => (
+            <div key={s.label} style={{ backgroundColor: M3.surface, borderRadius: R.lg, boxShadow: EL1, padding: 12, textAlign: 'center' }}>
+              <p style={{ fontSize: 11, color: '#5F6368', marginBottom: 2 }}>{s.label}</p>
+              <p style={{ fontSize: 14, fontWeight: 600, color: s.color, margin: 0 }}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+
+
         {/* [BRIDGE-A][POLISH ب-2/ب-3] Dead buttons removed (PDF Bank/CAMT/KW — legacy
             pre-pivot idea, never wired). Documenten now opens the Brug — the hub.
             [KANTOOR-LINKS] …and opens it ON this client and this quarter. It used to push the bare
@@ -586,37 +719,6 @@ export default function KwartaalPage() {
         {packageError && (
           <p style={{ fontSize: 12.5, color: '#B3261E', margin: '-8px 2px 0' }}>{packageError}</p>
         )}
-
-        {/* [BRUG] De twee vragen die een boekhouder als eerste stelt over een administratie, en die
-            tot vandaag alleen IN het kwartaalpakket zaten: loopt de nummering door (art. 35 Wet OB),
-            en kloppen de boeken met zichzelf. Ze staan hier boven de cijfers, want ze bepalen of die
-            cijfers iets waard zijn — en ze zwijgen op één regel als er niets aan de hand is.
-
-            JAARBREED, niet per kwartaal: de nummerteller loopt per (jaar, soort), en de geldaudit
-            vergelijkt facturen met hun betalingen ongeacht de periode. Daarom staan ze buiten de
-            kwartaalkiezer hieronder.
-
-            [KANTOOR-RUST] Geen kaart eromheen: voor de boekhouder zwijgen beide panelen als er
-            niets aan de hand is, en een lege kaart is dan een wit vak dat niets zegt. Een bevinding
-            brengt zijn eigen vak mee. */}
-        <NummeringPaneel clientId={clientId} audience="accountant" />
-        <GeldPaneel clientId={clientId} audience="accountant" />
-
-        {/* Quarter summary */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
-          {[
-            // [TRUST-ACCOUNTANT] Reconciled, turnover-aware figures (same as the ZIP +
-            // owner). While they load, show "…" rather than a wrong invoices-only sum.
-            { label: t('bh.kwt.omzet'),  value: recon ? NL_NUMBER.format(recon.omzet) : '…',  color: M3.success },
-            { label: t('bh.kwt.kosten'), value: recon ? NL_NUMBER.format(recon.kosten) : '…', color: M3.error },
-            { label: t('bh.kwt.btwSaldo'), value: recon ? NL_NUMBER.format(recon.saldo) : '…', color: '#7b1fa2' },
-          ].map(s => (
-            <div key={s.label} style={{ backgroundColor: M3.surface, borderRadius: R.lg, boxShadow: EL1, padding: 12, textAlign: 'center' }}>
-              <p style={{ fontSize: 11, color: '#5F6368', marginBottom: 2 }}>{s.label}</p>
-              <p style={{ fontSize: 14, fontWeight: 600, color: s.color, margin: 0 }}>{s.value}</p>
-            </div>
-          ))}
-        </div>
 
         {/* [BOEK-028] Invoice table — outgoing + incoming merged */}
         <div style={{ backgroundColor: M3.surface, borderRadius: R.lg, boxShadow: EL1, overflow: 'hidden' }}>
