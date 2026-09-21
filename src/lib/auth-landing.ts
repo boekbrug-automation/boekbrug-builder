@@ -189,9 +189,18 @@ export function planAfterOAuth(
   // product op leunt (één kantoor nodigt vijftig klanten uit) is dat geen scherpe rand maar een
   // gebroken hoofdpad: het faalde juist bij NIEUWE gebruikers, en elke genodigde is er een.
   //
-  // De acceptatiepagina stuurt na de tik zelf door naar /dashboard, waar de middleware een vers
-  // account alsnog de wizard in leidt — de wizard wordt dus niet overgeslagen, hij komt één
-  // stap later. Alleen de acceptatie gaat voor.
+  // De acceptatiepagina stuurt na de tik zelf door naar /dashboard. Wat daar gebeurt hangt af van
+  // het account, en dat is sinds [EERSTE-DEUR] niet meer één antwoord — de oude zin hier beweerde
+  // nog dat de middleware een vers account "alsnog de wizard in leidt, één stap later", en dat
+  // klopt precies voor de nieuwe gebruiker niet meer:
+  //
+  //   · een genodigde die zich zojuist REGISTREERDE is al afgerond voordat hij accepteert, dus
+  //     hij komt na de acceptatie gewoon in het product — er is geen wizard meer die wacht;
+  //   · een bestaand account dat de wizard nog open heeft staan, komt er wél in terecht, precies
+  //     zoals altijd.
+  //
+  // Wat in beide gevallen hetzelfde blijft, en het enige wat deze regel beslist: de ACCEPTATIE
+  // gaat voor. Het token is het enige dat verloopt terwijl wij ergens anders naartoe wijzen.
   const isInviteAccept = hasNext && next.startsWith("/invite/accept");
 
   // ── [PROFILE-READ] We could not look ──────────────────────────────────
@@ -213,9 +222,13 @@ export function planAfterOAuth(
   //     words ("a completed owner walked into the wizard because a read timed out"). And not the
   //     archief landing either — that
   //     page self-heals onboarding_done + account_purpose off ?doel=archief, so choosing to send
-  //     an unknown profile there is the markArchief write with one hop in between. The owner who
-  //     came for their vault reaches it from the home, and that self-heal still fires when they
-  //     open it themselves, which is where it was always meant to happen.
+  //     an unknown profile there is the markArchief write with one hop in between.
+  //
+  // What this branch promises is therefore exactly one thing, and it is worth stating in the
+  // narrow form rather than the comfortable one: SAFE DEGRADATION; NO PROFILE WRITE. It does not
+  // promise that the archive visitor reaches their vault, or that anyone reaches any particular
+  // screen — #377 established that the home itself may fail honestly, which is the point of
+  // sending them there. The guarantee is about what is NOT written, never about where they land.
   //
   // [EERSTE-DEUR] And this branch stands FIRST, above everything the registration flag can reach.
   // "We could not look" outranks "the URL says this is a new account": an unreadable profile is

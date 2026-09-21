@@ -13,6 +13,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+// [KLUIS] The plan itself, so the gate below can COMPARE the two registration environments rather
+// than restate what one of them is supposed to do. A gate that spells the expected value by hand
+// agrees with itself forever; this one asks the code that actually decides.
+import { planAfterOAuth, completedStep } from "./auth-landing";
 
 /** Full-line comments out; inline ones stay. Cheap, and blind to `/*` inside an attribute string. */
 function strip(src: string): string {
@@ -198,7 +202,9 @@ test("[EERSTE-DEUR] the registration door says so, on both exits, and completes 
   const upsert = reg.slice(reg.indexOf(".upsert({"), reg.indexOf("{ onConflict: 'id' }"));
   assert.ok(upsert.length > 40, "the confirmation-OFF upsert moved — this window measures nothing");
   assert.match(upsert, /onboarding_done: true/, "a fresh registration is not completed when confirmation is off");
-  assert.match(upsert, /onboarding_step: completedStep\(/,
+  // The terminal step is asked of the one rule rather than re-spelled — and branches on the
+  // purpose, which §7b below compares against what the callback actually decides.
+  assert.match(upsert, /onboarding_step: purpose === 'archief'[\s\S]{0,60}?completedStep\(/,
     "…and must ask the ONE rule for the terminal step, not re-spell it");
   assert.match(reg, /import \{ completedStep \} from '@\/lib\/auth-landing'/,
     "the confirmation-OFF path spells the terminal step itself again — two spellings of one rule " +
@@ -217,6 +223,42 @@ test("[EERSTE-DEUR] the registration door says so, on both exits, and completes 
   const login = code("src/app/login/page.tsx");
   assert.doesNotMatch(login, /REGISTER_PARAM|registratie/,
     "the login screen carries the registration intent — an existing owner would be 'completed' by signing in");
+
+  // 7b. [KLUIS] AND THE TWO ENVIRONMENTS AGREE ABOUT AN ARCHIVE ACCOUNT.
+  //
+  // `onboarding_done` is true either way — nothing stands between this visitor and their vault.
+  // The STEP is where they could drift: the callback keeps an archive account at step 1, because
+  // it refuses to stamp someone with the terminal step of an invoice wizard they never walked
+  // (auth-landing.ts, the archief branches). The confirmation-OFF write has to say the same thing,
+  // or the same registration produces step 1 on production and step 6 on a database where e-mail
+  // confirmation happens to be switched off — which is exactly the divergence §5 above exists for,
+  // in the one shape it is easiest to miss.
+  //
+  // The expected values are READ from planAfterOAuth rather than typed here, so the day the
+  // callback's answer changes, this gate changes with it instead of quietly disagreeing.
+  const archiefIntent = { next: null, role: "zzper", purpose: "archief", register: "1", vak: null };
+  const archiefVers = planAfterOAuth(archiefIntent, { kind: "missing" });
+  assert.equal(archiefVers.profileToCreate?.onboarding_done, true, "confirmation-ON: an archive account is done");
+  assert.equal(archiefVers.profileToCreate?.onboarding_step, 1,
+    "confirmation-ON: …and stays at step 1, because no wizard was walked");
+  assert.equal(archiefVers.completeFirstRun, null, "confirmation-ON: archive does not borrow the registration completion");
+
+  // The confirmation-OFF write must reach the same two values. Its `onboarding_done` is
+  // unconditional (asserted in §5); its step has to branch on the purpose.
+  assert.match(upsert, /onboarding_step: purpose === 'archief'\s*\?\s*1\s*:\s*completedStep\(/,
+    "confirmation OFF stamps an archive account with the invoice wizard's terminal step, while " +
+    "confirmation ON keeps it at step 1 — the same registration, two different accounts");
+
+  // And the non-archive side of that same branch still asks the one rule, for both roles.
+  const gewoonVers = planAfterOAuth({ ...archiefIntent, purpose: null }, { kind: "missing" });
+  assert.equal(gewoonVers.profileToCreate?.onboarding_step, completedStep("zzper"),
+    "confirmation-ON: an ordinary registration carries the terminal step");
+  assert.equal(
+    planAfterOAuth({ ...archiefIntent, purpose: null, role: "accountant" }, { kind: "missing" })
+      .profileToCreate?.onboarding_step,
+    completedStep("accountant"),
+    "…and an accountant carries the accountant's one",
+  );
 
   // 8. NO NEW SCHEMA. Both writes name columns that already exist; `profiles` Update is generated
   // from the live database, so an invented column is a type error rather than a runtime surprise —

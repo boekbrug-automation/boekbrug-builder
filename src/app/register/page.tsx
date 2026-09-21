@@ -532,7 +532,17 @@ function RegisterContent() {
         // geen wizard te doorlopen, en dat moet ook waar zijn als de migratie hieronder ontbreekt.
         // Voor beide doelen is het antwoord nu hetzelfde — alleen de bestemming verschilt nog.
         onboarding_done: true,
-        onboarding_step: completedStep(role === 'accountant' ? 'accountant' : 'zzper'),
+        // [KLUIS] Maar niet de eindstap van een wizard die deze bezoeker nooit gelopen heeft.
+        //
+        // `onboarding_done` is voor beide doelen waar: er staat niets meer tussen hem en het
+        // product. De STAP is dat niet. Voor een archiefaccount houdt de callback stap 1 aan —
+        // auth-landing.ts weigert daar uitdrukkelijk om af te ronden "met een stap die deze
+        // bezoeker nooit gelopen heeft" — en zonder deze regel zou dezelfde registratie op een
+        // omgeving zónder e-mailbevestiging stap 6 krijgen en mét bevestiging stap 1. Precies het
+        // verschil tussen twee omgevingen dat dit blok bestaat om te voorkomen.
+        onboarding_step: purpose === 'archief'
+          ? 1
+          : completedStep(role === 'accountant' ? 'accountant' : 'zzper'),
       }, { onConflict: 'id' })
     if (profileError) {
       console.error('[COHERENCE-REGISTER] post-session profile upsert failed (non-fatal):', profileError)
