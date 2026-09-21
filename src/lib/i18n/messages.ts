@@ -15321,12 +15321,18 @@ export const MESSAGES = {
   'bh.kwt.voorstel.status.declined': { nl: 'Voorstel afgewezen', ar: 'رُفض الاقتراح', en: 'Proposal declined' },
   'bh.kwt.voorstel.status.stale': { nl: 'Voorstel vervallen', ar: 'انتهت صلاحية الاقتراح', en: 'Proposal lapsed' },
   // [KWT-TABS] Said once when the accountant leaves a view with an unsent proposal open in it.
-  // It promises nothing about losing the draft, because the draft is NOT lost — the screen holds
-  // it, so it survives every way the visible tab can change, Back and Forward included. This asks
-  // only because someone who typed a correction and then picked another view has probably
-  // mis-clicked, and a word is worth more than a silent disappearance from the screen.
+  // Someone who typed a correction and then picked another view has probably mis-clicked, and a
+  // word is worth more than a silent disappearance from the screen.
+  //
+  // THE SENTENCE PROMISES PAGE MEMORY, AND NOT ONE WORD MORE. What was typed survives every way
+  // the visible tab can change — a click, an arrow key, Back, Forward, a ?focus= deep link — and
+  // nothing beyond that: it is React state on this screen, so leaving the page or reloading it
+  // takes the draft with it. An earlier draft of this message said «blijft bewaard», which an
+  // owner reads as SAVED — the one promise a screen with no persistence may not make, and the
+  // kind that is discovered by losing an afternoon's work. "Stays on this page" is the whole
+  // truth, and it is also exactly what the accountant needs to decide whether to click on.
   'bh.kwt.voorstel.verlatenVraag': { nl: 'Voorstel nog niet verstuurd', ar: 'الاقتراح لم يُرسَل بعد', en: 'Proposal not sent yet' },
-  'bh.kwt.voorstel.verlatenUitleg': { nl: 'Je correctie blijft bewaard, maar je ziet hem pas terug bij deze factuur.', ar: 'سيبقى تصحيحك محفوظًا، لكنك لن تراه إلا عند العودة إلى هذه الفاتورة.', en: 'Your correction is kept, but you will only see it again at this invoice.' },
+  'bh.kwt.voorstel.verlatenUitleg': { nl: 'Je invoer blijft op deze pagina staan. Je ziet hem weer als je teruggaat naar deze factuur.', ar: 'ستبقى مدخلاتك في هذه الصفحة، وستظهر مجددًا عند العودة إلى هذه الفاتورة.', en: 'Your entries stay on this page. You’ll see them again when you return to this invoice.' },
   'bh.kwt.voorstel.verlatenKnop': { nl: 'Verdergaan', ar: 'متابعة', en: 'Continue' },
   'bh.det.laden': { nl: 'Laden...', ar: 'جارٍ التحميل…', en: 'Loading...' },
   'bh.det.ontkoppelTitel': { nl: 'Klant ontkoppelen?', ar: 'إلغاء ربط العميل؟', en: 'Unlink client?' },
