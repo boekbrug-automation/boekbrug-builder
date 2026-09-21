@@ -283,14 +283,19 @@ export default function AccountantBevestigen({ rijen, geenMandaat = false, gekop
             {t('bh.bev.geenMandaat.kop')}
           </p>
           <p style={{ margin: '0 0 12px', color: M3.onSurfaceVariant, lineHeight: 1.6, fontSize: 14.5 }}>
-            {t('bh.bev.geenMandaat.anders')} {t('bh.bev.geenMandaat.zetAan')}{' '}
+            {t('bh.bev.geenMandaat.zetAan')}{' '}
             {/* The path is named as it is WRITTEN in the nav, in every language — otherwise the
                 accountant hunts for a word that is nowhere in the interface. */}
             <strong>{t('bh.bev.geenMandaat.plek')}</strong>.
           </p>
-          <p style={{ margin: 0, color: M3.mutedText, lineHeight: 1.6, fontSize: 13.5 }}>
-            {t('bh.bev.geenMandaat.waarom')}
-          </p>
+          {/* [KANTOOR-RUST] One fact and the action; why the mandate is separate and what an
+              unconfirmed invoice holds shut open on demand. */}
+          <details>
+            <summary style={{ cursor: 'pointer', fontSize: 13.5, color: M3.primary }}>{t('bh.waarom')}</summary>
+            <p style={{ margin: '6px 0 0', color: M3.mutedText, lineHeight: 1.6, fontSize: 13.5 }}>
+              {t('bh.bev.geenMandaat.anders')} {t('bh.bev.geenMandaat.waarom')}
+            </p>
+          </details>
           <VraagMachtiging klanten={gekoppeld} kind="bevestigen" />
         </div>
       </main>
@@ -339,6 +344,15 @@ export default function AccountantBevestigen({ rijen, geenMandaat = false, gekop
         <p style={{ margin: '10px 0 0', fontSize: 13, color: M3.mutedText, lineHeight: 1.6 }}>
           {t('bh.bev.uitleg')}
         </p>
+        {/* [KANTOOR-RUST] Whose name a confirmation carries and the article it rests on (art. 52
+            AWR) are true and stay on the screen — behind one word, for whoever asks. The same
+            sentence stands in full at the bulk decision. */}
+        <details style={{ marginTop: 6 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 13, color: M3.primary }}>{t('bh.waarom')}</summary>
+          <p style={{ margin: '6px 0 0', fontSize: 13, color: M3.mutedText, lineHeight: 1.6 }}>
+            {t('bh.bev.bulk.lezing')}
+          </p>
+        </details>
       </section>
 
       {/* [BULK-BEVESTIG] De balk verschijnt pas als er iets geselecteerd is — een lege balk is een

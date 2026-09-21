@@ -9750,6 +9750,14 @@ export const MESSAGES = {
     ar: 'الضريبة القابلة للخصم (5b)',
     en: 'Input VAT (5b)',
   },
+  // [KANTOOR-RUST] The accountant reads the fact, not the owner's instruction: Kas and Dagomzet
+  // are the owner's screens, and a sentence sending the boekhouder there points at a door that is
+  // not in their interface.
+  'kw.zonderTariefAcc': {
+    nl: '{bedrag} omzet staat nog zonder BTW-tarief; die BTW zit niet in het bedrag hierboven.',
+    ar: '{bedrag} من الإيراد ما يزال بلا نسبة btw؛ ضريبته ليست ضمن المبلغ أعلاه.',
+    en: '{bedrag} of revenue still has no VAT rate; its VAT is not in the amount above.',
+  },
   'kw.zonderTarief': {
     nl: '{bedrag} omzet staat nog zonder BTW-tarief (contant, bank of een niet-gesplitste kassadag); die BTW zit niet in het bedrag hierboven. Ken het tarief toe bij Kas of Dagomzet.',
     ar: '{bedrag} من الإيراد ما يزال بلا نسبة btw (نقد أو بنك أو يوم كاشير غير مقسّم)؛ ضريبته ليست ضمن المبلغ أعلاه. عيّن النسبة في «النقد» أو «إيراد اليوم».',
@@ -13648,6 +13656,39 @@ export const MESSAGES = {
     en: 'A burned number cannot be reused, and need not be: the Belastingdienst accepts a gap you can explain. Write down what happened and keep it with your records.',
     ar: 'لا يمكن إعادة استخدام الرقم المحروق، ولا حاجة لذلك: تقبل مصلحة الضرائب فجوة يمكنك تفسيرها. دوِّن ما حدث واحفظه مع سجلاتك.',
   },
+  // [KANTOOR-RUST] The same verdict read by the boekhouder about a CLIENT's series. No "je reeks",
+  // no "noteer dat voor je boekhouder", no rationale at rest: the finding names the numbers, and
+  // why a gap is allowed opens on demand. A healthy series says nothing at all to the accountant.
+  'doorlopend.nietGelezenAcc': {
+    nl: 'De nummering kon nu niet worden nagekeken; dat zegt niets over de administratie.',
+    en: 'The numbering could not be checked just now; that says nothing about the administration.',
+    ar: 'تعذّر فحص الترقيم الآن؛ وهذا لا يقول شيئًا عن الإدارة.',
+  },
+  'doorlopend.gatenTitelAcc': {
+    nl: 'Nummers ontbreken in de reeks',
+    en: 'Numbers are missing from the series',
+    ar: 'تنقص أرقام من السلسلة',
+  },
+  'doorlopend.eindeReeksAcc': {
+    nl: '— {aantal} aan het eind van de reeks: de teller staat hoger dan de hoogste factuur.',
+    en: '— {aantal} at the end of the series: the counter stands higher than the highest invoice.',
+    ar: '— {aantal} في نهاية السلسلة: العدّاد أعلى من أعلى فاتورة.',
+  },
+  'doorlopend.reeksLeegAcc': {
+    nl: '— {aantal} toegekend, maar er staat geen document in deze reeks; meestal een weggegooid concept.',
+    en: '— {aantal} allocated, but there is no document in this series; usually a discarded draft.',
+    ar: '— {aantal} مُخصّصة، لكن لا يوجد مستند في هذه السلسلة؛ غالبًا مسوّدة حُذفت.',
+  },
+  'doorlopend.onleesbaarAcc': {
+    nl: 'Buiten de huidige opmaak en niet meegeteld: {nummers}.',
+    en: 'Outside the current format and not counted: {nummers}.',
+    ar: 'خارج التنسيق الحالي ولم تُحتسب: {nummers}.',
+  },
+  'doorlopend.watNuAcc': {
+    nl: 'Een verbrand nummer wordt niet hergebruikt; de Belastingdienst accepteert een gat dat kan worden uitgelegd.',
+    en: 'A burned number is not reused; the Belastingdienst accepts a gap that can be explained.',
+    ar: 'لا يُعاد استخدام الرقم المحروق؛ تقبل مصلحة الضرائب فجوة يمكن تفسيرها.',
+  },
   // ── [GELD-INVARIANT] Kloppen de boeken met zichzelf ────────────────────────────────
   //
   // Alleen de OMLIJSTING staat hier. De bevindingen zelf komen als zin uit money-invariants.ts,
@@ -13683,6 +13724,18 @@ export const MESSAGES = {
     nl: 'We herstellen dit niet automatisch: er moet één bron gekozen worden, en fout kiezen schrijft een onwaar bedrag over een waar bedrag heen. Kijk het na, of leg het voor aan je boekhouder.',
     en: 'We do not repair this automatically: one source has to be chosen, and choosing wrong writes a false amount over a true one. Check it, or put it to your accountant.',
     ar: 'لا نصلح هذا تلقائيًا: يجب اختيار مصدر واحد، والاختيار الخاطئ يكتب مبلغًا غير صحيح فوق مبلغ صحيح. راجعه، أو اعرضه على محاسبك.',
+  },
+  // [KANTOOR-RUST] The accountant's voice for the same audit: the findings come from the rule and
+  // name their amounts; only the frame changes, and the why-not-automatic opens on demand.
+  'geld.nietGelezenAcc': {
+    nl: 'De boeken konden nu niet worden nagekeken; dat zegt niets over de administratie.',
+    en: 'The books could not be checked just now; that says nothing about the administration.',
+    ar: 'تعذّر فحص الدفاتر الآن؛ وهذا لا يقول شيئًا عن الإدارة.',
+  },
+  'geld.watNuAcc': {
+    nl: 'Dit wordt niet automatisch hersteld: er moet één bron worden gekozen.',
+    en: 'This is not repaired automatically: one source has to be chosen.',
+    ar: 'لا يُصلح هذا تلقائيًا: يجب اختيار مصدر واحد.',
   },
   // ── [BEVEILIGING] Wie kan bij deze administratie ───────────────────────────────────
   //
@@ -14973,7 +15026,8 @@ export const MESSAGES = {
   'bh.fact.titel': { nl: 'Factureren namens een klant', ar: 'إصدار فاتورة نيابةً عن عميل', en: 'Invoicing on behalf of a client' },
   'bh.fact.ondertitel': { nl: 'De factuur gaat uit op naam van je klant, niet op die van jou.', ar: 'تصدر الفاتورة باسم عميلك، لا باسمك أنت.', en: 'The invoice goes out in the name of your client, not in yours.' },
   'bh.fact.geenMachtiging': { nl: 'Nog geen enkele klant heeft je hiervoor gemachtigd.', ar: 'لم يفوّضك أي عميل بذلك حتى الآن.', en: 'No client has authorised you for this yet.' },
-  'bh.fact.geenMachtigingUitleg': { nl: 'Factureren namens iemand is iets anders dan zijn administratie inzien. Je klant zet het zelf aan bij Instellingen → Mijn boekhouder, en daar ook weer uit.', ar: 'إصدار فواتير نيابةً عن شخص شيء آخر غير الاطّلاع على إدارته. عميلك يفعّل ذلك بنفسه في «Instellingen → Mijn boekhouder»، ويوقفه هناك أيضاً.', en: 'Invoicing on someone\'s behalf is not the same as viewing their administratie. Your client switches it on themselves under Instellingen → Mijn boekhouder, and off again there.' },
+  // [KNOP-IN-ZIN] The path is written as the CLIENT's settings screen writes it (inst.boekhouder).
+  'bh.fact.geenMachtigingUitleg': { nl: 'Je klant zet het zelf aan bij Instellingen → Jouw boekhouder.', ar: 'عميلك يفعّل ذلك بنفسه في «Instellingen → Jouw boekhouder».', en: 'Your client switches it on themselves under Instellingen → Jouw boekhouder.' },
   'bh.fact.geenMachtigingWet': { nl: 'De factuur komt op zijn naam, in zijn nummerreeks en onder zijn BTW-nummer — hij blijft er zelf verantwoordelijk voor (art. 35a Wet OB). Daarom vraagt de app het hem.', ar: 'تصدر الفاتورة باسمه، ضمن سلسلة أرقامه وتحت رقم btw الخاص به — وتبقى مسؤوليته هو (art. 35a Wet OB). لذلك يطلبها التطبيق منه.', en: 'The invoice goes out in their name, in their number series and under their BTW number — they stay responsible for it themselves (art. 35a Wet OB). That is why the app asks them.' },
   'bh.fact.namensLabel': { nl: 'Namens welke klant?', ar: 'نيابةً عن أي عميل؟', en: 'On behalf of which client?' },
   'bh.fact.kiesKlantOptie': { nl: 'Kies een klant…', ar: 'اختر عميلًا…', en: 'Choose a client…' },
@@ -15005,7 +15059,7 @@ export const MESSAGES = {
   'bh.fact.bezig': { nl: 'Bezig met versturen…', ar: 'جارٍ الإرسال…', en: 'Sending…' },
   'bh.fact.verstuurNamens': { nl: 'Verstuur namens {naam}', ar: 'أرسل نيابةً عن {naam}', en: 'Send on behalf of {naam}' },
   'bh.fact.kiesEerst': { nl: 'Kies eerst een klant', ar: 'اختر عميلاً أولاً', en: 'Choose a client first' },
-  'bh.fact.nummerWaarschuwing': { nl: 'Versturen geeft het factuurnummer uit, en dat is definitief (art. 35 Wet OB). Corrigeren gaat met een creditnota.', ar: 'عند الإرسال يصدر رقم الفاتورة، ويصبح نهائيًا (art. 35 Wet OB). ويُجرى التصحيح عبر إشعار دائن.', en: 'Sending issues the invoice number, and that is final (art. 35 Wet OB). You correct with a creditnota.' },
+  'bh.fact.nummerWaarschuwing': { nl: 'Versturen geeft het factuurnummer uit, en dat is definitief. Corrigeren gaat met een creditnota.', ar: 'عند الإرسال يصدر رقم الفاتورة، ويصبح نهائيًا. ويُجرى التصحيح عبر إشعار دائن.', en: 'Sending issues the invoice number, and that is final. You correct with a creditnota.' },
   'bh.fact.foutKiesKlant': { nl: 'Kies eerst voor welke klant je factureert.', ar: 'اختر أولًا العميل الذي تصدر الفاتورة نيابةً عنه.', en: 'First choose which client you are invoicing for.' },
   'bh.fact.foutOntvanger': { nl: 'Vul in aan wie de factuur gericht is.', ar: 'أدخل الجهة التي توجَّه إليها الفاتورة.', en: 'Fill in who the invoice is addressed to.' },
   'bh.fact.foutRegel': { nl: 'Vul minstens één regel in met een omschrijving en een bedrag.', ar: 'أدخل سطرًا واحدًا على الأقل مع وصف ومبلغ.', en: 'Fill in at least one line with a description and an amount.' },
@@ -15021,8 +15075,11 @@ export const MESSAGES = {
   // ─── [BOEKHOUDER] Boekhouder · inkoopfacturen bevestigen (AccountantBevestigen) ─────────────
   'bh.bev.titel': { nl: 'Bevestigen', ar: 'تأكيد', en: 'Confirm' },
   'bh.bev.subtitel': { nl: 'Deze stukken houden een kwartaal tegen — bevestig wat klopt.', ar: 'هذه المستندات تعطّل ربعًا كاملًا — أكّد ما هو صحيح.', en: 'These documents are holding up a quarter — confirm what is correct.' },
-  'bh.bev.leeg': { nl: 'Er staat niets te wachten. Bij je gemachtigde klanten is elke inkoopfactuur bevestigd.', ar: 'لا شيء في الانتظار. لدى العملاء الذين فوّضوك، كل فاتورة شراء مؤكدة.', en: 'Nothing is waiting. At the clients who authorised you, every purchase invoice is confirmed.' },
-  'bh.bev.uitleg': { nl: 'Je bevestigt de lezing, je verandert er niets aan. Klopt een bedrag niet? Bevestig dan niet en vraag het je klant. Elke bevestiging draagt jouw naam en meldt hem — de verantwoordelijkheid blijft bij hem (art. 52 AWR).', ar: 'أنت تؤكد القراءة ولا تغيّر فيها شيئًا. مبلغ غير صحيح؟ فلا تؤكد واسأل عميلك. كل تأكيد يحمل اسمك ويُعلم عميلك — والمسؤولية تبقى عليه (art. 52 AWR).', en: 'You confirm the reading, you change nothing about it. Is an amount wrong? Then do not confirm and ask your client. Every confirmation carries your name and notifies him — the responsibility stays with him (art. 52 AWR).' },
+  'bh.bev.leeg': { nl: 'Niets te bevestigen bij je gemachtigde klanten.', ar: 'لا شيء للتأكيد لدى العملاء الذين فوّضوك.', en: 'Nothing to confirm at the clients who authorised you.' },
+  // [KANTOOR-RUST] One sentence at rest: the safeguard (nothing changes, the responsibility stays
+  // with the client). Who is named on it and the article it rests on open on demand, and the same
+  // sentence stands at the bulk decision (bh.bev.bulk.lezing).
+  'bh.bev.uitleg': { nl: 'Je bevestigt de lezing en verandert er niets aan — de verantwoordelijkheid blijft bij je klant.', ar: 'أنت تؤكد القراءة ولا تغيّر فيها شيئًا — والمسؤولية تبقى على عميلك.', en: 'You confirm the reading and change nothing about it — the responsibility stays with your client.' },
   'bh.bev.wacht.een': { nl: 'stuk wacht op bevestiging', ar: 'مستند بانتظار التأكيد', en: 'document waiting for confirmation' },
   'bh.bev.wacht.meer': { nl: 'stukken wachten op bevestiging', ar: 'مستندات بانتظار التأكيد', en: 'documents waiting for confirmation' },
   'bh.bev.actie.bevestigen': { nl: 'Bevestigen', ar: 'تأكيد', en: 'Confirm' },
@@ -15077,11 +15134,14 @@ export const MESSAGES = {
   'bh.bev.vraag.factuurnummer': { nl: 'factuur {nummer}', ar: 'فاتورة {nummer}', en: 'invoice {nummer}' },
   'bh.bev.vraag.gaatNaar': { nl: 'gaat naar {klant}', ar: 'تُرسل إلى {klant}', en: 'goes to {klant}' },
   'bh.bev.vraag.placeholder': { nl: 'Bijvoorbeeld: is dit zakelijk of privé? Of: klopt het btw-bedrag hier?', ar: 'مثلًا: هل هذا مصروف تجاري أم خاص؟ أو: هل مبلغ ضريبة القيمة المضافة هنا صحيح؟', en: 'For example: is this business or private? Or: is the btw amount here correct?' },
-  'bh.bev.vraag.melding': { nl: 'je klant krijgt een melding en kan hier antwoorden', ar: 'يصل عميلك إشعار ويمكنه الرد هنا', en: 'your client gets a notification and can answer here' },
+  'bh.bev.vraag.melding': { nl: 'je klant krijgt een melding en kan antwoorden', ar: 'يصل عميلك إشعار ويمكنه الرد', en: 'your client gets a notification and can answer' },
   'bh.bev.vraag.versturen': { nl: 'Vraag versturen', ar: 'إرسال السؤال', en: 'Send question' },
   'bh.bev.vraag.mislukt': { nl: 'De vraag kon niet worden verstuurd.', ar: 'تعذّر إرسال السؤال.', en: 'The question could not be sent.' },
   'bh.bev.fout.bevestigen': { nl: 'Bevestigen mislukt.', ar: 'فشل التأكيد.', en: 'Confirmation failed.' },
   'bh.bev.fout.algemeen': { nl: 'Er ging iets mis.', ar: 'حدث خطأ ما.', en: 'Something went wrong.' },
+  // [KANTOOR-RUST] The one word on an on-demand affordance: the rationale behind it is read by
+  // whoever asks for it, and by nobody else. "Explain on demand."
+  'bh.waarom': { nl: 'Waarom?', ar: 'لماذا؟', en: 'Why?' },
 
   // ─── [BOEKHOUDER] Boekhouder · openstaand + machtiging vragen (AccountantDebiteuren, VraagMachtiging) 
   'bh.deb.titel': { nl: 'Openstaande facturen', ar: 'الفواتير غير المسدَّدة', en: 'Outstanding invoices' },
@@ -15091,9 +15151,9 @@ export const MESSAGES = {
   'bh.deb.dagen.dagen': { nl: '{dagen} dagen te laat', ar: 'متأخرة {dagen} يومًا', en: '{dagen} days overdue' },
   'bh.deb.dagen.maanden': { nl: '{maanden} maanden te laat', ar: 'متأخرة {maanden} أشهر', en: '{maanden} months overdue' },
   'bh.deb.geenMandaat.kop': { nl: 'Nog geen enkele klant heeft je gemachtigd om namens hem te herinneren.', ar: 'لم يمنحك أي عميل بعد تفويضًا بإرسال تذكيرات نيابةً عنه.', en: 'No client has authorised you to send reminders on their behalf yet.' },
-  'bh.deb.geenMandaat.uitleg1': { nl: 'Meekijken is iets anders dan mailen naar de klanten van je klant. Je klant zet het zelf aan bij', ar: 'الاطّلاع شيء، ومراسلة عملاء عميلك شيء آخر. يفعّل عميلك ذلك بنفسه من', en: 'Looking in is not the same as e-mailing your client\'s customers. Your client turns it on themselves under' },
+  'bh.deb.geenMandaat.uitleg1': { nl: 'Je klant zet het zelf aan bij', ar: 'يفعّل عميلك ذلك بنفسه من', en: 'Your client turns it on themselves under' },
   'bh.deb.geenMandaat.uitleg2': { nl: ', met dezelfde machtiging waarmee je ook namens hem kunt factureren.', ar: '، بالتفويض نفسه الذي يتيح لك أيضًا إصدار الفواتير نيابةً عنه.', en: ', with the same mandate that also lets you invoice on their behalf.' },
-  'bh.deb.leeg.allesBetaald': { nl: 'Niets te laat. Bij geen van je gemachtigde klanten staat een vervallen factuur open.', ar: 'لا شيء متأخر. لا توجد فاتورة متأخرة لدى أي من عملائك المفوِّضين.', en: 'Nothing overdue. None of the clients who authorised you has an overdue invoice open.' },
+  'bh.deb.leeg.allesBetaald': { nl: 'Niets te laat bij je gemachtigde klanten.', ar: 'لا شيء متأخر لدى العملاء الذين فوّضوك.', en: 'Nothing overdue at the clients who authorised you.' },
   'bh.deb.totaal.enkelEnkel': { nl: 'te laat · {facturen} factuur bij {klanten} klant', ar: 'متأخرة · {facturen} فاتورة لدى {klanten} عميل', en: 'overdue · {facturen} invoice at {klanten} client' },
   'bh.deb.totaal.enkelMeer': { nl: 'te laat · {facturen} factuur bij {klanten} klanten', ar: 'متأخرة · {facturen} فاتورة لدى {klanten} عملاء', en: 'overdue · {facturen} invoice at {klanten} clients' },
   'bh.deb.totaal.meerEnkel': { nl: 'te laat · {facturen} facturen bij {klanten} klant', ar: 'متأخرة · {facturen} فواتير لدى {klanten} عميل', en: 'overdue · {facturen} invoices at {klanten} client' },
@@ -15111,9 +15171,8 @@ export const MESSAGES = {
   'bh.deb.status.verstuurd': { nl: 'Herinnering verstuurd', ar: 'تم إرسال التذكير', en: 'Reminder sent' },
   'bh.deb.fout.herinneringMislukt': { nl: 'De herinnering kon niet worden verstuurd.', ar: 'تعذّر إرسال التذكير.', en: 'The reminder could not be sent.' },
   'bh.deb.fout.algemeen': { nl: 'Er ging iets mis.', ar: 'حدث خطأ ما.', en: 'Something went wrong.' },
-  'bh.deb.voet': { nl: 'Na drie herinneringen stopt deze knop. Een aanmaning of incasso heeft gevolgen die de ondernemer zelf moet willen (art. 6:96 BW) — dus geen knop hier.', ar: 'يتوقف هذا الزر بعد ثلاثة تذكيرات. الإنذار أو التحصيل له تبعات يجب أن يريدها صاحب العمل بنفسه (art. 6:96 BW) — لذلك لا زر هنا.', en: 'After three reminders this button stops. A formal demand or debt collection has consequences the entrepreneur must want themselves (art. 6:96 BW) — so no button here.' },
   'bh.macht.kop': { nl: 'Vraag het je klant', ar: 'اطلب ذلك من عميلك', en: 'Ask your client' },
-  'bh.macht.uitleg': { nl: 'Hij krijgt een bericht: wat je vraagt, wat dat wel en niet toestaat, en de knop. Beslissen doet hij zelf.', ar: 'يصله إشعار: ما تطلبه، وما يتيحه وما لا يتيحه، والزر. والقرار قراره وحده.', en: 'They get a message: what you ask, what it does and does not allow, and the button. They decide themselves.' },
+  'bh.macht.uitleg': { nl: 'Hij krijgt een bericht. Beslissen doet hij zelf.', ar: 'يصله إشعار. والقرار قراره وحده.', en: 'They get a message. They decide themselves.' },
   'bh.macht.kiesLabel': { nl: 'Klant om te vragen', ar: 'العميل المراد سؤاله', en: 'Client to ask' },
   'bh.macht.kiesPlaceholder': { nl: 'Kies een klant…', ar: 'اختر عميلًا…', en: 'Choose a client…' },
   'bh.macht.knop.vraag': { nl: 'Vraag toestemming', ar: 'اطلب الإذن', en: 'Ask for permission' },
@@ -15122,7 +15181,6 @@ export const MESSAGES = {
   'bh.macht.gevraagdMelding': { nl: 'Gevraagd. Zodra hij het aanzet, staat deze pagina vol.', ar: 'تم الطلب. وبمجرد أن يفعّله، ستمتلئ هذه الصفحة.', en: 'Asked. As soon as they turn it on, this page fills up.' },
   'bh.macht.fout.mislukt': { nl: 'Vragen mislukt.', ar: 'تعذّر إرسال الطلب.', en: 'The request failed.' },
   'bh.macht.fout.algemeen': { nl: 'Er ging iets mis.', ar: 'حدث خطأ ما.', en: 'Something went wrong.' },
-  'bh.macht.voet': { nl: 'Eén keer vragen is genoeg. Sneller antwoord? Bel even — daar is met opzet geen knop voor.', ar: 'يكفي أن تسأل مرة واحدة. تريد ردًا أسرع؟ اتصل به — لا يوجد زر لذلك، وهذا مقصود.', en: 'Asking once is enough. Want a faster answer? Give them a call — there is deliberately no button for that.' },
 
   // ─── [BOEKHOUDER] Boekhouder · stukken opvragen (AccountantOpvragen) ────────────────────────
   'bh.opvr.titel': { nl: 'Stukken opvragen', ar: 'طلب المستندات', en: 'Request documents' },
@@ -15133,15 +15191,15 @@ export const MESSAGES = {
   'bh.opvr.kwartaal': { nl: 'Kwartaal', ar: 'الربع', en: 'Quarter' },
   'bh.opvr.mistIn': { nl: 'Wat BoekBrug mist in {kwartaal}', ar: 'ما تفتقده BoekBrug في {kwartaal}', en: 'What BoekBrug is missing in {kwartaal}' },
   'bh.opvr.laden': { nl: 'Bezig met lezen…', ar: 'جارٍ القراءة…', en: 'Reading…' },
-  'bh.opvr.geenGaten': { nl: 'BoekBrug ziet geen gaten in dit kwartaal — maar een bon die nooit is geüpload zien wij niet. Vraag hieronder zelf wat je mist.', ar: 'لا ترى BoekBrug نواقص في هذا الربع — لكن إيصالًا لم يُرفَع قط لا نراه. اطلب بنفسك أدناه ما ينقصك.', en: 'BoekBrug sees no gaps in this quarter — but a receipt that was never uploaded is invisible to us. Ask for what you miss yourself below.' },
-  'bh.opvr.vinkUitleg': { nl: 'Haal weg wat je al weet: een bon die onderweg is, of een gat dat jouw werk is. Meer dan {max} punten leest niemand.', ar: 'أزل ما تعرفه مسبقاً: إيصال في الطريق، أو نقص هو من عملك أنت. لا أحد يقرأ أكثر من {max} نقاط.', en: 'Remove what you already know about: a receipt on its way, or a gap that is your own work. Nobody reads more than {max} points.' },
+  // [KANTOOR-RUST] Factual, never a completeness claim: a receipt that was never uploaded is not
+  // a gap this engine can see, and the sentence says so in the same breath.
+  'bh.opvr.geenGaten': { nl: 'Geen bekende aandachtspunten in dit kwartaal. Een bon die nooit is geüpload zien wij niet.', ar: 'لا نقاط انتباه معروفة في هذا الربع. إيصالًا لم يُرفَع قط لا نراه.', en: 'No known points of attention in this quarter. A receipt that was never uploaded is invisible to us.' },
   'bh.opvr.eigenZin': { nl: 'Je eigen zin erbij (optioneel)', ar: 'جملة من عندك (اختياري)', en: 'Your own sentence (optional)' },
   'bh.opvr.voorbeeldKop': { nl: 'Dit krijgt {naam} te zien', ar: 'هذا ما سيراه {naam}', en: 'This is what {naam} will see' },
   'bh.opvr.jeKlant': { nl: 'je klant', ar: 'عميلك', en: 'your client' },
   'bh.opvr.verstuurd': { nl: 'Verstuurd. Het staat in zijn inbox en is per mail gegaan.', ar: 'تم الإرسال. الرسالة في صندوق الوارد لديه وأُرسلت أيضًا بالبريد الإلكتروني.', en: 'Sent. It is in their inbox and has gone out by e-mail.' },
   'bh.opvr.bezig': { nl: 'Bezig met versturen…', ar: 'جارٍ الإرسال…', en: 'Sending…' },
   'bh.opvr.verstuurNaar': { nl: 'Verstuur naar {naam}', ar: 'أرسل إلى {naam}', en: 'Send to {naam}' },
-  'bh.opvr.voet': { nl: 'Het bericht staat op jouw naam, in dezelfde inbox als je gewone berichten. Hij kan direct antwoorden.', ar: 'تُرسَل الرسالة باسمك، في صندوق الوارد نفسه لرسائلك العادية. ويمكنه الرد مباشرة.', en: 'The message goes out in your name, in the same inbox as your ordinary messages. They can reply directly.' },
   'bh.opvr.fout.lezen': { nl: 'Kon het kwartaal niet lezen.', ar: 'تعذّرت قراءة بيانات الربع.', en: 'Could not read the quarter.' },
   'bh.opvr.fout.versturen': { nl: 'Versturen mislukt.', ar: 'فشل الإرسال.', en: 'Sending failed.' },
   'bh.opvr.fout.algemeen': { nl: 'Er ging iets mis.', ar: 'حدث خطأ ما.', en: 'Something went wrong.' },
@@ -15228,6 +15286,9 @@ export const MESSAGES = {
   'bh.kwt.exclBtw': { nl: 'Excl. BTW', ar: 'بدون btw', en: 'Excl. VAT' },
   'bh.kwt.btwTarief': { nl: 'BTW {tarief}%', ar: 'ضريبة {tarief}%', en: 'VAT {tarief}%' },
   'bh.kwt.inclBtw': { nl: 'Incl. BTW', ar: 'شامل btw', en: 'Incl. VAT' },
+  // The identification number, never the tax amount — «رقم btw» per [AR-TERMEN], «BTW number» per
+  // the English ruling's one exception.
+  'bh.kwt.btwNummer': { nl: 'BTW-nummer', ar: 'رقم btw', en: 'BTW number' },
   'bh.kwt.openen': { nl: 'Openen', ar: 'فتح', en: 'Open' },
   'bh.kwt.vraag.titel': { nl: 'Vraag aan de klant', ar: 'سؤال إلى العميل', en: 'Question for the client' },
   'bh.kwt.vraag.uitleg': { nl: 'Je klant ziet dit bij factuur {nummer}{partij}.', ar: 'يرى عميلك هذا عند الفاتورة {nummer}{partij}.', en: 'Your client sees this with invoice {nummer}{partij}.' },
@@ -15257,7 +15318,7 @@ export const MESSAGES = {
   'bh.det.email': { nl: 'E-mail', ar: 'البريد الإلكتروني', en: 'E-mail' },
   'bh.det.stuurEmail': { nl: 'Stuur e-mail', ar: 'إرسال بريد إلكتروني', en: 'Send e-mail' },
   'bh.det.stuurBericht': { nl: 'Stuur bericht', ar: 'إرسال رسالة', en: 'Send message' },
-  'bh.det.werkplek': { nl: 'Working Place', ar: 'مساحة العمل', en: 'Working Place' },
+  'bh.det.werkplek': { nl: 'Kwartalen', ar: 'الأرباع', en: 'Quarters' },
   'bh.det.kiesKwartaal': { nl: 'Selecteer een kwartaal', ar: 'اختر ربعًا', en: 'Select a quarter' },
   'bh.det.huidig': { nl: 'huidig', ar: 'الحالي', en: 'current' },
   'bh.det.factuurOpstellen': { nl: 'Factuur opstellen voor deze klant', ar: 'إنشاء فاتورة لهذا العميل', en: 'Create an invoice for this client' },

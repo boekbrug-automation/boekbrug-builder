@@ -589,11 +589,13 @@ export default function KwartaalPage() {
 
             JAARBREED, niet per kwartaal: de nummerteller loopt per (jaar, soort), en de geldaudit
             vergelijkt facturen met hun betalingen ongeacht de periode. Daarom staan ze buiten de
-            kwartaalkiezer hieronder. */}
-        <div style={{ backgroundColor: M3.surface, borderRadius: R.lg, boxShadow: EL1, padding: 14, display: 'grid', gap: 10 }}>
-          <NummeringPaneel clientId={clientId} />
-          <GeldPaneel clientId={clientId} />
-        </div>
+            kwartaalkiezer hieronder.
+
+            [KANTOOR-RUST] Geen kaart eromheen: voor de boekhouder zwijgen beide panelen als er
+            niets aan de hand is, en een lege kaart is dan een wit vak dat niets zegt. Een bevinding
+            brengt zijn eigen vak mee. */}
+        <NummeringPaneel clientId={clientId} audience="accountant" />
+        <GeldPaneel clientId={clientId} audience="accountant" />
 
         {/* Quarter summary */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
@@ -803,7 +805,7 @@ export default function KwartaalPage() {
                             </div>
                             {invoice.client_btw_number && (
                               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-                                <span style={{ color: '#5F6368' }}>BTW</span>
+                                <span style={{ color: '#5F6368' }}>{t('bh.kwt.btwNummer')}</span>
                                 <span className="font-medium" style={{ fontWeight: 500, color: '#202124' }}>
                                   {invoice.client_btw_number}
                                 </span>

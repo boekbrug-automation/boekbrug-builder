@@ -119,8 +119,7 @@ export default function AccountantDebiteuren({ groepen, geenMandaat = false, gek
             {t('bh.deb.geenMandaat.kop')}
           </p>
           <p style={{ margin: 0, color: M3.onSurfaceVariant, lineHeight: 1.6, fontSize: 14.5 }}>
-            {/* The nav item is named as it is written on screen, in every language — an owner
-                hunting for a translated word finds nothing in the interface. */}
+            {/* [KANTOOR-RUST] One sentence: where the client switches it on. */}
             {t('bh.deb.geenMandaat.uitleg1')}{' '}
             {/* Het pad staat er zoals het op het scherm van de KLANT staat. Dat is een bewuste
                 uitzondering op "een zin noemt de knop zoals hij geschreven staat": die knop staat
@@ -276,10 +275,8 @@ export default function AccountantDebiteuren({ groepen, geenMandaat = false, gek
           })}
         </section>
       ))}
-
-      <p style={{ fontSize: 12.5, color: M3.mutedText, lineHeight: 1.6, margin: '4px 0 0' }}>
-        {t('bh.deb.voet')}
-      </p>
+      {/* [KANTOOR-RUST] No footer explaining an absent button: the row whose cap is reached says
+          why in its own verdict.reason (sales-overview.ts), and nowhere else. */}
     </main>
   )
 }

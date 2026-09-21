@@ -862,6 +862,9 @@ function OverzichtPanel({ clientId, year, quarter }: { clientId: string; year: n
   const meta = READINESS_STATUS[rep.status]
   const teBetalen = data.concept.saldo >= 0
 
+  // [KANTOOR-RUST] Titles only. The `detail` of a readiness item is written to the OWNER ("voeg
+  // het origineel toe", "bespreek met je boekhouder") and this panel is read by the boekhouder;
+  // readiness-board.ts strips it for the werkboard for the same reason. The title names the gap.
   const itemList = (title: string, color: string, items: { title: string; detail?: string }[]) => (
     <div style={{ background: '#fff', borderRadius: R.lg, boxShadow: EL1, padding: '14px 16px', marginBottom: 12 }}>
       <div style={{ fontSize: 12, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 10 }}>{title}</div>
@@ -869,10 +872,7 @@ function OverzichtPanel({ clientId, year, quarter }: { clientId: string; year: n
         {items.map((it, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
             <span className="material-symbols-outlined" style={{ fontSize: 18, color, flexShrink: 0, marginTop: 1 }} aria-hidden>error_outline</span>
-            <div>
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: M3.onSurface }}>{it.title}</div>
-              {it.detail && <div style={{ fontSize: 12, color: M3.outline, marginTop: 2, lineHeight: 1.5 }}>{it.detail}</div>}
-            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: M3.onSurface }}>{it.title}</div>
           </div>
         ))}
       </div>
@@ -893,12 +893,9 @@ function OverzichtPanel({ clientId, year, quarter }: { clientId: string; year: n
 
       {rep.missing.length > 0 && itemList(t('brug.moetGebeuren'), '#7C5800', rep.missing)}
       {rep.risks.length > 0 && itemList(t('brug.evenControleren'), M3.error, rep.risks)}
-      {rep.missing.length === 0 && rep.risks.length === 0 && (
-        <div style={{ background: '#CEEAD6', color: '#137333', borderRadius: R.lg, padding: '12px 16px', marginBottom: 12, fontSize: 13.5, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className="material-symbols-outlined" style={{ fontSize: 20 }} aria-hidden>task_alt</span>
-          {t('brug.sluitAan')}
-        </div>
-      )}
+      {/* [KANTOOR-RUST] Nothing missing and nothing to check says nothing here: the verdict card
+          above already carries the state, and a green box the size of a warning is what teaches
+          a reader to skim the spot a real one will appear in. */}
 
       {/* Concept BTW saldo — the number to file */}
       <div style={{ background: '#fff', borderRadius: R.lg, boxShadow: EL1, padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>

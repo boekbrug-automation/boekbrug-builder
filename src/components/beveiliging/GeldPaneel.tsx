@@ -22,6 +22,7 @@ import { useEffect, useState } from "react";
 import { translator } from "@/lib/i18n/t";
 import { useLocale } from "@/lib/i18n/use-locale";
 import type { MessageKey } from "@/lib/i18n/messages";
+import type { PanelAudience } from "./NummeringPaneel";
 
 /** One finding, as the route hands it over: the sentence is Dutch and comes from the rule. */
 type Finding = { kind: string; entityId: string; euros: number; message: string };
@@ -36,7 +37,11 @@ type Audit = {
 /** Three states, never blurred — the same discipline as every other panel in this app. */
 type Load = { state: "reading" } | { state: "unreadable" } | { state: "ok"; audit: Audit };
 
-export function GeldPaneel({ clientId }: { clientId?: string } = {}) {
+// [KANTOOR-RUST] `audience` decides the voice, exactly as in NummeringPaneel: the owner keeps the
+// one line that proves the audit ran; the accountant reads nothing when the books agree, the
+// findings when they do not, and why nothing is repaired automatically only on demand. A drawer
+// half that did not run is named to both.
+export function GeldPaneel({ clientId, audience = "owner" }: { clientId?: string; audience?: PanelAudience } = {}) {
   const t = translator(useLocale());
   const [load, setLoad] = useState<Load>({ state: "reading" });
 
@@ -73,8 +78,8 @@ export function GeldPaneel({ clientId }: { clientId?: string } = {}) {
   }, [clientId]);
 
   if (load.state === "reading") return null; // nothing to say yet; a spinner here is a stutter
-  if (load.state === "unreadable") return <GeldUitslag audit={null} t={t} />;
-  return <GeldUitslag audit={load.audit} t={t} />;
+  if (load.state === "unreadable") return <GeldUitslag audit={null} t={t} audience={audience} />;
+  return <GeldUitslag audit={load.audit} t={t} audience={audience} />;
 }
 
 /**
@@ -90,14 +95,17 @@ export function GeldPaneel({ clientId }: { clientId?: string } = {}) {
 export function GeldUitslag({
   audit,
   t,
+  audience = "owner",
 }: {
   audit: Audit | null;
   t: (key: MessageKey, params?: Record<string, string | number>) => string;
+  audience?: PanelAudience;
 }) {
+  const acc = audience === "accountant";
   if (audit === null) {
     return (
       <p role="alert" className="text-sm text-amber-700 leading-relaxed">
-        {t("geld.nietGelezen")}
+        {t(acc ? "geld.nietGelezenAcc" : "geld.nietGelezen")}
       </p>
     );
   }
@@ -105,6 +113,13 @@ export function GeldUitslag({
   const findings = [...audit.violations, ...audit.drawer];
 
   if (findings.length === 0) {
+    // [KANTOOR-RUST] Silent to the accountant when the books agree — except the drawer half that
+    // did not run, which is named, because a silence there would read as "checked".
+    if (acc) {
+      return audit.drawerChecked ? null : (
+        <p className="text-sm text-amber-700 leading-relaxed">{t("geld.ladeNietGecontroleerd")}</p>
+      );
+    }
     return (
       <p className="text-sm text-gray-500 leading-relaxed">
         {t("geld.klopt")}
@@ -136,7 +151,14 @@ export function GeldUitslag({
           there — and here the next step is genuinely not "fix it": repairing automatically means
           picking one of two disagreeing sources, and picking wrong destroys the evidence that they
           ever differed. */}
-      <p className="text-sm text-amber-900 leading-relaxed">{t("geld.watNu")}</p>
+      {acc ? (
+        <details>
+          <summary className="cursor-pointer text-sm font-medium text-amber-900">{t("bh.waarom")}</summary>
+          <p className="text-sm text-amber-900 leading-relaxed mt-1">{t("geld.watNuAcc")}</p>
+        </details>
+      ) : (
+        <p className="text-sm text-amber-900 leading-relaxed">{t("geld.watNu")}</p>
+      )}
     </div>
   );
 }

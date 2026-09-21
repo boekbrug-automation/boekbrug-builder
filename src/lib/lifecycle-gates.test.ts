@@ -8516,13 +8516,13 @@ test("[TAAL] the translated screens have no Dutch of their own left", () => {
     "src/app/dashboard/settings/team/TeamClient.tsx",
     "src/app/dashboard/bestanden/components/Trash.tsx",
     "src/app/dashboard/aangifte/AangifteClient.tsx",
-    "src/components/draft-queue/DraftQueue.tsx",
     "src/components/quarterly/QuarterlyOverview.tsx",
     "src/app/dashboard/_shared/index.tsx",
     "src/components/search/SearchBar.tsx",
     "src/app/dashboard/settings/facturering/page.tsx",
     "src/app/dashboard/bestanden/components/modals/MoveModal.tsx",
     "src/app/dashboard/verkoop/VerkoopClient.tsx",
+    "src/components/draft-queue/DraftQueue.tsx",
     // [TAAL] Second sweep: the shared components that render INSIDE the screens above. A
     // translated screen with a Dutch modal in it is the exact half-translated state this gate
     // exists to forbid — the screen looks done in Dutch, so nothing points at the gap.
@@ -28780,16 +28780,22 @@ test("[POST-WAARD] the morning mail is built from the invoice's facts, and lands
 // those, and the render tests pin them.
 //
 // Batch 4 took the rest by measurement: every at-rest sentence of 33+ words on the owner screens,
-// and the last copies. The longest rendered sentence is now 38 words (bh.bev.uitleg, the confirm
-// screen's one instruction, carrying art. 52 AWR); the ten over 35 all stand at a decision.
+// and the last copies. The longest rendered sentence was then 38 words (bh.bev.uitleg, the confirm
+// screen's one instruction, carrying art. 52 AWR); the ten over 35 all stood at a decision.
+//
+// [KANTOOR-RUST] batch 1 took the accountant's voice: the touched accountant surfaces went from
+// 2.209 to 1.975 words and 23 → 16 sentences over twenty; the shared numbering/money panels speak
+// to the boekhouder in their own voice and fall silent when healthy; art. 52 AWR, 35/35a Wet OB
+// and 6:96 BW left the primary surfaces (the fact stays, the citation opens on demand or lives
+// at the decision); the bh.bev.uitleg ≈ bulk.lezing copy is gone. Longest is now 37.
 //
 // This gate is a RATCHET. It knows today's stand and refuses any step back; each cleaned batch
 // lowers the ceilings here, in the same commit. What it cannot judge — whether a sentence stands
 // at a decision or at rest — the standard judges; what it can count, it counts.
 test("[RUSTIG] the screen does not grow wordier than the day this was measured", () => {
   // Ceilings — lowered batch by batch. Raising one is a decision to argue in the commit message.
-  const LONGEST_WORDS = 38;      // 7 sep: 67 → 47 after batch 1 → 45 after batch 2 → 38 after batch 4
-  const OVER_TWENTY = 197;       // 7 sep: 263 → 262 after batch 1 → 217 after batch 2 → 201 after batch 3 → 197 after batch 4 (owner screens AND src/modules)
+  const LONGEST_WORDS = 37;      // 7 sep: 67 → 47 after batch 1 → 45 after batch 2 → 38 after batch 4 → 37 after [KANTOOR-RUST] 1
+  const OVER_TWENTY = 190;       // 7 sep: 263 → 262 after batch 1 → 217 after batch 2 → 201 after batch 3 → 197 after batch 4 (owner screens AND src/modules) → 190 after [KANTOOR-RUST] 1
   const OVER_FIFTY = 0;          // 7 sep: 10 → 0 after batch 1
 
   const loop = (dir: string): string[] => {
@@ -28857,14 +28863,13 @@ test("[RUSTIG] the screen does not grow wordier than the day this was measured",
     dubbel.push([lang[i].key, lang[j].key].sort().join(" ≈ "));
   }
   // Today's copies — 46 pairs on 7 September, measured, not chosen; 27 after batch 2, 12 after
-  // batch 3, 5 after batch 4 folded the rest of the owner screens. Each of the five that remain is
-  // one thought two screens genuinely both need, explained in place. A ratchet: a new pair is a
-  // red gate, and this set shrinks with every batch that folds one away.
-  const BEKENDE_KOPIEEN = 5;
+  // batch 3, 5 after batch 4 folded the rest of the owner screens, 4 after [KANTOOR-RUST] batch 1
+  // made the confirm screen's at-rest sentence one line and let the bulk sentence stand alone at
+  // the decision. Each of the four that remain is one thought two screens genuinely both need,
+  // explained in place. A ratchet: a new pair is a red gate, and this set shrinks with every
+  // batch that folds one away.
+  const BEKENDE_KOPIEEN = 4;
   const bekend = new Set([
-    // The single confirm and the bulk confirm each say the reading is not being changed and where
-    // the liability stays (art. 52 AWR) — [BULK-BEVESTIG] requires both to.
-    "bh.bev.bulk.lezing ≈ bh.bev.uitleg",
     // Two failure modes after a number was issued: the mail did not go, the PDF was not made. The
     // owner must hear which, and both must say the number IS issued.
     "detail.fout.mailNietVerstuurd ≈ detail.fout.pdfNietGemaakt",
@@ -37570,3 +37575,105 @@ test("[ONTVANGEN-BESLUIT] the question is shown where it is a question, not wher
   assert.match(scherm, /<DuplicateQuestions \/>/,
     "[ONTVANGEN-BESLUIT] the question must be on a screen the owner opens")
 })
+
+// ─── [KANTOOR-RUST] Simpel van buiten, slim van binnen — the accountant's surfaces ─────────────
+//
+// The Accountant Experience & Noise Audit (September 2026) found the boekhouder reading the
+// OWNER's sentences about a client's administration ("noteer dat even voor je boekhouder", on the
+// boekhouder's own screen), healthy checks taking the space of a warning, empty states of five
+// sentences before the one action, and article numbers (52 AWR, 35/35a Wet OB, 6:96 BW) standing
+// at rest where they changed nothing about the next tap. The owner's rule for the repair: detect
+// broadly, interrupt narrowly, explain on demand — and never replace long noise with compressed
+// noise, never claim completeness from a score.
+//
+// Batch 1 was the surface cleanup. These gates hold what it decided, so a rewrite of any of these
+// screens cannot quietly put the paragraphs back.
+
+test("[KANTOOR-RUST] the shared checks speak to the accountant in the accountant's voice", () => {
+  // The quarter workspace hands both panels the audience they are read by. Without it the panels
+  // default to the owner's voice — correct on /klaar, wrong-role on a client's quarter.
+  const kwartaal = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+  assert.match(kwartaal, /<NummeringPaneel clientId=\{clientId\} audience="accountant" \/>/,
+    "the numbering panel on the accountant's quarter screen no longer says who is reading it");
+  assert.match(kwartaal, /<GeldPaneel clientId=\{clientId\} audience="accountant" \/>/,
+    "the money panel on the accountant's quarter screen no longer says who is reading it");
+
+  // And the accountant's sentences never address the owner, and never send the boekhouder to
+  // "je boekhouder". Checked on the catalogue, because that is where a rewrite would put it back.
+  const M = MESSAGES as Record<string, { nl: string }>;
+  const accKeys = Object.keys(M).filter((k) => /^(doorlopend|geld)\..*Acc$/.test(k));
+  assert.ok(accKeys.length >= 8, `the accountant variants of the two panels are gone (${accKeys.length})`);
+  for (const k of accKeys) {
+    assert.doesNotMatch(M[k].nl, /\b(je|jouw|jij)\b|boekhouder/i,
+      `${k} addresses the owner or names "je boekhouder" — it is read BY the boekhouder`);
+  }
+  // Silence when healthy is a rendering decision, so it is pinned where it is made.
+  const nummering = code("src/components/beveiliging/NummeringPaneel.tsx");
+  const geld = code("src/components/beveiliging/GeldPaneel.tsx");
+  assert.match(nummering, /if \(acc\) \{\s*return report\.countersRead \? null :/,
+    "a clean series speaks to the accountant again — or the half-check went quiet with it");
+  assert.match(geld, /if \(acc\) \{\s*return audit\.drawerChecked \? null :/,
+    "books that agree speak to the accountant again — or the unchecked drawer went quiet with it");
+  // The unreadable state stays its own sentence for both audiences ([NO-SILENT-EMPTY]).
+  assert.match(nummering, /acc \? "doorlopend\.nietGelezenAcc" : "doorlopend\.nietGelezen"/);
+  assert.match(geld, /acc \? "geld\.nietGelezenAcc" : "geld\.nietGelezen"/);
+});
+
+test("[KANTOOR-RUST] legal rationale left the primary surface and opens on demand", () => {
+  // The facts stay true and on the screen; the paragraph carrying the article number sits behind
+  // one word. Matched as the <details> the key is rendered INSIDE, so moving the sentence back
+  // out to a bare <p> is a red gate.
+  const bev = code("src/modules/accountant/pages/AccountantBevestigen.tsx");
+  assert.match(bev, /<details[^>]*>[\s\S]{0,400}?t\('bh\.bev\.bulk\.lezing'\)[\s\S]{0,200}?<\/details>/,
+    "the art. 52 AWR sentence stands at rest on the confirm screen again");
+  assert.match(bev, /<details[^>]*>[\s\S]{0,500}?t\('bh\.bev\.geenMandaat\.waarom'\)[\s\S]{0,200}?<\/details>/,
+    "the no-mandate empty state explains itself before the ask again");
+  const fact = code("src/modules/accountant/pages/AccountantFactuur.tsx");
+  assert.match(fact, /<details[^>]*>[\s\S]{0,400}?t\('bh\.fact\.geenMachtigingWet'\)[\s\S]{0,200}?<\/details>/,
+    "the art. 35a Wet OB paragraph stands at rest on the invoice screen again");
+  const M = MESSAGES as Record<string, { nl: string }>;
+  // At rest, no article number: the send-button note and the one-line confirm instruction.
+  assert.doesNotMatch(M["bh.fact.nummerWaarschuwing"].nl, /art\./, "the citation is back under the send button");
+  assert.doesNotMatch(M["bh.bev.uitleg"].nl, /art\./, "the citation is back in the confirm screen's at-rest line");
+  assert.ok(M["bh.bev.uitleg"].nl.split(/\s+/).length <= 16, "the confirm screen's at-rest instruction grew again");
+  // The footers that explained an absent button or repeated the screen are gone from the
+  // catalogue, so no screen can render them without adding them back on purpose.
+  for (const gone of ["bh.deb.voet", "bh.macht.voet", "bh.opvr.voet", "bh.opvr.vinkUitleg"]) {
+    assert.equal(M[gone], undefined, `${gone} is back in the catalogue`);
+  }
+  // …and the accountant's empty states are one sentence and the action.
+  for (const k of ["bh.bev.leeg", "bh.deb.leeg.allesBetaald", "bh.macht.uitleg", "bh.fact.geenMachtigingUitleg", "bh.deb.geenMandaat.uitleg1"]) {
+    assert.ok(M[k].nl.split(/\s+/).length <= 12, `${k} is longer than one short sentence again: "${M[k].nl}"`);
+  }
+  // The completeness caveat is the one second sentence that stays: a receipt never uploaded is
+  // not a gap this engine can see, and "geen bekende aandachtspunten" is a claim about what is
+  // KNOWN, never that the quarter is complete.
+  assert.match(M["bh.opvr.geenGaten"].nl, /^Geen bekende aandachtspunten/);
+  assert.doesNotMatch(M["bh.opvr.geenGaten"].nl, /compleet|volledig|klaar/i);
+});
+
+test("[KANTOOR-RUST] the accountant is not notified of every sale, and reads no owner detail on the Brug", () => {
+  // "Nieuwe factuur verzonden" went to the linked accountant on every invoice of every client,
+  // with no action on it and a link to a client page that lists no invoices. The client's own
+  // notification (acting-for) and the customer's e-mail are untouched.
+  const send = code("src/app/api/invoice/send/route.ts");
+  assert.doesNotMatch(send, /Nieuwe factuur verzonden/, "the per-sale FYI to the accountant is back");
+  assert.match(send, /Je boekhouder heeft een factuur verstuurd/, "the CLIENT's acting-for notification must stay");
+
+  // The Brug's overview lists readiness items by title: the `detail` is written to the owner
+  // ("voeg het origineel toe") and readiness-board.ts already strips it for the werkboard.
+  const brug = code("src/app/dashboard/brug/BrugClient.tsx");
+  const overzicht = brug.slice(brug.indexOf("function OverzichtPanel("), brug.indexOf("function KwartaalPanel("));
+  assert.ok(overzicht.length > 500, "OverzichtPanel not found where this gate expects it");
+  assert.doesNotMatch(overzicht, /it\.detail/, "the owner-voiced readiness detail is rendered to the accountant again");
+  assert.doesNotMatch(overzicht, /brug\.sluitAan/, "the green all-fine box is back under a verdict card that already says so");
+
+  // "Working Place" was English inside the Dutch source; the quarter screen's BTW label was a
+  // literal in a component.
+  const D = MESSAGES as Record<string, { nl: string }>;
+  assert.equal(D["bh.det.werkplek"].nl, "Kwartalen");
+  const kwartaal = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+  assert.doesNotMatch(kwartaal, />BTW<\/span>/, "the BTW-nummer label is a literal again");
+  assert.match(kwartaal, /t\('bh\.kwt\.btwNummer'\)/);
+});
+

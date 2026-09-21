@@ -19,6 +19,16 @@
 // Belastingdienst accepts a gap that can be EXPLAINED; what it does not accept is a gap nobody
 // noticed. So this says which numbers, and says plainly that an explanation is what is wanted,
 // rather than colouring the screen red about something the owner cannot undo.
+//
+// ── AND WHY IT SAYS NOTHING AT ALL TO THE ACCOUNTANT WHEN IT IS FINE ──
+//
+// [KANTOOR-RUST] The same verdict is read on /dashboard/clients/[id]/kwartaal by the boekhouder,
+// about a CLIENT's series. There the one healthy line is noise between the accountant and the
+// exceptions they came for, and every "je reeks" / "noteer dat voor je boekhouder" is the wrong
+// person addressed. So the `audience` decides the voice: the owner keeps the line that proves the
+// check ran; the accountant gets silence when it is clean, the finding when it is not, and the
+// rationale behind a gap only when they open it. What never changes with the audience: a check
+// that could NOT run says so, to both.
 
 import { useEffect, useState } from "react";
 
@@ -44,7 +54,10 @@ function seriesLabel(s: SeriesReport, t: (k: "doorlopend.reeks.factuur" | "doorl
   return s.year === null ? name : `${name} ${s.year}`;
 }
 
-export function NummeringPaneel({ clientId }: { clientId?: string } = {}) {
+/** Who is reading: the owner about their own series, or the accountant about a client's. */
+export type PanelAudience = "owner" | "accountant";
+
+export function NummeringPaneel({ clientId, audience = "owner" }: { clientId?: string; audience?: PanelAudience } = {}) {
   const t = translator(useLocale());
   const [load, setLoad] = useState<Load>({ state: "reading" });
 
@@ -83,8 +96,8 @@ export function NummeringPaneel({ clientId }: { clientId?: string } = {}) {
   }, [clientId]);
 
   if (load.state === "reading") return null; // nothing to say yet; a spinner here is a stutter
-  if (load.state === "unreadable") return <NummeringUitslag report={null} t={t} />;
-  return <NummeringUitslag report={load.report} t={t} />;
+  if (load.state === "unreadable") return <NummeringUitslag report={null} t={t} audience={audience} />;
+  return <NummeringUitslag report={load.report} t={t} audience={audience} />;
 }
 
 /**
@@ -102,14 +115,17 @@ export function NummeringPaneel({ clientId }: { clientId?: string } = {}) {
 export function NummeringUitslag({
   report,
   t,
+  audience = "owner",
 }: {
   report: Report | null;
   t: (key: MessageKey, params?: Record<string, string | number>) => string;
+  audience?: PanelAudience;
 }) {
+  const acc = audience === "accountant";
   if (report === null) {
     return (
       <p role="alert" className="text-sm text-amber-700 leading-relaxed">
-        {t("doorlopend.nietGelezen")}
+        {t(acc ? "doorlopend.nietGelezenAcc" : "doorlopend.nietGelezen")}
       </p>
     );
   }
@@ -120,6 +136,13 @@ export function NummeringUitslag({
 
   // Clean, and the whole check ran: one line, no box. The owner has now seen that it is watched.
   if (report.clean && problems.length === 0) {
+    // [KANTOOR-RUST] To the accountant a healthy series is silent — but half a check is still
+    // named, because a silence there would read as "checked to the end".
+    if (acc) {
+      return report.countersRead ? null : (
+        <p className="text-sm text-amber-700 leading-relaxed">{t("doorlopend.halfGecontroleerd")}</p>
+      );
+    }
     return (
       <p className="text-sm text-gray-500 leading-relaxed">
         {t("doorlopend.klopt")}
@@ -132,7 +155,7 @@ export function NummeringUitslag({
 
   return (
     <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2">
-      <p className="text-sm font-semibold text-amber-900">{t("doorlopend.gatenTitel")}</p>
+      <p className="text-sm font-semibold text-amber-900">{t(acc ? "doorlopend.gatenTitelAcc" : "doorlopend.gatenTitel")}</p>
 
       {problems.map((s) => (
         <p key={`${s.type}-${s.year ?? "x"}`} className="text-sm text-amber-900 leading-relaxed">
@@ -143,8 +166,8 @@ export function NummeringUitslag({
               en dat is een ander bericht met een ander antwoord erop. */}
           {(s.burnedAtEnd ?? 0) > 0 &&
             (s.issued === 0
-              ? t("doorlopend.reeksLeeg", { aantal: s.burnedAtEnd as number })
-              : t("doorlopend.eindeReeks", { aantal: s.burnedAtEnd as number }))}{" "}
+              ? t(acc ? "doorlopend.reeksLeegAcc" : "doorlopend.reeksLeeg", { aantal: s.burnedAtEnd as number })
+              : t(acc ? "doorlopend.eindeReeksAcc" : "doorlopend.eindeReeks", { aantal: s.burnedAtEnd as number }))}{" "}
           {s.duplicates.length > 0 && t("doorlopend.dubbel", { nummers: s.duplicates.join(", ") })}
         </p>
       ))}
@@ -153,14 +176,23 @@ export function NummeringUitslag({
         // Not a gap and not dropped: a number in a format we do not know. Naming them lets the owner
         // recognise his own imported history instead of wondering what we mean.
         <p className="text-sm text-amber-900 leading-relaxed">
-          {t("doorlopend.onleesbaar", { nummers: report.unreadable.slice(0, 8).join(", ") })}
+          {t(acc ? "doorlopend.onleesbaarAcc" : "doorlopend.onleesbaar", { nummers: report.unreadable.slice(0, 8).join(", ") })}
         </p>
       )}
 
       {/* What to DO. A finding with no next step is a screen that worries someone and leaves him
           there — and the next step here is genuinely not "fix it", because a burned number cannot
           be reused. It is: know about it before your accountant does. */}
-      <p className="text-sm text-amber-900 leading-relaxed">{t("doorlopend.watNu")}</p>
+      {acc ? (
+        // [KANTOOR-RUST] Explain on demand: the boekhouder knows why a gap is allowed; the one who
+        // does not can open it. The finding above stays; only the lecture folds.
+        <details>
+          <summary className="cursor-pointer text-sm font-medium text-amber-900">{t("bh.waarom")}</summary>
+          <p className="text-sm text-amber-900 leading-relaxed mt-1">{t("doorlopend.watNuAcc")}</p>
+        </details>
+      ) : (
+        <p className="text-sm text-amber-900 leading-relaxed">{t("doorlopend.watNu")}</p>
+      )}
     </div>
   );
 }

@@ -243,9 +243,14 @@ export default function AccountantFactuur({ klanten, gekoppeld = [], vooraf = nu
           <p style={{ margin: '0 0 12px', color: M3.onSurfaceVariant, lineHeight: 1.6, fontSize: 14.5 }}>
             {t('bh.fact.geenMachtigingUitleg')}
           </p>
-          <p style={{ margin: 0, color: M3.mutedText, lineHeight: 1.6, fontSize: 13.5 }}>
-            {t('bh.fact.geenMachtigingWet')}
-          </p>
+          {/* [KANTOOR-RUST] Whose name, whose series, whose responsibility (art. 35a Wet OB): true,
+              on the screen, and behind one word rather than in the way of the ask below. */}
+          <details>
+            <summary style={{ cursor: 'pointer', fontSize: 13.5, color: M3.primary }}>{t('bh.waarom')}</summary>
+            <p style={{ margin: '6px 0 0', color: M3.mutedText, lineHeight: 1.6, fontSize: 13.5 }}>
+              {t('bh.fact.geenMachtigingWet')}
+            </p>
+          </details>
           <VraagMachtiging klanten={gekoppeld} kind="facturen" />
         </div>
       </main>

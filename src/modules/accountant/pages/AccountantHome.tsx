@@ -24,6 +24,9 @@ import { DashboardHeader } from '@/app/dashboard/_shared'
 // only the render below is disabled. Re-enable by restoring the import and the
 // <DraftQueue /> mount at the bottom of this file.
 // import DraftQueue from '@/components/draft-queue/DraftQueue'
+// [KANTOOR-RUST] Its catalogue copy (dq.*) was NOT removed: the component's fetch is the only
+// "door" to /api/draft-queue that the [GEEN-DEUR] ratchet sees, so the copy leaves together with
+// the route or not at all — an owner decision, not a cleanup.
 import type { AccountantOverview, ClientSummary, TodoItem } from '../accountant.types'
 import type { WorkQueues } from '../work-queues'
 import type { NotificationRow } from '@/types/rows'

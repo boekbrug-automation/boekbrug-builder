@@ -43,6 +43,16 @@ woorden (de ene instructie van het bevestigscherm, met art. 52 AWR erin); alles 
 bij een beslissing. Gemeten over alle schermen: 263 → 197 zinnen boven de twintig, en 23.111 → 22.327 woorden sinds
 batch 2 begon.
 
+Na [KANTOOR-RUST] batch 1 (de stem van de boekhouder, september 2026): de aangeraakte
+boekhouderschermen — bevestigen, debiteuren, factureren namens, machtiging vragen, stukken
+opvragen, de Brug, de klantkaart, het kwartaalscherm en de twee gedeelde controlepanelen — van
+2.209 naar 1.975 woorden, 23 → 16 zinnen boven de twintig. Wat er wegging: zinnen aan de
+ondernemer gericht die de boekhouder las ("noteer dat even voor je boekhouder"), gezonde
+controles die een alinea innamen (voor de boekhouder zwijgen ze nu), lege staten van drie tot
+vijf zinnen vóór de ene knop, en de wetsartikelen in rust (art. 52 AWR, 35/35a Wet OB, 6:96 BW —
+het feit blijft, het artikel opent op verzoek of staat bij de beslissing). Langste zin op het
+scherm: 38 → 37; kopieën: 5 → 4.
+
 De 233 zinnen langer dan twintig woorden zijn 7% van de zinnen en dragen ~30% van de woorden.
 De drie dagelijkse schermen — betalen, bank, controlewachtrij — dragen 8.577 woorden: een derde
 van alles.

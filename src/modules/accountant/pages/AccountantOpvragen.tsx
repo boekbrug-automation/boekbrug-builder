@@ -21,8 +21,9 @@
 // vroeg of laat iets doms — en de klant leert het verzoek te negeren.
 
 import { useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { M3, R, EL1, COLUMN } from '@/lib/design/tokens'
-import { MAX_ITEMS, MAX_EXTRA, buildDocumentRequest } from '@/lib/document-request'
+import { MAX_EXTRA, buildDocumentRequest } from '@/lib/document-request'
 import { failureText } from '@/lib/server-message'
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
@@ -187,7 +188,9 @@ export default function AccountantOpvragen({ klanten, kwartalen }: Props) {
         </h1>
         <div style={kaart}>
           <p style={{ margin: 0, color: M3.onSurface, lineHeight: 1.6 }}>
-            {t('bh.opvr.geenKlanten')} <strong>{t('chrome.klantenBeheren')}</strong>.
+            {/* [KANTOOR-RUST] The sentence names the screen; the name IS the way there. */}
+            {t('bh.opvr.geenKlanten')}{' '}
+            <Link href="/dashboard/clients/beheer" style={{ color: M3.primary, fontWeight: 500 }}>{t('chrome.klantenBeheren')}</Link>.
           </p>
         </div>
       </main>
@@ -271,9 +274,6 @@ export default function AccountantOpvragen({ klanten, kwartalen }: Props) {
                   </span>
                 </label>
               ))}
-              <p style={{ margin: '12px 0 0', fontSize: 12.5, color: M3.mutedText, lineHeight: 1.6 }}>
-                {t('bh.opvr.vinkUitleg', { max: MAX_ITEMS })}
-              </p>
             </>
           )}
         </section>
@@ -370,9 +370,6 @@ export default function AccountantOpvragen({ klanten, kwartalen }: Props) {
               ? t('bh.opvr.bezig')
               : t('bh.opvr.verstuurNaar', { naam: klant?.naam ?? t('bh.opvr.jeKlant') })}
           </button>
-          <p style={{ marginTop: 10, marginBottom: 0, fontSize: 12.5, color: M3.mutedText, lineHeight: 1.5 }}>
-            {t('bh.opvr.voet')}
-          </p>
         </section>
       )}
     </main>
