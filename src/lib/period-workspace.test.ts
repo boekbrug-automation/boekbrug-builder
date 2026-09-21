@@ -310,3 +310,49 @@ test("[KANTOOR-PERIODE] an item carries no severity, no amount, no period and no
     }
   }
 });
+
+// ── two gaps, one sentence ───────────────────────────────────────────────────
+
+test("[KANTOOR-PERIODE] two readiness gaps with the SAME title are two findings, and both survive", () => {
+  // Not a fixture invented for the test: `bankGapMessages` writes this exact sentence once per
+  // gap it finds, and the gaps differ only in a `detail` this screen deliberately does not read.
+  // Two of them therefore arrive word for word identical — and if the title were the identity,
+  // React would render one of them and the accountant would chase one missing statement while the
+  // source is still reporting two.
+  const TITEL = "Er ontbreekt een stuk bankgeschiedenis";
+  const views = buildWorkspace(
+    sources({
+      readiness: {
+        ok: true,
+        value: {
+          missing: [{ title: TITEL }, { title: TITEL }, { title: "Bon ontbreekt" }],
+          risks: [{ title: "Kasverschil" }, { title: "Kasverschil" }],
+        },
+      },
+    }),
+    t,
+  );
+  const items = allItemsOf(scope(views, "kwartaal"));
+
+  // Both are in the projection, both times, with the source's sentence untouched.
+  assert.equal(items.filter((i) => i.text === TITEL).length, 2, "a duplicate-titled gap was dropped");
+  assert.equal(items.filter((i) => i.text === "Kasverschil").length, 2, "a duplicate-titled risk was dropped");
+  assert.equal(items.length, 5);
+
+  // …and every one of the five can be keyed apart.
+  const ids = items.map((i) => i.sourceIdentity);
+  assert.equal(new Set(ids).size, ids.length, `identities collided: ${ids.join(" | ")}`);
+
+  // The ordinal is a POSITION IN THIS ANSWER, never a name for the gap itself: it carries no
+  // client, no period and nothing that could be mistaken for something to store.
+  for (const id of ids) {
+    assert.doesNotMatch(id, new RegExp(CLIENT), `${id} carries business identity`);
+    assert.doesNotMatch(id, /2026|Q[1-4]/, `${id} carries a period`);
+  }
+
+  // Nothing is deduplicated: identical titles fold into ONE group (that is presentation) and the
+  // group still holds both items (that is truth).
+  const kw = scope(views, "kwartaal");
+  const bankGroep = [...kw.groups, ...kw.hiddenGroups].find((g) => g.shown[0]?.text === TITEL)!;
+  assert.equal(bankGroep.shown.length + bankGroep.hidden.length, 2, "grouping swallowed one of the two");
+});

@@ -84,7 +84,14 @@ export interface WorkItem {
   text: string;
   /** Only a destination Batch 2 already proved. Absent is normal and means "no exact target". */
   href?: string;
-  /** Stable enough to key a list and to say which row this came from. Never used as equality. */
+  /**
+   * The React key, and nothing more.
+   *
+   * Unique WITHIN one source result — which for readiness means the position in the answer is part
+   * of it, because two gaps may carry the identical title. Never business identity, never
+   * persisted, never compared between two reads, and never used to decide that two findings are
+   * the same fact: only the source may say that, and this module never asks it to.
+   */
   sourceIdentity: string;
 }
 
@@ -203,8 +210,19 @@ export interface MoneyFinding {
   accountantMessage: string;
 }
 
-/** A read that answered, or one that did not. Never collapsed into an empty list. */
-export type SourceRead<T> = { ok: true; value: T } | { ok: false };
+/**
+ * A read that answered, one that failed, or one that has not answered YET.
+ *
+ * The third state is not a nicety. A period switch re-asks every source, and until the new answers
+ * land the old ones are about a period nobody is looking at any more — see period-context.ts. A
+ * pending read must therefore show NOTHING: not the previous period's findings (they would read as
+ * facts about this one) and not the source's read-failure sentence (nothing has failed; the answer
+ * is simply not back). Only `{ ok: false }` without `pending` means the source could not answer.
+ */
+export type SourceRead<T> = { ok: true; value: T } | { ok: false; pending?: boolean };
+
+/** No answer for the period on screen yet. Renders as silence, in every scope. */
+export const PENDING_READ: { ok: false; pending: true } = { ok: false, pending: true };
 
 export interface WorkspaceSources {
   clientId: string;
@@ -235,7 +253,16 @@ export function buildWorkspace(sources: WorkspaceSources, t: Translator): ScopeV
   const kwartaalItems: WorkItem[] = [];
   const kwartaalNotices: string[] = [];
   if (sources.readiness.ok) {
-    for (const m of sources.readiness.value.missing) {
+    // [KANTOOR-PERIODE] The ORDINAL is part of the presentation identity, because the title alone
+    // is not one: `bankGapMessages` can return several missing rows reading exactly "Er ontbreekt
+    // een stuk bankgeschiedenis", differing only in a `detail` this screen deliberately does not
+    // read. Two React children keyed the same is one child rendered — a finding would vanish from
+    // the screen while the source is still reporting it.
+    //
+    // It is a POSITION IN THIS ANSWER and nothing else: never stored, never compared across reads,
+    // never business identity. Two readiness answers are not related by it, and nothing may treat
+    // `#0` as "the same gap as last time".
+    sources.readiness.value.missing.forEach((m, index) => {
       kwartaalItems.push({
         source: "readiness-missing",
         scope: "kwartaal",
@@ -246,10 +273,10 @@ export function buildWorkspace(sources: WorkspaceSources, t: Translator): ScopeV
         // The gap the client can close: the screen that asks them for it, already on this period.
         // Deliberately not readiness' own `fix` href — those are OWNER routes.
         href: opvragenHref(period),
-        sourceIdentity: `readiness-missing:${m.title}`,
+        sourceIdentity: `readiness-missing#${index}:${m.title}`,
       });
-    }
-    for (const r of sources.readiness.value.risks) {
+    });
+    sources.readiness.value.risks.forEach((r, index) => {
       kwartaalItems.push({
         source: "readiness-risk",
         scope: "kwartaal",
@@ -257,10 +284,10 @@ export function buildWorkspace(sources: WorkspaceSources, t: Translator): ScopeV
         text: r.title,
         // A reconciliation difference is the accountant's own check, not something to ask a client
         // for; Opvragen excludes risks on purpose, so this one carries no destination.
-        sourceIdentity: `readiness-risk:${r.title}`,
+        sourceIdentity: `readiness-risk#${index}:${r.title}`,
       });
-    }
-  } else {
+    });
+  } else if (!sources.readiness.pending) {
     kwartaalNotices.push(t("bh.opvr.fout.lezen"));
   }
 
@@ -278,7 +305,7 @@ export function buildWorkspace(sources: WorkspaceSources, t: Translator): ScopeV
         sourceIdentity: `vraag:${inv.id}`,
       });
     }
-  } else {
+  } else if (!sources.vragen.pending) {
     // [NO-SILENT-EMPTY] An invoice read that failed is not "no open questions".
     kwartaalNotices.push(t("bh.kwt.leesfout"));
   }
@@ -313,7 +340,7 @@ export function buildWorkspace(sources: WorkspaceSources, t: Translator): ScopeV
     }
     // Half a check is named, always — a silence here would read as "checked, and fine".
     if (!sources.geld.value.drawerChecked) kasNotices.push(t("geld.ladeNietGecontroleerd"));
-  } else {
+  } else if (!sources.geld.pending) {
     geldNotices.push(t("geld.nietGelezenAcc"));
     // The drawer travels in the same answer, so an unread money audit leaves BOTH spans unknown.
     kasNotices.push(t("geld.nietGelezenAcc"));
@@ -344,7 +371,7 @@ export function buildWorkspace(sources: WorkspaceSources, t: Translator): ScopeV
       });
     }
     if (!countersRead) nummeringNotices.push(t("doorlopend.halfGecontroleerd"));
-  } else {
+  } else if (!sources.nummering.pending) {
     nummeringNotices.push(t("doorlopend.nietGelezenAcc"));
   }
 

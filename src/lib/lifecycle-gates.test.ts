@@ -34520,7 +34520,10 @@ test("[VRAAG-EERST] the quarter screen asks the question before it writes, and w
   assert.match(head, /if \(action === 'vraag'\) \{\s*await askQuestion\(invoiceId\)\s*return\s*\}/,
     "'vraag' must leave handleAction before any write or optimistic chip");
   const exit = head.indexOf("if (action === 'vraag')");
-  assert.ok(exit >= 0 && head.indexOf("setInvoices(") > exit && head.indexOf("setUpdatingId(") > exit,
+  // [KANTOOR-PERIODE] The optimistic row edit is `patchRij(...)` since the rows started travelling
+  // with the period they were read for; it is the same write this gate has always watched, under
+  // its own name. The invariant is unchanged: it must sit AFTER the 'vraag' exit.
+  assert.ok(exit >= 0 && head.indexOf("patchRij(") > exit && head.indexOf("setUpdatingId(") > exit,
     "the 'vraag' exit sits after an optimistic update or a busy flag — the chip would flash a question that does not exist");
   assert.doesNotMatch(page, /(?<![_a-zA-Z])status:\s*'vraag'/, "the page posts 'vraag' as a status again");
 
@@ -37988,4 +37991,77 @@ test("[KANTOOR-PERIODE] the quarter screen opens on the work, and the panels mov
   for (const route of ["/api/readiness", "/api/money-audit", "/api/invoice/continuity"]) {
     assert.equal((page.match(new RegExp(route.replace(/\//g, "\\/"), "g")) ?? []).length, 1, `${route} is fetched more than once`);
   }
+});
+
+test("[KANTOOR-PERIODE] nothing from the previous period may be rendered under this one", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // Three period-scoped answers, each held with the period it ANSWERED and consumed only when that
+  // is the period on the screen. Without this a Q3 finding, a Q3 open question and Q3's reconciled
+  // omzet all render for a moment underneath a Q2 heading — and every one reads as a Q2 fact.
+  for (const staat of ["factuurLezing", "reconLezing", "bronLezing"]) {
+    assert.match(page, new RegExp(`readFor\\(${staat}, huidig\\)`),
+      `${staat} is read without asking which period it answers`);
+  }
+  // The unstamped states they replaced must not come back.
+  for (const oud of ["setInvoices(", "setRecon(", "setBronnen(", "setLoadError(", "setLoading("]) {
+    assert.ok(!page.includes(oud), `${oud} is back: a period-scoped read without its period`);
+  }
+
+  // A late answer to an abandoned request is refused on IDENTITY, never on timing — three writes,
+  // three guards — and the effects that start those requests cancel on the way out.
+  assert.equal((page.match(/acceptStamped\(/g) ?? []).length, 3, "a stamped write lost its guard");
+  assert.equal((page.match(/let alive = true/g) ?? []).length, 2, "a source effect stopped cancelling");
+  assert.equal((page.match(/alive = false/g) ?? []).length, 2, "a source effect stopped cancelling");
+  assert.doesNotMatch(page, /setTimeout\([^)]*setBronLezing|setTimeout\([^)]*setFactuurLezing/,
+    "the race is being handled with a delay instead of an identity");
+
+  // PENDING is its own state on the way into the projection: not the old answer, not a failure.
+  assert.match(page, /PENDING_READ/, "a period with no answer yet is reported as something else");
+});
+
+test("[KANTOOR-PERIODE] a read that has not answered yet is silent, and only a failed one speaks", () => {
+  const ws = code("src/lib/period-workspace.ts");
+  // All four sources: the failure sentence is pushed only when the read actually failed.
+  assert.equal((ws.match(/\} else if \(!sources\.\w+\.pending\) \{/g) ?? []).length, 4,
+    "a source went back to treating 'not answered yet' as 'could not answer'");
+  assert.doesNotMatch(ws, /\}\s*else\s*\{\s*\w*Notices\.push/,
+    "a notice is pushed from an unguarded else — pending would read as failure");
+  assert.match(ws, /export const PENDING_READ/, "the pending state is no longer nameable");
+});
+
+test("[KANTOOR-PERIODE] two findings that say the same thing stay two findings", () => {
+  const ws = code("src/lib/period-workspace.ts");
+  // The React identity of a readiness item is its position in THIS answer plus its title: the
+  // title alone is not unique (bankGapMessages writes one sentence per gap), and two children
+  // keyed the same is one child rendered.
+  assert.match(ws, /sourceIdentity: `readiness-missing#\$\{index\}:/, "the readiness gap identity is a title again");
+  assert.match(ws, /sourceIdentity: `readiness-risk#\$\{index\}:/, "the readiness risk identity is a title again");
+  // …and it stays a presentation identity: no client, no period, nothing to store.
+  assert.doesNotMatch(ws, /sourceIdentity: `[^`]*\$\{(clientId|year|quarter|period)\}/,
+    "a presentation key grew business identity");
+  // Nothing is merged on sameness of words, anywhere.
+  assert.doesNotMatch(ws, /new Set\(|dedupe|uniq/i, "the projection started deduplicating findings");
+});
+
+test("[KANTOOR-PERIODE] an item that leads somewhere looks different from one that does not", () => {
+  const blok = code("src/components/kantoor/Aandachtspunten.tsx");
+  // [GATE-VENSTER] Real code at both ends, both asserted found, the end searched after the start.
+  const start = blok.indexOf("function Regel(");
+  assert.notEqual(start, -1, "the row component is not where this gate expects it");
+  const end = blok.indexOf("function Blok(", start);
+  assert.notEqual(end, -1, "the end of the row component is not where this gate expects it");
+  const regel = blok.slice(start, end);
+  assert.ok(regel.length > 200 && regel.length < 2000, `the row window is ${regel.length} characters`);
+
+  // The action treatment sits on the element that holds the WORDS, and nothing stands between the
+  // two. It used to: a child span with `color: M3.onSurface` inside an <a> with `M3.primary`, and
+  // the child wins — so a linked finding and an unlinked one rendered in exactly the same ink.
+  assert.match(regel, /<Link/, "the actionable item stopped being a link");
+  assert.match(regel, /color: M3\.primary/, "the actionable item lost the action colour");
+  assert.match(regel, />\s*\{item\.text\}\s*<\/Link>/, "an element crept between the link and its words");
+  // …and an item with no exact target stays ordinary factual text — never a greyed-out affordance
+  // promising a screen that does not exist.
+  assert.match(regel, /color: M3\.onSurface \}\}>\{item\.text\}<\/span>/, "the plain finding changed ink");
+  assert.doesNotMatch(regel, /disabled|cursor: 'not-allowed'/, "a dead affordance appeared");
 });

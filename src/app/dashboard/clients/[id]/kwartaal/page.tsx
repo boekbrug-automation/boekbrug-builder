@@ -21,7 +21,9 @@ import { EL1, M3, R, COLUMN, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 // [FOCUS-KOP] Where a deep-linked row must come to rest — see the header of that file.
 import { landRowUnderChrome } from '@/lib/focus-scroll'
 import { brugDocumentsHref } from '@/lib/accountant-deep-links'
-import { buildWorkspace, type MoneyFinding, type SourceRead } from '@/lib/period-workspace'
+import { buildWorkspace, PENDING_READ, type MoneyFinding, type SourceRead } from '@/lib/period-workspace'
+// [KANTOOR-PERIODE] Which client-period an answer is about — see the header of that file.
+import { acceptStamped, periodIdentity, readFor, stampFor, type Stamped } from '@/lib/period-context'
 import type { SeriesReport } from '@/lib/invoice-continuity'
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
@@ -42,6 +44,9 @@ interface WorkspaceBronnen {
   geld: SourceRead<{ violations: MoneyFinding[]; drawer: MoneyFinding[]; drawerChecked: boolean }>
   nummering: SourceRead<{ series: SeriesReport[]; unreadable: string[]; countersRead: boolean }>
 }
+
+/** One array, so "no rows read yet" keeps a stable identity across renders. */
+const GEEN_FACTUREN: KwartaalInvoice[] = []
 
 type KwartaalInvoice = Pick<InvoiceRow,
   'id' | 'direction' | 'status' | 'due_date' | 'invoice_date' | 'invoice_number' |
@@ -176,16 +181,26 @@ export default function KwartaalPage() {
   const q        = Number(searchParams.get('q') ?? 1)
   const year     = Number(searchParams.get('year') ?? new Date().getFullYear())
 
+  // [KANTOOR-PERIODE] The period NOW on the screen. Every asynchronous answer below is stamped
+  // with the period it was asked about, and is consumed only when the two match — so a Q3 finding
+  // can never appear for a moment underneath a Q2 heading, and a slow Q3 answer can never land on
+  // top of a Q2 one. The ref carries the same value to the async continuations, which is what makes
+  // the second half true without any assumption about which request finishes first.
+  const huidig = periodIdentity({ clientId, year, quarter: q })
+  const huidigRef = useRef(huidig)
+  useEffect(() => { huidigRef.current = huidig }, [huidig])
+
   const range = QUARTER_RANGES[q] ?? QUARTER_RANGES[1]
   const dateStart = `${year}${range.start}`
   const dateEnd   = `${year}${range.end}`
 
   const [client, setClient] = useState<ProfileRow | null>(null)
-  const [invoices, setInvoices] = useState<KwartaalInvoice[]>([])
-  const [loading, setLoading] = useState(true)
   // [NO-SILENT-EMPTY] Een mislukte lezing mag nooit 'Geen facturen' worden — dat is een uitspraak
   // over andermans administratie die een leesfout niet mag doen.
-  const [loadError, setLoadError] = useState(false)
+  // [KANTOOR-PERIODE] …en een gelezen kwartaal mag nooit onder de kop van een ander kwartaal
+  // blijven staan: de regels reizen samen met de periode waarvan ze het antwoord zijn.
+  const [factuurLezing, setFactuurLezing] =
+    useState<Stamped<{ rows: KwartaalInvoice[]; error: boolean }> | null>(null)
   // [VOORSTEL] The latest proposal per invoice (its status), and which row has the form open.
   const [voorstelStatus, setVoorstelStatus] = useState<Record<string, VoorstelStatus>>({})
   const [voorstelOpenVoor, setVoorstelOpenVoor] = useState<string | null>(null)
@@ -195,13 +210,14 @@ export default function KwartaalPage() {
   // and prints a "BTW totaal" that is a naive both-direction sum, equal to neither 5a
   // nor 5g). Sourced from /api/result (omzet/kosten) + /api/aangifte (5g saldo), the
   // exact endpoints the Brug KwartaalPanel already uses. One client, one truth.
-  const [recon, setRecon] = useState<{ omzet: number; kosten: number; saldo: number } | null>(null)
+  const [reconLezing, setReconLezing] =
+    useState<Stamped<{ omzet: number; kosten: number; saldo: number }> | null>(null)
 
   // [KANTOOR-PERIODE] The known work, above the figures. Three reads, each allowed to fail ALONE:
   // a money audit that did not answer must not erase a numbering gap, and a readiness that did not
   // answer must not erase a money finding. Availability may degrade; financial truth may not.
   // Null until the reads settle, so the block does not flash an empty "nothing to do".
-  const [bronnen, setBronnen] = useState<WorkspaceBronnen | null>(null)
+  const [bronLezing, setBronLezing] = useState<Stamped<WorkspaceBronnen> | null>(null)
   const [sortAsc, setSortAsc] = useState(false)
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -211,6 +227,37 @@ export default function KwartaalPage() {
   const [packaging, setPackaging] = useState(false)
   const [packageError, setPackageError] = useState<string | null>(null)
 
+  // ── What this period has actually answered ─────────────────────────────────
+  // Not "what is in state" — what is in state ABOUT THIS PERIOD. A null here is PENDING: still
+  // being read. It is never rendered as a failed read and never as an empty result, because the
+  // screen knows nothing about this period yet, and both of those would be claims.
+  const lezing = readFor(factuurLezing, huidig)
+  const invoices = lezing?.rows ?? GEEN_FACTUREN
+  const loadError = lezing?.error ?? false
+  const loading = lezing === null
+  const recon = readFor(reconLezing, huidig)
+  const bronnen = readFor(bronLezing, huidig)
+
+  /**
+   * An optimistic edit, applied to the rows of the period it was made in.
+   *
+   * Written as a functional update against the stamp: if the accountant has moved to another
+   * quarter by the time this runs, the edit belongs to rows that are no longer on the screen and
+   * must not be smeared over the rows that are.
+   */
+  const patchRij = (identiteit: string, invoiceId: string, patch: Partial<KwartaalInvoice>) =>
+    setFactuurLezing((prev) =>
+      prev && prev.identity === identiteit
+        ? {
+            ...prev,
+            value: {
+              ...prev.value,
+              rows: prev.value.rows.map((i) => (i.id === invoiceId ? { ...i, ...patch } : i)),
+            },
+          }
+        : prev,
+    )
+
   // ── [BRIDGE-NOTIF] Deep-link focus from a notification (?focus={invoiceId}) ──
   // The accountant clicks an enriched notification and lands on the exact row:
   // auto-expand, scroll into view, brief highlight ring.
@@ -219,6 +266,17 @@ export default function KwartaalPage() {
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
   useEffect(() => {
+    // [KANTOOR-PERIODE] The cancellation half of the contract. React runs this cleanup before the
+    // next run of the effect, so an answer to the period we have just left finds `alive === false`
+    // and writes nothing at all. The stamp then covers what cancellation alone cannot: a write that
+    // is already in flight when the period changes is still refused, by identity, not by timing.
+    let alive = true
+    const ctx = { clientId, year, quarter: q }
+    const schrijfFacturen = (rows: KwartaalInvoice[], error: boolean) => {
+      if (!alive) return
+      setFactuurLezing((prev) => acceptStamped(prev, stampFor(ctx, { rows, error }), huidigRef.current))
+    }
+
     async function load() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
@@ -226,13 +284,13 @@ export default function KwartaalPage() {
       // Client profile
       const { data: clientData } = await supabase
         .from('profiles').select('*').eq('id', clientId).single()
+      if (!alive) return
       if (clientData) setClient(clientData)
 
       // [BRIDGE-A] Two queries — outgoing + incoming — merged, then split by section.
       // [VOL-GELEZEN] Gepagineerd: een detailhandelskwartaal met >1000 facturen werd stil
       // afgekapt, en "Facturen (N)" beloofde volledigheid over een half beeld. Fouten GEBONDEN:
       // een RLS-weigering werd 'Geen facturen in Q{n}' — de verkeerdste conclusie die er is.
-      setLoadError(false)
       const paged = async (build: (from: number, to: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }>) => {
         const out: unknown[] = []
         for (let from = 0; ; from += 1000) {
@@ -269,9 +327,7 @@ export default function KwartaalPage() {
           .order('id', { ascending: true })
           .range(from, to))
       } catch {
-        setLoadError(true)
-        setInvoices([])
-        setLoading(false)
+        schrijfFacturen([], true)
         return
       }
 
@@ -306,9 +362,7 @@ export default function KwartaalPage() {
         .gte('invoice_date', dateStart)
         .lte('invoice_date', dateEnd)
       if (nullDirErr) {
-        setLoadError(true)
-        setInvoices([])
-        setLoading(false)
+        schrijfFacturen([], true)
         return
       }
 
@@ -326,8 +380,7 @@ export default function KwartaalPage() {
         )
 
       const merged = [...(outgoing ?? []), ...(incoming ?? []), ...inferred]
-      setInvoices(merged)
-      setLoading(false)
+      schrijfFacturen(merged, false)
 
       // [TRUST-ACCOUNTANT] Reconciled quarter figures — same source as the ZIP + owner.
       try {
@@ -348,13 +401,17 @@ export default function KwartaalPage() {
           const omzet = Number(pnl?.result?.omzet)
           const kosten = Number(pnl?.result?.kosten)
           const saldo = Number(btw?.aangifte?.saldo)
-          if ([omzet, kosten, saldo].every(Number.isFinite)) {
-            setRecon({ omzet, kosten, saldo })
+          if (alive && [omzet, kosten, saldo].every(Number.isFinite)) {
+            // Stamped like every other answer: an old quarter's reconciled omzet under a new
+            // quarter's heading is the most convincing wrong number this screen could print.
+            setReconLezing((prev) =>
+              acceptStamped(prev, stampFor(ctx, { omzet, kosten, saldo }), huidigRef.current))
           }
         }
       } catch { /* leave recon null → tiles show a loading dash, never a wrong number */ }
     }
     load()
+    return () => { alive = false }
   }, [clientId, q, year])
 
   // ── [KANTOOR-PERIODE] The three sources behind Aandachtspunten ──────────────
@@ -367,6 +424,7 @@ export default function KwartaalPage() {
   // these payloads through buildWorkspace() below, which is a memo over the same raw reads.
   useEffect(() => {
     let alive = true
+    const ctx = { clientId, year, quarter: q }
     void (async () => {
       const lees = async <T,>(url: string, pick: (json: Record<string, unknown>) => T): Promise<SourceRead<T>> => {
         try {
@@ -405,11 +463,12 @@ export default function KwartaalPage() {
       if (!alive) return
       const uit = <T,>(r: PromiseSettledResult<SourceRead<T>>): SourceRead<T> =>
         r.status === 'fulfilled' ? r.value : { ok: false }
-      setBronnen({
+      const gelezen: WorkspaceBronnen = {
         readiness: uit(settled[0] as PromiseSettledResult<SourceRead<{ missing: { title: string }[]; risks: { title: string }[] }>>),
         geld: uit(settled[1] as PromiseSettledResult<SourceRead<{ violations: MoneyFinding[]; drawer: MoneyFinding[]; drawerChecked: boolean }>>),
         nummering: uit(settled[2] as PromiseSettledResult<SourceRead<{ series: SeriesReport[]; unreadable: string[]; countersRead: boolean }>>),
-      })
+      }
+      setBronLezing((prev) => acceptStamped(prev, stampFor(ctx, gelezen), huidigRef.current))
     })()
     return () => { alive = false }
   }, [clientId, q, year])
@@ -417,29 +476,33 @@ export default function KwartaalPage() {
   // The four scopes, from the raw reads plus the invoice rows this page already holds. No fourth
   // request: the open questions are `accountant_status === 'vraag'` on rows that are right here.
   const werk = useMemo(() => {
-    if (!bronnen) return null
     return buildWorkspace(
       {
         clientId,
         year,
         quarter: q,
-        readiness: bronnen.readiness,
-        geld: bronnen.geld,
-        nummering: bronnen.nummering,
+        // [KANTOOR-PERIODE] A source that has not answered FOR THIS PERIOD is PENDING — silent.
+        // Not the previous period's findings (they would be read as facts about this one), and not
+        // a read-failure sentence either: nothing failed, the answer is simply not back yet.
+        readiness: bronnen ? bronnen.readiness : PENDING_READ,
+        geld: bronnen ? bronnen.geld : PENDING_READ,
+        nummering: bronnen ? bronnen.nummering : PENDING_READ,
         // [NO-SILENT-EMPTY] A failed invoice read is not "no open questions"; it is unknown, and
         // buildWorkspace says so with the page's own read-failure sentence.
-        vragen: loadError
-          ? { ok: false }
-          : {
-              ok: true,
-              value: invoices
-                .filter((inv) => inv.accountant_status === 'vraag')
-                .map((inv) => ({ id: inv.id, invoice_number: inv.invoice_number, client_name: inv.client_name })),
-            },
+        vragen: lezing === null
+          ? PENDING_READ
+          : lezing.error
+            ? { ok: false }
+            : {
+                ok: true,
+                value: lezing.rows
+                  .filter((inv) => inv.accountant_status === 'vraag')
+                  .map((inv) => ({ id: inv.id, invoice_number: inv.invoice_number, client_name: inv.client_name })),
+              },
       },
       t,
     )
-  }, [bronnen, invoices, loadError, clientId, q, year, t])
+  }, [bronnen, lezing, clientId, q, year, t])
 
   // [BRIDGE-NOTIF] When invoices are loaded and a ?focus= row exists, reveal it.
   useEffect(() => {
@@ -492,15 +555,16 @@ export default function KwartaalPage() {
       await askQuestion(invoiceId)
       return
     }
+    // The period this edit is being made in. Captured before the first await, so the answer lands
+    // on the rows it was made on — or, if the accountant has moved on, on nothing.
+    const identiteit = huidig
     setUpdatingId(invoiceId)
 
     // NOTE: 'voldaan' is a UI-only label, NOT a DB status (violates CHECK).
     // Creditnota stays 'paid' in DB; the UI shows "Voldaan" based on type+status.
     // (removed the previous update.status = 'voldaan' which caused a 23514 error)
 
-    setInvoices(prev => prev.map(i =>
-      i.id === invoiceId ? { ...i, accountant_status: action } : i
-    ))
+    patchRij(identiteit, invoiceId, { accountant_status: action })
     // [BOEKHOUDER-DEUR] Through the server door, never straight at the table. This screen used to
     // write accountant_status with a browser UPDATE — and 'verwerkt' is the value that freezes an
     // invoice's paid state, so the app's hardest money refusal was set and cleared by a client with
@@ -516,9 +580,9 @@ export default function KwartaalPage() {
     const error = res && res.ok ? null : { message: res ? `door_${res.status}` : 'network' }
     if (error) {
       // revert optimistic on failure
-      setInvoices(prev => prev.map(i =>
-        i.id === invoiceId ? { ...i, accountant_status: invoices.find(x => x.id === invoiceId)?.accountant_status ?? null } : i
-      ))
+      patchRij(identiteit, invoiceId, {
+        accountant_status: invoices.find(x => x.id === invoiceId)?.accountant_status ?? null,
+      })
       // [HONESTY] The revert used to happen in silence: the chip you had just
       // set slid back to its old value and nothing said why. On a screen whose
       // whole job is asserting what has been checked, a status that undoes
@@ -567,6 +631,7 @@ export default function KwartaalPage() {
   // src/lib/accountant-invoice-question-flow.test.ts; the wiring here is pinned by [VRAAG-EERST]
   // in lifecycle-gates.
   async function askQuestion(invoiceId: string) {
+    const identiteit = huidig
     const inv = invoices.find(x => x.id === invoiceId)
     const party = typeof inv?.client_name === 'string' && inv.client_name.trim()
       ? ` (${inv.client_name.trim()})`
@@ -596,9 +661,7 @@ export default function KwartaalPage() {
       },
     })
     if (outcome.kind === 'asked') {
-      setInvoices(prev => prev.map(i =>
-        i.id === invoiceId ? { ...i, accountant_status: 'vraag' } : i
-      ))
+      patchRij(identiteit, invoiceId, { accountant_status: 'vraag' })
     } else if (outcome.kind === 'failed') {
       toast(t('bh.bev.vraag.mislukt'), { tone: 'error' })
     }
@@ -650,7 +713,7 @@ export default function KwartaalPage() {
             zie de kop van Aandachtspunten.tsx. De oude NummeringPaneel/GeldPaneel staan hier niet
             meer: hun bevindingen zitten in dit blok, en twee mounts zouden dezelfde routes een
             tweede keer ophalen. Op de schermen van de EIGENAAR blijven ze onveranderd staan. */}
-        {werk && <Aandachtspunten views={werk} t={t} kwartaalLabel={`Q${q} ${year}`} />}
+        <Aandachtspunten views={werk} t={t} kwartaalLabel={`Q${q} ${year}`} />
 
         {/* Quarter summary */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>

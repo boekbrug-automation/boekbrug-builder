@@ -23,6 +23,8 @@
 //
 // The <details> folds are ephemeral browser state and deliberately not lifted anywhere.
 
+import Link from 'next/link'
+
 import { M3, R, EL1 } from '@/lib/design/tokens'
 import type { Translator } from '@/lib/i18n/t'
 import type { MessageKey } from '@/lib/i18n/messages'
@@ -48,10 +50,18 @@ const SCOPE_LABEL: Record<Exclude<WorkScope, 'kwartaal'>, MessageKey> = {
   kas: 'kw.werk.scope.kas',
 }
 
+/** The one type size both halves of a Regel share; only the COLOUR says whether it leads anywhere. */
+const REGEL_TEKST = { fontSize: 13.5, lineHeight: 1.55 } as const
+
 function Regel({ item }: { item: WorkItem }) {
-  const tekst = (
-    <span style={{ fontSize: 13.5, color: M3.onSurface, lineHeight: 1.55 }}>{item.text}</span>
-  )
+  // [KANTOOR-PERIODE] Actionable and not-actionable must be told apart WITHOUT reading the sentence.
+  //
+  // The two branches each carry their own colour on the element that holds the words, and there is
+  // deliberately no shared child span between them. There used to be: one `tekst` span with
+  // `color: M3.onSurface`, dropped inside an <a> that set `color: M3.primary`. The child wins in
+  // CSS, so every item — the ones that open an exact screen and the ones with nowhere to go —
+  // rendered in the same ink, and the accountant could only find the links by hovering the list.
+  //
   // An item with no exact destination is TEXT, not a dead link: a finding about a bank line has no
   // accountant screen to open, and a greyed-out affordance would promise one that is not there.
   return (
@@ -61,11 +71,23 @@ function Regel({ item }: { item: WorkItem }) {
         style={{ width: 6, height: 6, borderRadius: '50%', background: M3.warn, flexShrink: 0, marginTop: 7 }}
       />
       {item.href ? (
-        <a href={item.href} style={{ color: M3.primary, textDecoration: 'none' }}>
-          {tekst}
-        </a>
+        // next/link, so landing on the work is a client navigation inside the dashboard — the href
+        // itself is exactly what Batch 2 proved, and it is still in the DOM for middle-click,
+        // "open in new tab" and every test that reads it.
+        <Link
+          href={item.href}
+          style={{
+            ...REGEL_TEKST,
+            color: M3.primary,
+            fontWeight: 500,
+            textDecoration: 'underline',
+            textUnderlineOffset: 2,
+          }}
+        >
+          {item.text}
+        </Link>
       ) : (
-        tekst
+        <span style={{ ...REGEL_TEKST, color: M3.onSurface }}>{item.text}</span>
       )}
     </div>
   )

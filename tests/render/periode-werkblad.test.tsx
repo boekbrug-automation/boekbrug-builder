@@ -221,3 +221,78 @@ test("[KANTOOR-PERIODE] the block renders no form, no button and no write afford
   // The unchecked drawer is still on the screen, in its own span.
   assert.ok(visible(html).includes("Kas · huidig kwartaal"), visible(html));
 });
+
+// ── actionable and not-actionable must be told apart WITHOUT reading the sentence ──
+
+test("[KANTOOR-PERIODE] an item with an exact target is a link, and it looks like one", async () => {
+  const { M3 } = await import("../../src/lib/design/tokens");
+  const html = await render({
+    readiness: { ok: true, value: { missing: [{ title: "Bon ontbreekt" }], risks: [{ title: "Kasverschil" }] } },
+    geld: {
+      ok: true,
+      value: {
+        violations: [money("duplicate_live_pair", "dup", "2034753 staat 2 keer in de administratie.")],
+        drawer: [], drawerChecked: true,
+      },
+    },
+  });
+
+  const links = [...html.matchAll(/<a\b[^>]*>[\s\S]*?<\/a>/g)].map((m) => m[0]);
+  assert.equal(links.length, 1, `expected exactly one actionable item, got ${links.length}: ${html}`);
+  const [link] = links;
+
+  // The one destination Batch 2 proved for this item — unchanged.
+  assert.ok(link.includes(`href="/dashboard/accountant/opvragen?clientId=${CLIENT}&amp;q=3&amp;year=2026"`), link);
+  assert.ok(link.includes("Bon ontbreekt"), link);
+
+  // It carries the action treatment…
+  assert.ok(link.includes(`color:${M3.primary}`), `the link is not in the action colour: ${link}`);
+  assert.ok(link.includes("text-decoration:underline"), link);
+
+  // …and nothing inside it can take that back. This is the regression: the words used to live in a
+  // child <span> with `color: onSurface`, which wins in CSS — so every item, linked or not,
+  // rendered in the same ink and the links could only be found by hovering.
+  assert.match(link, /^<a\b[^>]*>[^<]+<\/a>$/, `the link wraps an element that can override it: ${link}`);
+});
+
+test("[KANTOOR-PERIODE] a finding with no target stays ordinary factual text", async () => {
+  const { M3 } = await import("../../src/lib/design/tokens");
+  const html = await render({
+    readiness: { ok: true, value: { missing: [], risks: [{ title: "Kasverschil" }] } },
+    geld: {
+      ok: true,
+      value: {
+        violations: [money("duplicate_live_pair", "dup", "2034753 staat 2 keer in de administratie.")],
+        drawer: [], drawerChecked: true,
+      },
+    },
+    nummering: {
+      ok: true,
+      value: {
+        series: [{ type: "factuur", year: 2026, first: 1, last: 4, issued: 3, missing: [2], burnedAtEnd: 0, duplicates: [] }],
+        unreadable: [], countersRead: true,
+      },
+    },
+  });
+
+  assert.ok(!html.includes("<a "), `a finding with no destination was rendered as a link: ${html}`);
+  // Geld and Nummering both render in the body colour — no borrowed affordance, no grey "disabled"
+  // link either, which would promise a screen that does not exist.
+  assert.ok(html.includes(`color:${M3.onSurface}">Kasverschil</span>`), html);
+  assert.ok(html.includes(`color:${M3.onSurface}">2034753 staat 2 keer in de administratie.</span>`), html);
+  assert.ok(!html.includes(M3.primary) || html.includes("meer"), html);
+});
+
+test("[KANTOOR-PERIODE] two identical readiness sentences are two lines, not one", async () => {
+  // Same shape as the projection test: `bankGapMessages` can report this sentence twice, and a key
+  // built from the title alone would make React render one of them.
+  const TITEL = "Er ontbreekt een stuk bankgeschiedenis";
+  const text = visible(await render({
+    readiness: { ok: true, value: { missing: [{ title: TITEL }, { title: TITEL }], risks: [] } },
+  }));
+  assert.equal(
+    text.split("\n").filter((r) => r === TITEL).length,
+    2,
+    `one of the two identical gaps disappeared on screen:\n${text}`,
+  );
+});
