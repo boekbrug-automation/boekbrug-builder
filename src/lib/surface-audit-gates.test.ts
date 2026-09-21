@@ -98,8 +98,23 @@ test("[PROFILE-READ] the four readers on the gate keep a failed read apart from 
     "the data-only destructure is back — a failed read is a missing profile again, and this route UPSERTS on missing");
   assert.match(cb, /\.eq\('id', user\.id\)\s*\.maybeSingle\(\),/,
     "the callback's profile read is back to .single(), where a missing row arrives through the error channel");
-  assert.match(cb, /planAfterOAuth\(\s*\{[\s\S]{0,200}?\},\s*profileRead,\s*\)/,
+  // [EERSTE-DEUR] The window grew from 200 to 900 characters when the intent gained the
+  // registration flag and the trade. What it asserts is unchanged — that the CLASSIFIED read is
+  // the second argument — and a ceiling that has to be raised as the intent grows is preferable
+  // to a `[\s\S]*?` that would match across the whole file and pass for the wrong reason.
+  assert.match(cb, /planAfterOAuth\(\s*\{[\s\S]{0,900}?\},\s*profileRead,\s*\)/,
     "the plan is handed something other than the classified read");
+  // And the intent it is handed carries all four querystring values, each read raw here and
+  // narrowed inside the plan — never parsed in the route.
+  for (const [naam, param] of [
+    ["destination", /next: searchParams\.get\('next'\)/],
+    ["role", /role: searchParams\.get\(ROLE_PARAM\)/],
+    ["purpose", /purpose: searchParams\.get\(PURPOSE_PARAM\)/],
+    ["registration flag", /register: searchParams\.get\(REGISTER_PARAM\)/],
+    ["trade", /vak: searchParams\.get\(VAK_PARAM\)/],
+  ] as const) {
+    assert.match(cb, param, `the ${naam} no longer reaches the plan, or is parsed in the route`);
+  }
 
   // Every write in the route is plan-driven. The name backfill is the one that used to sit
   // outside the plan, so a plan that ordered nothing still left it standing.
@@ -109,6 +124,14 @@ test("[PROFILE-READ] the four readers on the gate keep a failed read apart from 
     ["upsert", /if \(plan\.profileToCreate\) \{/],
     ["role update", /if \(plan\.roleUpdate\) \{/],
     ["markArchief", /if \(plan\.markArchief\) \{/],
+    // [EERSTE-DEUR] The two writes this batch added, held to the same rule from the day they
+    // arrived: the plan decides, the route only executes. A loose `if (searchParams.get(...))`
+    // here would be a write the "this plan orders no write" assertion cannot see.
+    // …and the completion additionally waits on the role write landing: completedStep() chooses
+    // 5 for an accountant BECAUSE that update is about to make them one, so completing over a
+    // failed role would freeze role 'zzper' with an accountant's step and no wizard left to ask.
+    ["first-run completion", /if \(plan\.completeFirstRun && roleWritten\) \{/],
+    ["trade", /if \(plan\.vakToSet\) \{/],
   ] as const) {
     assert.match(cb, guard, `the ${write} is no longer behind its plan field`);
   }
@@ -117,6 +140,98 @@ test("[PROFILE-READ] the four readers on the gate keep a failed read apart from 
   assert.match(cb, /profileRead\.kind === 'failed'[\s\S]{0,400}?console\.error\('\[PROFILE-READ\] profile unreadable in the OAuth callback/,
     "a failed read in the callback passes silently");
 });
+
+// ─── [EERSTE-DEUR] A new account enters the product, not a wizard ──────────────────────────────
+//
+// The behaviour lives in auth-landing.test.ts (what the plan decides) and in
+// tests/render/register-door.test.tsx (what the screen asks). What is held HERE is the wiring:
+// that /register still SAYS this is a registration, on both of its two exits, and that the
+// confirmation-OFF path produces the same account as the callback path instead of quietly
+// producing a different one on whichever environment has e-mail confirmation switched off.
+test("[EERSTE-DEUR] the registration door says so, on both exits, and completes either way", () => {
+  const reg = code("src/app/register/page.tsx");
+
+  // 1. THE INTENT TRAVELS — and through the existing helper family, never a hand-typed string.
+  assert.match(reg, /REGISTER_PARAM, REGISTER_FLAG/, "the register flag is spelled out by hand somewhere");
+  assert.match(reg, /import \{[^}]*REGISTER_PARAM[^}]*REGISTER_FLAG[^}]*\} from '@\/lib\/register-intent'/,
+    "the flag no longer comes from the intent helper family");
+  // Both exits: the confirmation mail's callback URL and the Google callback URL.
+  const bevestiging = reg.slice(reg.indexOf("function bevestigingsBestemming"), reg.indexOf("function wisFout"));
+  assert.ok(bevestiging.length > 100, "bevestigingsBestemming moved — this window measures nothing");
+  assert.match(bevestiging, /callback\.searchParams\.set\(REGISTER_PARAM, REGISTER_FLAG\)/,
+    "the e-mail confirmation link no longer says it is a registration");
+  // [KLUIS] …and the purpose travels with it, exactly as it does on the Google exit. Without it,
+  // an archief registration on a database that lacks account_purpose_archief.sql is completed as
+  // an ordinary one — stamped with the terminal step of a wizard about sending invoices that this
+  // visitor never walked, which the archief branch in auth-landing.ts explicitly refuses to do.
+  assert.match(bevestiging, /if \(purpose === 'archief'\) callback\.searchParams\.set\(PURPOSE_PARAM, purpose\)/,
+    "the confirmation link drops the archive purpose — the two exits must carry the same intent");
+  const google = reg.slice(reg.indexOf("async function handleGoogleRegister"), reg.indexOf("async function handleRegister"));
+  assert.ok(google.length > 100, "handleGoogleRegister moved — this window measures nothing");
+  assert.match(google, /callback\.searchParams\.set\(REGISTER_PARAM, REGISTER_FLAG\)/,
+    "the Google callback no longer says it is a registration");
+
+  // 2. `next` IS NO LONGER FORCED TO THE WIZARD. This is the line that would silently undo the
+  // whole batch: /onboarding is a SAFE destination, so a confirmation link carrying it wins over
+  // the landing a finished registration should get, and the new user meets the wizard anyway.
+  assert.doesNotMatch(bevestiging, /landingPath/,
+    "the confirmation link defaults `next` to a landing again — /onboarding would win in the callback");
+  assert.match(bevestiging, /const bestemming = gevraagdeBestemming\(\)[\s\S]{0,80}?if \(bestemming\) callback\.searchParams\.set\('next', bestemming\)/,
+    "`next` must be set only when the visitor actually brought a destination");
+
+  // 3. [VAK-BRUG] The trade travels on the Google exit — the one place it was provably lost.
+  assert.match(google, /if \(vak\) callback\.searchParams\.set\(VAK_PARAM, vak\)/,
+    "the trade is dropped on the Google path again");
+
+  // 4. THE DOOR NO LONGER COLLECTS A BUSINESS ADMINISTRATION. The metadata is where this bit:
+  // `onboarding_step: 4` existed to skip the wizard screens these fields duplicated, and step 4
+  // is the Gmail question — so it skipped step 3 too, the only screen that collects address,
+  // IBAN and trade. Three fields at the door cost six behind it.
+  for (const weg of ["company_name", "kvk_number", "btw_number", "onboarding_step: 4"]) {
+    assert.ok(!reg.includes(weg), `${weg} is back on the registration door`);
+  }
+
+  // 5. CONFIRMATION OFF PRODUCES THE SAME ACCOUNT. With e-mail confirmation on, the callback
+  // completes the first run; with it off there is a session immediately and the callback is never
+  // reached. Without this the same registration would land in the product on one environment and
+  // in the wizard on another — a difference nobody sees until a user reports it.
+  const upsert = reg.slice(reg.indexOf(".upsert({"), reg.indexOf("{ onConflict: 'id' }"));
+  assert.ok(upsert.length > 40, "the confirmation-OFF upsert moved — this window measures nothing");
+  assert.match(upsert, /onboarding_done: true/, "a fresh registration is not completed when confirmation is off");
+  assert.match(upsert, /onboarding_step: completedStep\(/,
+    "…and must ask the ONE rule for the terminal step, not re-spell it");
+  assert.match(reg, /import \{ completedStep \} from '@\/lib\/auth-landing'/,
+    "the confirmation-OFF path spells the terminal step itself again — two spellings of one rule " +
+    "is how the two environments start producing different accounts");
+  assert.doesNotMatch(upsert, /company_name|kvk_number|btw_number/, "the removed fields came back through the upsert");
+
+  // 6. AND IT LANDS IN THE PRODUCT. landingPath('boekhouden') is /onboarding — still right for a
+  // LEGACY unfinished owner, and wrong for someone who just registered.
+  assert.match(reg, /router\.push\(safeRedirect\(gevraagdeBestemming\(\), HOME_PATH\)\)/,
+    "the confirmation-OFF path sends a finished registration to a landing again");
+  assert.doesNotMatch(reg, /router\.push\(safeRedirect\([^)]*landingPath/,
+    "…and never back to landingPath('boekhouden'), which is /onboarding");
+
+  // 7. /login MUST NOT CLAIM TO BE A REGISTRATION. An existing user signing in is not registering,
+  // and that difference is the entire reason the parameter exists rather than being inferred.
+  const login = code("src/app/login/page.tsx");
+  assert.doesNotMatch(login, /REGISTER_PARAM|registratie/,
+    "the login screen carries the registration intent — an existing owner would be 'completed' by signing in");
+
+  // 8. NO NEW SCHEMA. Both writes name columns that already exist; `profiles` Update is generated
+  // from the live database, so an invented column is a type error rather than a runtime surprise —
+  // tsc is the real gate and this only pins the payloads it checks.
+  const cb = code("src/app/api/auth/callback/route.ts");
+  assert.match(cb, /\.update\(plan\.completeFirstRun\)/, "the completion writes something other than the planned columns");
+  assert.match(cb, /\.update\(\{ vak: plan\.vakToSet \}\)/, "the trade write grew beyond one column");
+  // [EERSTE-DEUR] The role write's outcome is read, because the completion leans on it.
+  assert.match(cb, /const \{ error: roleError \} = await supabase/,
+    "the role write ignores its error again, while the terminal step depends on it having landed");
+  // Each scoped to the signed-in owner, like every other write in this route.
+  assert.ok((cb.match(/\.eq\('id', user\.id\)/g) ?? []).length >= 4,
+    "a write in this route is no longer scoped to the signed-in user");
+});
+
 
 // ─── AG-03 [BESTEMMING] the reset chain keeps the destination ─────────────────────────────────
 test("[BESTEMMING] the password-reset chain carries the safe destination from login back to login", () => {

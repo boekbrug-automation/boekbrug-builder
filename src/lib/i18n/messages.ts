@@ -15502,11 +15502,12 @@ export const MESSAGES = {
   'reg.ofMetEmail': { nl: 'of met e-mail', ar: 'أو بالبريد الإلكتروني', en: 'or with e-mail' },
   'reg.naam': { nl: 'Volledige naam', ar: 'الاسم الكامل', en: 'Full name' },
   'reg.naamVoorbeeld': { nl: 'Jan de Vries', ar: 'Jan de Vries', en: 'Jan de Vries' },
-  'reg.bedrijf': { nl: 'Bedrijfsnaam (optioneel)', ar: 'اسم الشركة (اختياري)', en: 'Company name (optional)' },
-  'reg.bedrijfVoorbeeld': { nl: 'Jouw Bedrijf BV', ar: 'Jouw Bedrijf BV', en: 'Jouw Bedrijf BV' },
-  'reg.kvk': { nl: 'KVK-nummer (optioneel)', ar: 'رقم KVK (اختياري)', en: 'KVK number (optional)' },
-  'reg.btw': { nl: 'BTW-nummer (optioneel)', ar: 'رقم btw (اختياري)', en: 'BTW number (optional)' },
-  'reg.laterInvullen': { nl: 'Kun je later invullen.', ar: 'يمكنك إدخاله لاحقًا.', en: 'You can fill this in later.' },
+  // [EERSTE-DEUR] reg.bedrijf / reg.bedrijfVoorbeeld / reg.kvk / reg.btw / reg.laterInvullen
+  // stonden hier. De drie velden die ze benoemden zijn van het registratieformulier af: dat
+  // scherm maakt een identiteit aan, geen bedrijfsadministratie. De feiten zelf hebben al een
+  // eigen vocabulaire waar ze wél gevraagd worden (onb.bedrijfsnaam, onb.kvk, onb.btw), en de
+  // Arabische ruling voor «BTW-nummer (optioneel)» blijft in ar-decisions.ts staan — een besluit
+  // dat niemand opnieuw hoeft te nemen als het label ooit terugkomt bij de eerste factuur.
   // De akkoordregel, in stukken die elk een hele zin of een hele knopnaam zijn — de twee links
   // staan er middenin, en een taal met een andere woordvolgorde zet ze op een andere plek.
   'reg.akkoordVoor': { nl: 'Als je een account maakt, ga je akkoord met onze', ar: 'بإنشائك حسابًا فإنك توافق على', en: 'By creating an account you agree to our' },

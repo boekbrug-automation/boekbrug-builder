@@ -31,8 +31,9 @@
 // same reason, as onboardingGate({ read, pathname }) next door.
 
 import { isSafeRedirect, safeRedirect } from "./safe-redirect";
-import { parseRole, type Role } from "./register-intent";
+import { parseRole, parseRegisterIntent, type Role } from "./register-intent";
 import { PURPOSE_PARAM, landingPath, parsePurpose } from "./account-purpose";
+import { parseVak } from "./vak-profile";
 import type { ProfileRead } from "./profile-read";
 // [PROFILE-READ] The one path that may continue on an unreadable profile, imported rather than
 // spelled again: /dashboard/page.tsx classifies the same read itself and throws to its error
@@ -48,6 +49,19 @@ export interface CallbackIntent {
   role: string | null;
   /** ?doel= — waarvoor deze bezoeker binnenkomt. */
   purpose: string | null;
+  /**
+   * [EERSTE-DEUR] ?registratie= — did this callback come from the registration door?
+   *
+   * Raw, like the three above, and narrowed by parseRegisterIntent before anything reads it.
+   */
+  register: string | null;
+  /**
+   * [VAK-BRUG] ?vak= — the trade the visitor already told us on the way in.
+   *
+   * Only Google needs to carry it: an e-mail signUp puts it in the metadata and handle_new_user
+   * writes it, while an OAuth sign-in carries no metadata at all, so the trade was simply lost.
+   */
+  vak: string | null;
 }
 
 /** De velden van het profiel waar deze beslissing op rust. */
@@ -79,6 +93,53 @@ export interface CallbackPlan {
    * is never overwritten, and that guard is a property of the write, not of this decision.
    */
   backfillName: boolean;
+  /**
+   * [EERSTE-DEUR] Mark an EXISTING fresh profile as done, so a new account enters the product
+   * instead of a wizard. Null means "leave onboarding state alone", which is every other case.
+   *
+   * The values, not a boolean, because the step is part of the decision: see completedStep().
+   * (A brand-new profile does not use this — its completion is baked into profileToCreate, in
+   * one INSERT rather than an insert followed by an update.)
+   */
+  completeFirstRun: { onboarding_done: boolean; onboarding_step: number } | null;
+  /**
+   * [VAK-BRUG] The trade to write, or null to leave it alone.
+   *
+   * A SEPARATE field rather than a column inside profileToCreate, and that is the
+   * [VANGNET-SPLITSING] lesson repeated: profile_vak.sql is applied by hand, so on a deployment
+   * without it PostgREST refuses the WHOLE row (PGRST204) — and folding `vak` into the insert
+   * would take the role and the onboarding state down with a column that only decides what the
+   * app OFFERS to prefill. Its own write, its own failure.
+   */
+  vakToSet: string | null;
+}
+
+/**
+ * [EERSTE-DEUR] The onboarding_step a completed account carries, per role.
+ *
+ * Not a new value: it is the one the wizard itself leaves behind. OnboardingWizard's own
+ * `isDone` is `(role === "zzp" && step === 6) || (role === "accountant" && step === 5)`, and its
+ * finish() writes only `{ done: true }` — so a row that finished the wizard keeps the last step it
+ * reached. A row completed at the door is therefore indistinguishable from one completed the long
+ * way, which is what "completed" should mean.
+ *
+ * Nothing reads this once onboarding_done is true. Measured: the only readers of onboarding_step
+ * are onboarding/page.tsx (initialStep + roleWasSet) and isOnbeschreven below, and that page
+ * redirects to /dashboard on onboarding_done before either is used. It is archival, and the honest
+ * archival value is the wizard's own.
+ *
+ * EXPORTED because /register needs the same answer: with e-mail confirmation OFF there is a
+ * session immediately and the callback never runs, so that path completes the account itself. Two
+ * spellings of one rule is how the two environments would start producing different accounts — the
+ * exact divergence those lines exist to prevent — so there is one rule and both callers ask it.
+ *
+ * A function and not a Record<Role, number>, because `Role` has a third member — 'medewerker',
+ * the sales colleague from [ACTING-FOR] — who never registers through this door and has no wizard
+ * of his own. A map would force a number to be invented for him; this falls back to the ZZP'er's
+ * terminal step, which is what the wizard would do with an unrecognised role anyway.
+ */
+export function completedStep(role: Role | null | undefined): number {
+  return role === "accountant" ? 5 : 6;
 }
 
 /**
@@ -102,6 +163,12 @@ export function planAfterOAuth(
 ): CallbackPlan {
   const chosenRole = parseRole(intent.role);
   const wantsArchief = parsePurpose(intent.purpose) === "archief";
+  // [EERSTE-DEUR] Did this come from the registration door? UX intent, never authorisation —
+  // see the header of register-intent.ts for why anyone being able to set it costs nothing.
+  const isRegistration = parseRegisterIntent(intent.register);
+  // [VAK-BRUG] Narrowed here, once. Anything that is not one of the known slugs becomes null,
+  // which means "we do not know his trade" — the state every account was in until now.
+  const carriedVak = parseVak(intent.vak);
 
   // De bestemming, met de terugval van deze route. [SEC-REDIRECT] `isSafeRedirect` weigert alles
   // wat niet een pad op onze eigen origin is; het onderscheid "is er een bestemming" is nodig
@@ -140,14 +207,21 @@ export function planAfterOAuth(
   //     profile state — /invite/accept reads the token and the signed-in address, never
   //     onboarding_done — and the token is the one thing that expires while we guess. It is also
   //     already the destination both branches below privilege over everything profile-derived.
-  //   · everything else goes HOME. Not `next`, even when `next` is safe: the e-mail confirmation
-  //     link always carries next=/onboarding, and sending an unreadable profile to the wizard is
-  //     the original bug onboarding-gate.ts names in so many words ("a completed owner walked
-  //     into the wizard because a read timed out"). And not the archief landing either — that
+  //   · everything else goes HOME. Not `next`, even when `next` is safe: a confirmation link can
+  //     carry next=/onboarding (every one built before [EERSTE-DEUR] does), and sending an
+  //     unreadable profile to the wizard is the original bug onboarding-gate.ts names in so many
+  //     words ("a completed owner walked into the wizard because a read timed out"). And not the
+  //     archief landing either — that
   //     page self-heals onboarding_done + account_purpose off ?doel=archief, so choosing to send
   //     an unknown profile there is the markArchief write with one hop in between. The owner who
   //     came for their vault reaches it from the home, and that self-heal still fires when they
   //     open it themselves, which is where it was always meant to happen.
+  //
+  // [EERSTE-DEUR] And this branch stands FIRST, above everything the registration flag can reach.
+  // "We could not look" outranks "the URL says this is a new account": an unreadable profile is
+  // not a fresh one, and completing an onboarding on a read that failed would be the same defect
+  // this branch exists to prevent, wearing a friendlier name. A ?registratie=1 on a failed read
+  // therefore buys exactly nothing — which is asserted, not assumed.
   if (read.kind === "failed") {
     return {
       destination: isInviteAccept ? next : HOME_PATH,
@@ -155,6 +229,8 @@ export function planAfterOAuth(
       roleUpdate: null,
       markArchief: false,
       backfillName: false,
+      completeFirstRun: null,
+      vakToSet: null,
     };
   }
 
@@ -162,20 +238,38 @@ export function planAfterOAuth(
 
   // ── Nog geen profiel ──────────────────────────────────────────────────
   if (!profile) {
+    // [EERSTE-DEUR] A registration that arrives with no row at all: the trigger did not fire for
+    // this account. The row is then created COMPLETE — one INSERT, not an insert followed by a
+    // correction — so there is no moment in which a brand-new owner looks like a wizard candidate
+    // to the middleware. Archief is not folded in here: that path was already complete on arrival
+    // and keeps its own landing, which is the whole of "archive behaviour remains its own flow".
+    const freshRegistration = isRegistration && !wantsArchief;
+    const newRole: Role = chosenRole ?? "zzper";
     return {
       // [KLUIS] Een archiefaccount heeft geen wizard te doorlopen: die gaat over facturen
       // versturen, bedrijfsgegevens en het koppelen van een mailbox, en deze bezoeker kwam voor
       // geen van drieën.
-      destination: wantsArchief ? (hasNext ? next : archiefLanding) : isInviteAccept ? next : "/onboarding",
+      // [EERSTE-DEUR] For a registration, `next` IS the priority chain already: safeRedirect gave
+      // it the invitation when one travelled, the requested destination when one was safe, and
+      // HOME_PATH when neither. No second destination engine.
+      destination: wantsArchief
+        ? (hasNext ? next : archiefLanding)
+        : freshRegistration
+          ? next
+          : isInviteAccept ? next : "/onboarding",
       profileToCreate: {
-        role: chosenRole ?? "zzper",
-        onboarding_done: wantsArchief,
-        onboarding_step: 1,
+        role: newRole,
+        onboarding_done: wantsArchief || freshRegistration,
+        onboarding_step: freshRegistration ? completedStep(newRole) : 1,
       },
       roleUpdate: null,
       markArchief: wantsArchief,
       // The insert above already carries the name; there is nothing to backfill onto.
       backfillName: false,
+      // Completion is inside the insert above — there is no existing row to correct.
+      completeFirstRun: null,
+      // [VAK-BRUG] Its own write, never a column in the insert — see the field's own comment.
+      vakToSet: freshRegistration ? carriedVak : null,
     };
   }
 
@@ -190,18 +284,56 @@ export function planAfterOAuth(
       roleUpdate: chosenRole && chosenRole !== profile.role ? chosenRole : null,
       markArchief: true,
       backfillName: true,
+      // markArchief already writes onboarding_done for this path; completing it twice, with a
+      // step this visitor never walked, would say something that is not true of him.
+      completeFirstRun: null,
+      vakToSet: null,
     };
   }
 
   const roleUpdate = chosenRole && chosenRole !== profile.role && onbeschreven ? chosenRole : null;
 
+  // [EERSTE-DEUR] A registration whose row the trigger DID create — the ordinary case, because
+  // on_auth_user_created fires during exchangeCodeForSession.
+  //
+  // `onbeschreven` is the whole guard, and it is deliberately the SAME predicate that already
+  // decides whether a URL may still write the role: not done, and step 1 or lower. That is what
+  // makes "fresh" mean fresh. `!onboarding_done` alone would be catastrophic here — production
+  // holds profiles parked at steps 4, 5 and 6 with onboarding_done false, and every one of them
+  // would be silently marked finished the next time its owner signed in, skipping the wizard they
+  // were half-way through and losing the screens that collect their KvK, address and IBAN.
+  //
+  // A registration that is somehow past step 1 therefore falls through to the legacy branch and
+  // resumes, which is the safe direction: a wizard too many costs a few screens, and completing
+  // someone who is not finished costs the data those screens exist to collect.
+  const isFreshRegistration = isRegistration && onbeschreven && !profile.onboarding_done;
+
   // Een bestaand boekhoudaccount wordt hier NOOIT omgezet naar archief, ook niet met
   // ?doel=archief. Dat blijft aan het zelfherstel op /dashboard/kluis, waar het gebeurt op de
   // pagina die de gebruiker zelf heeft opgevraagd — zichtbaar, en niet als bijwerking van een
   // aanmelding. Zie de toelichting in src/app/dashboard/kluis/page.tsx.
-  if (!profile.onboarding_done) {
-    return { destination: isInviteAccept ? next : "/onboarding", profileToCreate: null, roleUpdate, markArchief: false, backfillName: true };
+  if (isFreshRegistration) {
+    // The role this account ends up with — the one travelling on the URL if it may still be
+    // written, otherwise whatever the trigger put there. COMPLETED_STEP has to agree with it, or
+    // an accountant would be stamped with the ZZP'er's terminal step.
+    const finalRole: Role = roleUpdate ?? (profile.role === "accountant" ? "accountant" : "zzper");
+    return {
+      // Same chain as the insert branch: the invitation, then the requested destination, then
+      // home — all three already resolved into `next`. [SEC-REDIRECT] an unsafe one became
+      // HOME_PATH long before this line.
+      destination: next,
+      profileToCreate: null,
+      roleUpdate,
+      markArchief: false,
+      backfillName: true,
+      completeFirstRun: { onboarding_done: true, onboarding_step: completedStep(finalRole) },
+      vakToSet: carriedVak,
+    };
   }
 
-  return { destination: next, profileToCreate: null, roleUpdate, markArchief: false, backfillName: true };
+  if (!profile.onboarding_done) {
+    return { destination: isInviteAccept ? next : "/onboarding", profileToCreate: null, roleUpdate, markArchief: false, backfillName: true, completeFirstRun: null, vakToSet: null };
+  }
+
+  return { destination: next, profileToCreate: null, roleUpdate, markArchief: false, backfillName: true, completeFirstRun: null, vakToSet: null };
 }
