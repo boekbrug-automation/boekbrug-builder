@@ -1857,7 +1857,9 @@ test("[RENDER-GATE] factureren namens een klant renders, and says whose invoice 
   assert.match(html, /Bakkerij Yilmaz/, "…with the clients who granted a mandate");
   // Art. 35: the number series belongs to the client, and the screen has to say so before the
   // accountant presses a button that consumes one of their numbers.
-  assert.match(html, /art\. 35 Wet OB/, "the irreversibility of an issued number is stated");
+  // [KANTOOR-RUST] The fact stays at the decision; the article number left the primary surface.
+  assert.match(html, /definitief/, "the irreversibility of an issued number is stated");
+  assert.doesNotMatch(html, /art\. 35 Wet OB/, "the citation is back on the send screen at rest");
 
   // Without a mandate the screen must NOT look broken or empty — it has to name the one thing that
   // is missing and who can fix it, because the accountant cannot fix it himself.
@@ -2067,6 +2069,7 @@ test("[RENDER-GATE] the debtor board renders, and stays honest about what it can
       inv({ id: "stil", reminders_paused: true }),                   // refused: the owner said no
       inv({ id: "oud", due_date: day(-200), total_inc_btw: 120 }),   // the months-late wording
       inv({ id: "deel", total_inc_btw: 500, amount_paid: 180 }),     // a partial payment
+      inv({ id: "plafond", reminder_count: 3, last_reminder_at: day(-20) }), // the ceiling
     ] as never,
     { k1: "Bakkerij Yilmaz" },
     NOW,
@@ -2081,8 +2084,10 @@ test("[RENDER-GATE] the debtor board renders, and stays honest about what it can
   // no sentence teaches the accountant to stop reading the screen.
   assert.match(html, /Deze klant heeft geen e-mailadres/, "the refusal is spelled out");
   assert.match(html, /stilgezet/, "including the owner's own 'not this one'");
-  // And the ceiling that is a decision rather than a next tap.
-  assert.match(html, /art\. 6:96 BW/, "what comes after three reminders is not a button");
+  // And the ceiling that is a decision rather than a next tap — said on the ROW that reached it,
+  // by the rule itself ([KANTOOR-RUST]: no footer explaining an absent button on every render).
+  assert.match(html, /beslissing van de ondernemer, geen knop/, "what comes after three reminders is not a button");
+  assert.doesNotMatch(html, /art\. 6:96 BW/, "the article number stands at rest under the board again");
 
   // Nothing overdue is a different sentence from no mandate — a board that says "geen mandaat"
   // when everything is simply paid would send the accountant chasing a permission they have.
@@ -2183,7 +2188,7 @@ test("[RENDER-GATE] the confirm queue renders, and never hides what the reader w
   assert.match(geen, /andere machtiging dan die om te factureren/, "and it says the two are separate");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const leeg = renderToStaticMarkup(React.createElement(AccountantBevestigen as any, { rijen: [] }));
-  assert.match(leeg, /Er staat niets te wachten/);
+  assert.match(leeg, /Niets te bevestigen/);
 
   // [NO-SILENT-EMPTY] And a THIRD empty state, which used to be rendered as one of the other two.
   // A failed read on the links gave `geenMandaat` — so the accountant read that nobody had
@@ -2199,7 +2204,7 @@ test("[RENDER-GATE] the confirm queue renders, and never hides what the reader w
   // It must WIN over both other empty states — a page that passes leesfout has nothing true to say
   // about mandates or about the queue, so it may say neither.
   assert.doesNotMatch(stuk, /Nog geen enkele klant heeft je gemachtigd/, "it still claims there is no mandate");
-  assert.doesNotMatch(stuk, /Er staat niets te wachten/, "it still claims the queue is empty");
+  assert.doesNotMatch(stuk, /Niets te bevestigen/, "it still claims the queue is empty");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const stukMandaat = renderToStaticMarkup(React.createElement(AccountantBevestigen as any, { rijen: [], leesfout: true, geenMandaat: true }));
   assert.match(stukMandaat, /konden je stapel nu niet lezen/, "geenMandaat overrides the read failure again");

@@ -130,9 +130,6 @@ export default function VraagMachtiging({ klanten, kind }: Props) {
           {fout}
         </p>
       )}
-      <p style={{ margin: '10px 0 0', fontSize: 12, color: M3.mutedText, lineHeight: 1.5 }}>
-        {t('bh.macht.voet')}
-      </p>
     </div>
   )
 }

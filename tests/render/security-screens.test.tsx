@@ -222,6 +222,7 @@ const finding = (over: Record<string, unknown> = {}) => ({
   entityId: "inv-1",
   euros: 1210,
   message: "Factuur 20260046 staat op betaald, maar er staat geen enkele betaling tegenover (€ 1.210,00).",
+  accountantMessage: "20260046: € 1.210,00 als betaald, geen betaling ertegenover.",
   ...over,
 });
 
@@ -287,6 +288,144 @@ test("[GELD-INVARIANT] half a check is never reported as a whole one", () => {
     );
     assert.match(failed, /konden je boeken nu niet nakijken/);
     assert.doesNotMatch(failed, /Geen enkel verschil gevonden/, "a failed check must never render the reassuring sentence");
+  })();
+});
+
+// ─── [KANTOOR-RUST] The same two checks, read by the accountant ──────────────────────
+
+// On /dashboard/clients/[id]/kwartaal the boekhouder reads these panels about a CLIENT's series and
+// books. There a healthy check says nothing, a finding names its numbers without addressing the
+// owner, the rationale opens on demand — and a check that could NOT run still says so.
+
+test("[KANTOOR-RUST] to the accountant a clean series is silent, and half a check is not", () => {
+  return (async () => {
+    const { NummeringUitslag } = await import("../../src/components/beveiliging/NummeringPaneel");
+    const { translator } = await import("../../src/lib/i18n/t");
+    const clean = renderToStaticMarkup(
+      React.createElement(NummeringUitslag, {
+        report: { series: [series()], unreadable: [], clean: true, unaccounted: 0, countersRead: true },
+        t: translator("nl"),
+        audience: "accountant",
+      }),
+    );
+    assert.equal(clean, "", "a healthy series must render NOTHING to the accountant");
+
+    // Half a check is still named: without the counters the end of the series is unchecked.
+    const half = renderToStaticMarkup(
+      React.createElement(NummeringUitslag, {
+        report: { series: [series({ burnedAtEnd: null })], unreadable: [], clean: true, unaccounted: null, countersRead: false },
+        t: translator("nl"),
+        audience: "accountant",
+      }),
+    );
+    assert.match(half, /einde van de reeks konden we nu niet nakijken/);
+    assert.doesNotMatch(half, /loopt door/, "the owner's reassuring line is not the accountant's");
+
+    // And "we could not check" is its own sentence, in the accountant's voice.
+    const failed = renderToStaticMarkup(
+      React.createElement(NummeringUitslag, { report: null, t: translator("nl"), audience: "accountant" }),
+    );
+    assert.match(failed, /kon nu niet worden nagekeken/);
+    assert.match(failed, /zegt niets over de administratie/, "a failed check must not read as a clean one");
+    assert.doesNotMatch(failed, /\bje\b/, "the failed-check sentence addresses the owner");
+  })();
+});
+
+test("[KANTOOR-RUST] a gap is named to the accountant without the owner's voice, and the why folds", () => {
+  return (async () => {
+    const { NummeringUitslag } = await import("../../src/components/beveiliging/NummeringPaneel");
+    const { translator } = await import("../../src/lib/i18n/t");
+    const html = renderToStaticMarkup(
+      React.createElement(NummeringUitslag, {
+        report: {
+          series: [
+            series({ missing: [2], last: 4 }),
+            series({ type: "creditnota", burnedAtEnd: 1 }),
+            series({ type: "creditnota", year: 2025, first: null, last: null, issued: 0, burnedAtEnd: 2 }),
+          ],
+          unreadable: ["2026/0009"],
+          clean: false,
+          unaccounted: null,
+          countersRead: true,
+        },
+        t: translator("nl"),
+        audience: "accountant",
+      }),
+    );
+    // The finding itself, with its numbers — the protected half.
+    assert.match(html, /nummer 2 is nooit uitgereikt/);
+    assert.match(html, /teller staat hoger dan de hoogste factuur/);
+    assert.match(html, /geen document in deze reeks/);
+    assert.match(html, /2026\/0009/);
+    // Never the owner addressed, never "je boekhouder" to the boekhouder.
+    assert.doesNotMatch(html, /boekhouder/, "the accountant is told to note something for their accountant");
+    assert.doesNotMatch(html, /\bje\b|\bjouw\b/, "the accountant reads a sentence written to the owner");
+    // The rationale is there, behind a <details>, and only there.
+    assert.match(html, /<details>[\s\S]*Belastingdienst accepteert een gat[\s\S]*<\/details>/);
+    assert.match(html, /<summary[^>]*>Waarom\?<\/summary>/);
+  })();
+});
+
+test("[KANTOOR-RUST] to the accountant books that agree are silent, a difference is named, the why folds", () => {
+  return (async () => {
+    const { GeldUitslag } = await import("../../src/components/beveiliging/GeldPaneel");
+    const { translator } = await import("../../src/lib/i18n/t");
+    const clean = renderToStaticMarkup(
+      React.createElement(GeldUitslag, {
+        audit: { headline: "", violations: [], drawer: [], drawerChecked: true },
+        t: translator("nl"),
+        audience: "accountant",
+      }),
+    );
+    assert.equal(clean, "", "books that agree must render NOTHING to the accountant");
+
+    const half = renderToStaticMarkup(
+      React.createElement(GeldUitslag, {
+        audit: { headline: "", violations: [], drawer: [], drawerChecked: false },
+        t: translator("nl"),
+        audience: "accountant",
+      }),
+    );
+    assert.match(half, /kaslade konden we nu niet nakijken/, "the unchecked drawer must be named");
+    assert.doesNotMatch(half, /Geen enkel verschil gevonden/);
+
+    const failed = renderToStaticMarkup(
+      React.createElement(GeldUitslag, { audit: null, t: translator("nl"), audience: "accountant" }),
+    );
+    assert.match(failed, /boeken konden nu niet worden nagekeken/);
+    assert.doesNotMatch(failed, /\bje\b/);
+
+    // The finding as the route hands it over: the owner's sentence and the accountant's, from the
+    // same rule. The panel picks by audience and edits neither.
+    const both = finding({
+      message: "Factuur 20260046 staat op betaald, maar er staat geen enkele betaling tegenover (€ 1.210,00). Dit getal staat in je aangifte.",
+      accountantMessage: "20260046: status betaald, € 1.210,00 zonder betaling ertegenover.",
+    });
+    const diff = renderToStaticMarkup(
+      React.createElement(GeldUitslag, {
+        audit: { headline: "", violations: [both], drawer: [], drawerChecked: true },
+        t: translator("nl"),
+        audience: "accountant",
+      }),
+    );
+    // The accountant's sentence, euros included — never the owner's.
+    assert.match(diff, /20260046: status betaald/);
+    assert.match(diff, /€ 1\.210,00/);
+    assert.doesNotMatch(diff, /staat in je aangifte/, "the owner's sentence reached the accountant");
+    assert.doesNotMatch(diff, /\bje\b/);
+    // The why, folded, and without "leg het voor aan je boekhouder".
+    assert.match(diff, /<details>[\s\S]*niet automatisch hersteld[\s\S]*<\/details>/);
+    assert.doesNotMatch(diff, /boekhouder/);
+
+    // And the owner still reads the owner's sentence — the presentation is role-aware, not rewritten.
+    const owner = renderToStaticMarkup(
+      React.createElement(GeldUitslag, {
+        audit: { headline: "", violations: [both], drawer: [], drawerChecked: true },
+        t: translator("nl"),
+      }),
+    );
+    assert.match(owner, /staat in je aangifte/);
+    assert.doesNotMatch(owner, /20260046: status betaald/);
   })();
 });
 

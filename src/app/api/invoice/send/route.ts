@@ -1089,28 +1089,11 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        const { data: accountantLink } = await pipelineClient
-          .from('accountant_clients')
-          .select('accountant_id')
-          .eq('zzper_id', ownerId)
-          .maybeSingle()
-
-        // Niet aan zichzelf melden dat hij zojuist zelf op de knop drukte.
-        if (accountantLink?.accountant_id && accountantLink.accountant_id !== acting.actorId) {
-          const accountantMelding = await createNotification({
-            userId: accountantLink.accountant_id,
-            title: 'Nieuwe factuur verzonden',
-            // [FACTUUR-A] Dutch comma in the notification too — one rule everywhere
-            body: `${zzperName} heeft factuur ${finalNumber} verzonden — € ${Number(finalTotalInc).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-            type: 'invoice',
-            link: `/dashboard/clients/${ownerId}`,
-          })
-
-          if (!accountantMelding.ok) {
-            console.error('[FACTUUR-A] Notification insert failed', { invoiceId, error: accountantMelding.error })
-            // Low severity — don't bother Sentry
-          }
-        }
+        // [KANTOOR-RUST] The linked accountant is NOT told about every sale. That notification
+        // ("Nieuwe factuur verzonden", one per invoice of every client) carried no action and
+        // landed on a client page with no invoice on it; a sent sale reaches the accountant
+        // where it counts — in the quarter, the package and the readiness of the period.
+        // The client's own notification above and the customer's e-mail are untouched.
       } catch (notifErr) {
         console.error('[FACTUUR-A] Notification block error', { invoiceId, notifErr })
         // Low severity — don't bother Sentry

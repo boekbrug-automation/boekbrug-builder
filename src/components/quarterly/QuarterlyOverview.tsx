@@ -910,7 +910,7 @@ function AccountantView({ role }: { role: Role }) {
           {/* [HONESTY] Surface the same incompleteness signals to the accountant before handover. */}
           {recon && recon.cashOmzetZonderBtw > 0 && (
             <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3.5 text-[13px] text-amber-800 leading-relaxed">
-              {t('kw.zonderTarief', { bedrag: formatEur(recon.cashOmzetZonderBtw) })}
+              {t('kw.zonderTariefAcc', { bedrag: formatEur(recon.cashOmzetZonderBtw) })}
             </div>
           )}
           {recon && recon.datelessVerifiedCount > 0 && (
