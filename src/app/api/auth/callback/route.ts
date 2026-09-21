@@ -10,6 +10,8 @@ import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { ROLE_PARAM } from '@/lib/register-intent'
 import { PURPOSE_PARAM } from '@/lib/account-purpose'
 import { planAfterOAuth } from '@/lib/auth-landing'
+// [PROFILE-READ] A failed read is not a missing row — see the header of src/lib/profile-read.ts.
+import { classifyProfileRead } from '@/lib/profile-read'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl
@@ -37,12 +39,37 @@ export async function GET(req: NextRequest) {
   // email signup (register/page.tsx passes data.full_name) or from Google.
   const metaName = user.user_metadata?.full_name || user.user_metadata?.name || ''
 
-  // [Google-OAuth] Check if this user already has a profile
-  const { data: existingProfile } = await supabase
-    .from('profiles')
-    .select('id, onboarding_done, onboarding_step, full_name, role')
-    .eq('id', user.id)
-    .single()
+  // [PROFILE-READ] Three answers to "does this user already have a profile?", kept apart.
+  //
+  // This was `const { data: existingProfile } = await … .single()`, and `data` alone. supabase-js
+  // never throws, so a read that FAILED came back as the same null as a row that is MISSING — and
+  // this route acts on "missing" by UPSERTING a profile. One refused or timed-out read therefore
+  // wrote role / onboarding_step / onboarding_done / full_name over a row that already existed.
+  // The worst shape of it: a finished accountant signing in with Google carries no ?rol=, so the
+  // plan fell back to 'zzper' — demoted to a ZZP'er, onboarding_done back to false, and pushed
+  // into the wizard, with nothing on any screen to say why.
+  //
+  // The middleware, /dashboard and /onboarding were converted to this classifier for exactly that
+  // bug; this route was the fourth reader and was missed. `.maybeSingle()` rather than `.single()`
+  // for the same reason: it answers "no row" with no error at all, so the error channel carries
+  // only real failures instead of one magic code standing between them.
+  const profileRead = classifyProfileRead(
+    await supabase
+      .from('profiles')
+      .select('id, onboarding_done, onboarding_step, full_name, role')
+      .eq('id', user.id)
+      .maybeSingle(),
+  )
+
+  if (profileRead.kind === 'failed') {
+    // Loud, because from the visitor's side this is indistinguishable from an ordinary sign-in:
+    // they land on the home and everything looks normal. Nothing else will ever report it.
+    console.error('[PROFILE-READ] profile unreadable in the OAuth callback — writing nothing', {
+      userId: user.id,
+      code: profileRead.code,
+      error: profileRead.message,
+    })
+  }
 
   // Wat er moet gebeuren, in één keer beslist. De vier beslissingen die hier stonden — bestaat
   // er al een profiel, welke rol schrijven we, is dit een archiefaccount, waar gaat hij heen —
@@ -55,7 +82,7 @@ export async function GET(req: NextRequest) {
       role: searchParams.get(ROLE_PARAM),
       purpose: searchParams.get(PURPOSE_PARAM),
     },
-    existingProfile,
+    profileRead,
   )
 
   if (plan.profileToCreate) {
@@ -68,10 +95,16 @@ export async function GET(req: NextRequest) {
       email: user.email || '',
       ...plan.profileToCreate,
     }, { onConflict: 'id' })
-  } else if (metaName) {
+  } else if (plan.backfillName && metaName) {
     // [BOEK-015] The trigger creates a bare profile (email only). Backfill the name
     // from metadata on first sign-in, but only if it is still empty — never overwrite
     // a name the user has since edited.
+    //
+    // [PROFILE-READ] `plan.backfillName` is what moved: this used to be a bare `else if
+    // (metaName)`, the one write that sat outside the plan — so a plan that ordered nothing
+    // still left this one standing on a read that failed. Every write in this route is now
+    // plan-driven, which is also what lets the tests assert "this plan orders no write" once
+    // instead of four times.
     await supabase
       .from('profiles')
       .update({ full_name: metaName })
