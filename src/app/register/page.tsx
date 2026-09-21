@@ -16,9 +16,15 @@ import type { MessageKey } from '@/lib/i18n/messages'
 // [FUNNEL-OVERDRACHT] Zeggen dat de factuur uit de gratis generator bewaard is — zie hieronder.
 import { readHandoff, hasInvoiceContent } from '@/lib/factuur-handoff'
 import { isSafeRedirect, safeRedirect } from '@/lib/safe-redirect'
-import { ROLE_PARAM, parseRole } from '@/lib/register-intent'
+import { ROLE_PARAM, REGISTER_PARAM, REGISTER_FLAG, parseRole } from '@/lib/register-intent'
 import { EMAIL_REGEX } from '@/lib/validation'
 import { VAK_PARAM, parseVak } from '@/lib/vak-profile'
+// [EERSTE-DEUR] Waar een afgeronde registratie landt, uit de plek die dat al beslist voor de
+// callback — één spelling van "het product", niet twee die uit elkaar kunnen lopen.
+import { HOME_PATH } from '@/lib/onboarding-gate'
+// [EERSTE-DEUR] Dezelfde eindstap als de callback schrijft — één regel, twee aanroepers. Een
+// tweede spelling hier is hoe de twee omgevingen stilletjes andere accounts gaan opleveren.
+import { completedStep } from '@/lib/auth-landing'
 import { trackFunnel, FUNNEL_EVENTS } from '@/lib/funnel-events'
 import { readAttribution } from '@/lib/campaign-attribution'
 import {
@@ -63,9 +69,23 @@ function RegisterContent() {
   const [email, setEmail] = useState(voorafEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(voorafEmail) ? voorafEmail : '')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
-  const [companyName, setCompanyName] = useState('')
-  const [kvk, setKvk] = useState('')
-  const [btw, setBtw] = useState('')
+  // [EERSTE-DEUR] Bedrijfsnaam, KVK en BTW stonden hier. Ze zijn weg, en dat is de hele batch.
+  //
+  // Dit scherm maakt een IDENTITEIT aan: wie ben je, hoe heet je, waar bereiken we je, en waarmee
+  // log je in. Meer is er niet nodig om binnen te komen, en alles wat er wél stond maakte van de
+  // voordeur een stukje bedrijfsadministratie — op het moment dat de bezoeker nog niets van het
+  // product gezien heeft.
+  //
+  // Het kostte bovendien meer dan drie velden. Omdat ze hier stonden, stuurde deze pagina
+  // `onboarding_step: 4` mee als metadata om de schermen die ze óók vragen over te slaan — en
+  // daardoor sloeg de wizard meteen het ENIGE scherm over dat adres, IBAN en vak verzamelt. Wie
+  // zich met e-mail registreerde kwam dus uit op "Bijna klaar" met een adres dat nooit gevraagd
+  // was en een factuur die hij niet mocht versturen. Drie velden te veel aan de voordeur waren
+  // drie velden te weinig erachter.
+  //
+  // Ze komen terug waar ze thuishoren: FIRST-RUN-2B vraagt precies de wettelijk verplichte
+  // gegevens bij de EERSTE factuur, vóór het versturen, waar de reden zichtbaar is. Tot die tijd
+  // blijft de weigering van de verstuurroute het vangnet — zie /api/invoice/send.
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
   // [TAAL] Sleutels, geen zinnen — zie de veldcontrole in handleRegister.
@@ -167,7 +187,30 @@ function RegisterContent() {
   // een archiefaccount alsnog bij zijn standaardgedrag uitkomen.
   function bevestigingsBestemming(): string {
     const callback = new URL('/api/auth/callback', window.location.origin)
-    callback.searchParams.set('next', gevraagdeBestemming() ?? landingPath(purpose))
+    // [EERSTE-DEUR] Alleen zetten als de bezoeker zelf een bestemming meebracht.
+    //
+    // Hier stond `?? landingPath(purpose)`, en dat betekende: élke bevestigingsmail droeg
+    // `next=/onboarding`. Die waarde is een VEILIGE bestemming, dus in de callback wint hij van
+    // de landing die bij een verse registratie hoort — en dan komt de nieuwe gebruiker alsnog in
+    // de wizard uit, precies wat deze batch wegneemt. Niets zetten laat de callback beslissen,
+    // wat hij met het hele profiel voor zich beter kan dan wij hier.
+    //
+    // Het archiefpad verliest niets: gevraagdeBestemming() geeft dáár de kluis terug, dus die
+    // reist gewoon mee. Dezelfde vorm als handleGoogleRegister hieronder, en dat is de bedoeling —
+    // de twee registratiewegen hoorden altijd al hetzelfde account op te leveren.
+    const bestemming = gevraagdeBestemming()
+    if (bestemming) callback.searchParams.set('next', bestemming)
+    // [KLUIS] Het doel reist mee, net als bij Google hieronder.
+    //
+    // Via e-mail zit het doel óók in de signUp-metadata, dus op een database mét
+    // account_purpose_archief.sql weet de trigger het al. Zonder die migratie weet hij het niet,
+    // en dan zou de callback deze bezoeker als een gewone registratie afronden — mét de eindstap
+    // van een wizard over facturen die hij nooit gelopen heeft. Precies wat de archiefbranch in
+    // auth-landing.ts weigert te doen. Eén parameter maakt de twee wegen weer gelijk.
+    if (purpose === 'archief') callback.searchParams.set(PURPOSE_PARAM, purpose)
+    // [EERSTE-DEUR] En dit is een registratie. Zie register-intent.ts voor waarom dat gezegd moet
+    // worden in plaats van afgeleid, en waarom het niets is dat beschermd hoeft te worden.
+    callback.searchParams.set(REGISTER_PARAM, REGISTER_FLAG)
     return callback.toString()
   }
 
@@ -262,6 +305,17 @@ function RegisterContent() {
     // als 'boekhouden', dus een lege of afwezige parameter komt op hetzelfde neer. Niets zetten
     // houdt de URL leesbaar voor het geval dat verreweg het vaakst voorkomt.
     if (purpose === 'archief') callback.searchParams.set(PURPOSE_PARAM, purpose)
+    // [EERSTE-DEUR] Dit is een registratie — dezelfde mededeling als in de bevestigingsmail
+    // hierboven, want het is dezelfde gebeurtenis langs een andere weg.
+    callback.searchParams.set(REGISTER_PARAM, REGISTER_FLAG)
+    // [VAK-BRUG] Het vak, en dit is het gat dat de audit aantoonde.
+    //
+    // Via e-mail reist het beroep mee in de signUp-metadata en schrijft handle_new_user het weg.
+    // Via Google bestaat die metadata niet — een OAuth-aanmelding draagt er geen — dus liep de
+    // kapper die op /factuur-maken/kapper zijn vak koos hier precies zijn vak kwijt, op het
+    // moment dat het het meeste waard werd. Nu reist het als parameter mee, net als de rol en het
+    // doel, en de callback schrijft het alleen bij een VERSE registratie.
+    if (vak) callback.searchParams.set(VAK_PARAM, vak)
 
     const { error } = await getBrowserClient().auth.signInWithOAuth({
       provider: 'google',
@@ -350,12 +404,21 @@ function RegisterContent() {
         data: {
           full_name: fullName,
           role, // 'zzper' | 'accountant'
-          company_name: companyName,
-          kvk_number: kvk,
-          btw_number: btw,
-          // register already collected role + company, so skip the wizard's
-          // welcome/role/company screens (step 4 = Gmail for ZZP, invite for accountant).
-          onboarding_step: 4,
+          // [EERSTE-DEUR] `onboarding_step: 4` stond hier, met company_name, kvk_number en
+          // btw_number ernaast. Alle vier weg, en de eerste hoort bij de andere drie.
+          //
+          // Die 4 bestond om de wizardschermen over te slaan die dit formulier al vroeg — maar
+          // stap 4 is de Gmail-vraag, en daarmee sloeg hij óók stap 3 over: het enige scherm dat
+          // adres, IBAN en vak verzamelt. Het formulier gaf drie velden en kostte er zes.
+          //
+          // Zonder deze sleutel valt handle_new_user terug op zijn eigen standaard (stap 1), en
+          // dat is precies wat "vers" moet betekenen: isOnbeschreven in auth-landing.ts leest
+          // stap ≤ 1, en dáárop rust de beslissing die deze registratie meteen afrondt. De
+          // trigger zelf is ongewijzigd — dit is alleen wat wij hem vertellen.
+          //
+          // Wie zich vóór deze wijziging registreerde en pas daarna bevestigt, draagt nog stap 4
+          // én een bevestigingslink zonder registratievlag. Die komt dus in de oude wizard uit,
+          // op stap 4, precies waar hij gebleven was. Dat is de bedoeling.
           // [KLUIS] account_purpose_archief.sql leest dit: bij 'archief' wordt
           // onboarding_done meteen true, want die wizard gaat over facturen versturen en
           // een mailboxkoppeling — geen van beide waar deze bezoeker voor kwam.
@@ -434,10 +497,21 @@ function RegisterContent() {
     // [COHERENCE-REGISTER] Defensive self-heal for the confirmation-OFF path: a session
     // exists, so this authenticated upsert passes RLS and writes the exact registration
     // data. It is redundant when the handle_new_user metadata trigger is applied (same
-    // values), but it guarantees the accountant role + company/kvk/btw are stored even if
-    // that migration hasn't been applied yet — closing the silent-wrong-data window. The
+    // values), but it guarantees the accountant role is stored even if that migration
+    // hasn't been applied yet — closing the silent-wrong-data window. The
     // no-session (confirmation-ON) path above can't do this (anon RLS) and relies on the
     // trigger. Best-effort: a failure here never blocks the redirect.
+    //
+    // [EERSTE-DEUR] En dit pad moet hetzelfde ACCOUNT opleveren als de callback.
+    //
+    // Met e-mailbevestiging AAN loopt een registratie langs /api/auth/callback, en die rondt de
+    // eerste kennismaking daar af. Staat bevestiging UIT — een keuze in Supabase, en in productie
+    // niet dezelfde als op een verse dev-database — dan is er meteen een sessie en komt de
+    // callback er nooit aan te pas. Zonder deze regels zou dezelfde registratie dus op de ene
+    // omgeving in het product uitkomen en op de andere in de wizard, en dat verschil zou niemand
+    // zien tot een gebruiker het meldt. Daarom staat de afronding hier óók: onboarding_done true
+    // en dezelfde eindstap die de wizard zelf achterlaat (6 voor een ZZP'er, 5 voor een
+    // boekhouder — zie completedStep in auth-landing.ts).
     //
     // [VANGNET-SPLITSING] En daarom staat account_purpose NIET in deze rij. Die kolom komt uit
     // account_purpose_archief.sql — in productie toegepast, maar een verse dev- of
@@ -452,14 +526,23 @@ function RegisterContent() {
         id: data.user.id,
         role,
         full_name: fullName,
-        company_name: companyName,
-        kvk_number: kvk,
-        btw_number: btw,
         email: schoonEmail,
-        onboarding_step: 4,
+        // [EERSTE-DEUR] Dezelfde uitkomst als de callback: een verse registratie is klaar.
         // [KLUIS] Deze kolom bestaat altijd, dus die hoort hier thuis: een archiefaccount heeft
         // geen wizard te doorlopen, en dat moet ook waar zijn als de migratie hieronder ontbreekt.
-        onboarding_done: purpose === 'archief',
+        // Voor beide doelen is het antwoord nu hetzelfde — alleen de bestemming verschilt nog.
+        onboarding_done: true,
+        // [KLUIS] Maar niet de eindstap van een wizard die deze bezoeker nooit gelopen heeft.
+        //
+        // `onboarding_done` is voor beide doelen waar: er staat niets meer tussen hem en het
+        // product. De STAP is dat niet. Voor een archiefaccount houdt de callback stap 1 aan —
+        // auth-landing.ts weigert daar uitdrukkelijk om af te ronden "met een stap die deze
+        // bezoeker nooit gelopen heeft" — en zonder deze regel zou dezelfde registratie op een
+        // omgeving zónder e-mailbevestiging stap 6 krijgen en mét bevestiging stap 1. Precies het
+        // verschil tussen twee omgevingen dat dit blok bestaat om te voorkomen.
+        onboarding_step: purpose === 'archief'
+          ? 1
+          : completedStep(role === 'accountant' ? 'accountant' : 'zzper'),
       }, { onConflict: 'id' })
     if (profileError) {
       console.error('[COHERENCE-REGISTER] post-session profile upsert failed (non-fatal):', profileError)
@@ -488,7 +571,12 @@ function RegisterContent() {
     // er is een account. Alleen hier tellen zou elke registratie missen die op een
     // bevestigingsmail wacht, en dat is in productie juist de normale route.
     trackFunnel(FUNNEL_EVENTS.registerCompleted, { vak, ...campagne() })
-    router.push(safeRedirect(searchParams.get('redirect'), landingPath(purpose)))
+    // [EERSTE-DEUR] Naar het product, niet naar de wizard. `landingPath(purpose)` stond hier, en
+    // dat is voor 'boekhouden' /onboarding — de bestemming die deze batch juist weghaalt. Wat de
+    // bezoeker zelf meebracht wint nog steeds, en het archiefpad houdt zijn kluis: allebei zitten
+    // ze al in gevraagdeBestemming(). [SEC-REDIRECT] De controle blijft op de push staan, want dat
+    // is de regel die een `javascript:`-URL tegenhoudt op het moment dat er net een sessie is.
+    router.push(safeRedirect(gevraagdeBestemming(), HOME_PATH))
   }
 
   // [BOEK-015] email confirmation screen
@@ -619,31 +707,12 @@ function RegisterContent() {
                   style={{ fontSize: '16px' }} />
                 {fieldErrors.name && <p id="reg-name-fout" role="alert" className="text-xs text-red-600 mt-1">{t(fieldErrors.name)}</p>}
               </div>
-              <div>
-                <label htmlFor="reg-company" className="block text-sm font-medium text-gray-700 mb-1">{t('reg.bedrijf')}</label>
-                <input id="reg-company" type="text" value={companyName} onChange={e => setCompanyName(e.target.value)}
-                  autoComplete="organization"
-                  className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder={t('reg.bedrijfVoorbeeld')}
-                  style={{ fontSize: '16px' }} />
-                <p className="text-xs text-gray-400 mt-1">{t('reg.laterInvullen')}</p>
-              </div>
-              <div>
-                <label htmlFor="reg-kvk" className="block text-sm font-medium text-gray-700 mb-1">{t('reg.kvk')}</label>
-                <input id="reg-kvk" type="text" value={kvk} onChange={e => setKvk(e.target.value)}
-                  className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="12345678"
-                  style={{ fontSize: '16px' }} />
-                <p className="text-xs text-gray-400 mt-1">{t('reg.laterInvullen')}</p>
-              </div>
-              <div>
-                <label htmlFor="reg-btw" className="block text-sm font-medium text-gray-700 mb-1">{t('reg.btw')}</label>
-                <input id="reg-btw" type="text" value={btw} onChange={e => setBtw(e.target.value)}
-                  className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="NL123456789B01"
-                  style={{ fontSize: '16px' }} />
-                <p className="text-xs text-gray-400 mt-1">{t('reg.laterInvullen')}</p>
-              </div>
+              {/* [EERSTE-DEUR] Bedrijfsnaam, KVK-nummer en BTW-nummer stonden hier, alle drie met
+                  "Kun je later invullen." eronder. Dat was waar en toch verkeerd: een veld dat je
+                  mag overslaan hoort niet op het formulier te staan dat een account aanmaakt —
+                  het maakt de deur langer zonder hem strenger te maken, en het zijn juist de
+                  velden waar de bezoeker nog geen reden voor heeft gezien.
+                  Zie de toelichting bij de state bovenaan voor wat ze bovendien kostten. */}
               <div>
                 <label htmlFor="reg-email" className="block text-sm font-medium text-gray-700 mb-1">{t('auth.email')}</label>
                 <input id="reg-email" type="email" value={email} onChange={e => { setEmail(e.target.value); wisFout('email') }}
