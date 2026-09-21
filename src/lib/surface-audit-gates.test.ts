@@ -33,8 +33,17 @@ function inOrder(src: string, a: string, b: string, file: string, why: string): 
 }
 
 // ─── AG-01 [PROFILE-READ] a failed read is not a missing row ──────────────────────────────────
-test("[PROFILE-READ] the three readers on the gate keep a failed read apart from a missing row", () => {
-  for (const f of ["src/middleware.ts", "src/app/dashboard/page.tsx", "src/app/onboarding/page.tsx"]) {
+test("[PROFILE-READ] the four readers on the gate keep a failed read apart from a missing row", () => {
+  // THREE for its first year, and the fourth is why this line changed. The OAuth callback reads
+  // the same table for the same decision and was never converted — and it is the only one of the
+  // four that WRITES on "missing", so the confusion cost more there than anywhere else. See the
+  // block at the bottom of this test.
+  for (const f of [
+    "src/middleware.ts",
+    "src/app/dashboard/page.tsx",
+    "src/app/onboarding/page.tsx",
+    "src/app/api/auth/callback/route.ts",
+  ]) {
     const src = code(f);
     assert.match(src, /import \{ classifyProfileRead \} from ["']@\/lib\/profile-read["']/,
       `${f} no longer reads the profile through the one classifier`);
@@ -79,6 +88,34 @@ test("[PROFILE-READ] the three readers on the gate keep a failed read apart from
   assert.match(wiz, /if \(!profile\) \{/, "the insert is no longer behind the missing-row test");
   assert.match(wiz, /secondRead\.kind === "failed"/, "the re-read after the insert is trusted blind");
   assert.doesNotMatch(wiz, /const \{ data: fresh \} = await/, "the re-read is back to a data-only destructure");
+
+  // The OAuth callback: the fourth reader, and the one that writes. What the plan decides is held
+  // by auth-landing.test.ts; what is held HERE is that the route still asks the question and still
+  // does nothing but what the plan says.
+  const cb = code("src/app/api/auth/callback/route.ts");
+  assert.match(cb, /const profileRead = classifyProfileRead\(/, "the callback no longer classifies its read");
+  assert.doesNotMatch(cb, /const \{ data: existingProfile \}/,
+    "the data-only destructure is back — a failed read is a missing profile again, and this route UPSERTS on missing");
+  assert.match(cb, /\.eq\('id', user\.id\)\s*\.maybeSingle\(\),/,
+    "the callback's profile read is back to .single(), where a missing row arrives through the error channel");
+  assert.match(cb, /planAfterOAuth\(\s*\{[\s\S]{0,200}?\},\s*profileRead,\s*\)/,
+    "the plan is handed something other than the classified read");
+
+  // Every write in the route is plan-driven. The name backfill is the one that used to sit
+  // outside the plan, so a plan that ordered nothing still left it standing.
+  assert.match(cb, /\} else if \(plan\.backfillName && metaName\) \{/,
+    "the full_name backfill is loose from the plan again");
+  for (const [write, guard] of [
+    ["upsert", /if \(plan\.profileToCreate\) \{/],
+    ["role update", /if \(plan\.roleUpdate\) \{/],
+    ["markArchief", /if \(plan\.markArchief\) \{/],
+  ] as const) {
+    assert.match(cb, guard, `the ${write} is no longer behind its plan field`);
+  }
+  // And it says so when it could not look: from the visitor's side a failed read is an ordinary
+  // sign-in, so the log is the only place this can ever surface.
+  assert.match(cb, /profileRead\.kind === 'failed'[\s\S]{0,400}?console\.error\('\[PROFILE-READ\] profile unreadable in the OAuth callback/,
+    "a failed read in the callback passes silently");
 });
 
 // ─── AG-03 [BESTEMMING] the reset chain keeps the destination ─────────────────────────────────
