@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { answerNoticeLink } from "./answer-notice";
+import { answerNoticeLink, notificationLinkFor } from "./answer-notice";
 
 const CLIENT = "ac22189e-7052-4c48-b4ec-90947cf92ecc";
 const ACCOUNTANT = "88d752ab-ad59-4991-8f3d-280dafc42b61";
@@ -171,4 +171,89 @@ test("[KANTOOR-LINKS] a missing identifier is answered without a single read", a
     assert.equal(await answerNoticeLink(client, bad), null, JSON.stringify(bad));
   }
   assert.equal(seen.length, 0, "a read happened for an input that can never produce a link");
+});
+
+// ── A client that RAISES, not one that answers `{ error }` ───────────────────
+//
+// PostgREST failures come back in the result. A fetch that dies on a DNS hiccup, an aborted
+// socket, a body that does not parse, a client built wrong — those THROW, and never become
+// `{ error }`. The route writes the message before it asks for this link, so an escaping throw
+// would answer 500 for a message that is already stored and the person would send it again.
+
+/** A client whose reads raise instead of resolving — optionally only for one table. */
+function throwingDb(onlyTable?: string, tables: Record<string, Row[]> = {}) {
+  return {
+    from(table: string) {
+      const builder = {
+        select: () => builder,
+        eq: () => builder,
+        or: () => builder,
+        limit(n: number) {
+          if (!onlyTable || onlyTable === table) throw new Error(`fetch failed (${table})`);
+          return Promise.resolve({ data: (tables[table] ?? []).slice(0, n), error: null });
+        },
+        maybeSingle() {
+          if (!onlyTable || onlyTable === table) throw new Error(`fetch failed (${table})`);
+          return Promise.resolve({ data: (tables[table] ?? [])[0] ?? null, error: null });
+        },
+      };
+      return builder;
+    },
+  };
+}
+
+test("[KANTOOR-LINKS] 1 · the question query THROWS → null, and nothing escapes", async () => {
+  const client = throwingDb("accountant_subject_status");
+  assert.equal(await answerNoticeLink(client, ASK), null);
+});
+
+test("[KANTOOR-LINKS] 2 · the invoice query throws after a valid question → null, and nothing escapes", async () => {
+  const client = throwingDb("invoices", { accountant_subject_status: [OPEN_QUESTION] });
+  assert.equal(await answerNoticeLink(client, ASK), null);
+});
+
+test("[KANTOOR-LINKS] a rejected promise, an async throw and a broken client all resolve to null", async () => {
+  // Three more shapes of "it raised", because a try/catch around an await catches all of them and
+  // a missing one catches none.
+  const rejecting = { from: () => ({ select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ limit: () => Promise.reject(new Error("socket hangup")) }) }) }) }) }) }) };
+  assert.equal(await answerNoticeLink(rejecting, ASK), null);
+
+  const noFrom = {};
+  assert.equal(await answerNoticeLink(noFrom, ASK), null);
+
+  const nonError = { from() { throw "kapot"; } };
+  assert.equal(await answerNoticeLink(nonError, ASK), null);
+});
+
+// ── The route's seam: a throwing helper may never cost the message ───────────
+
+test("[KANTOOR-LINKS] the notification link is a string for every failure the route can meet", async () => {
+  const CONVERSATION = `/dashboard/messages/${CLIENT}`;
+
+  // The happy path still deep-links.
+  const good = fakeDb({ accountant_subject_status: [OPEN_QUESTION], invoices: [THE_INVOICE] });
+  assert.equal(
+    await notificationLinkFor(good.client, ASK, CONVERSATION),
+    `/dashboard/clients/${CLIENT}/kwartaal?q=3&year=2026&focus=${INVOICE}`,
+  );
+
+  // A plain message asks for nothing and gets the conversation — unchanged behaviour.
+  assert.equal(await notificationLinkFor(good.client, null, CONVERSATION), CONVERSATION);
+
+  // And every way the resolution can fail ends on the conversation link, never on a rejection.
+  // This is the route's ENTIRE link expression: if this cannot throw, the send cannot be turned
+  // into a 500 by a convenience — and a person never answers a stored message by sending it twice.
+  const failures: Array<[string, unknown]> = [
+    ["question read returns an error", fakeDb({ accountant_subject_status: [OPEN_QUESTION], invoices: [THE_INVOICE] }, { accountant_subject_status: "boom" }).client],
+    ["invoice read returns an error", fakeDb({ accountant_subject_status: [OPEN_QUESTION], invoices: [THE_INVOICE] }, { invoices: "boom" }).client],
+    ["question read throws", throwingDb("accountant_subject_status")],
+    ["invoice read throws", throwingDb("invoices", { accountant_subject_status: [OPEN_QUESTION] })],
+    ["the client itself is broken", {}],
+    ["no question exists", fakeDb({ accountant_subject_status: [], invoices: [THE_INVOICE] }).client],
+  ];
+  for (const [name, client] of failures) {
+    const link = await notificationLinkFor(client, ASK, CONVERSATION);
+    assert.equal(link, CONVERSATION, name);
+    assert.equal(typeof link, "string", name);
+  }
 });

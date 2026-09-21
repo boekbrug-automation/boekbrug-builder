@@ -25,9 +25,21 @@
 // AND WHAT IT NEVER DOES
 //
 // It never writes. The client answering a question does not resolve it: only the accountant clears
-// their own (invoice_questions.sql gives the client SELECT and nothing else). It never throws
-// either — every read is best-effort, and the caller sends the message regardless. A deep link is
-// a convenience; the answer reaching the accountant is the product.
+// their own (invoice_questions.sql gives the client SELECT and nothing else).
+//
+// AND IT NEVER THROWS — WHICH IS A try/catch, NOT A HOPE.
+//
+// The caller writes the message row FIRST and decides this link afterwards, so a throw here would
+// escape into the route's outer catch and answer 500 for a message that is already stored. The
+// person then sends it again, and the accountant gets it twice. That is the worst shape a failure
+// can take on this route: not a lost message, a duplicated one.
+//
+// Handling the `{ error }` PostgREST returns is not enough for that. A client can also RAISE —
+// fetch failing on a DNS hiccup or an aborted socket, a JSON body that does not parse, a
+// misconfigured client with no `from`. Those never become `{ error }`; they become an exception.
+// So the whole read path sits inside one try/catch and every unexpected throw leaves as `null`,
+// exactly like a returned error: logged, no write, no link. `notificationLinkFor` below is the
+// same promise at the call site, in one expression the route cannot get wrong.
 
 import { invoiceNoticeHref } from "./accountant-deep-links";
 import { VRAAG_STATUS } from "./vragen";
@@ -57,6 +69,20 @@ export interface AnswerNoticeInput {
 export async function answerNoticeLink(supabase: Sb, input: AnswerNoticeInput): Promise<string | null> {
   const { senderId, receiverId, invoiceId } = input;
   if (!senderId || !receiverId || !invoiceId) return null;
+  try {
+    return await resolve(supabase, senderId, receiverId, invoiceId);
+  } catch (e) {
+    // The reads above answer with `{ error }`; this catches what never gets that far — a client
+    // that raised. Same outcome as every other failure, said out loud rather than escaping into
+    // the caller's error path and costing a message that is already stored.
+    console.error("[KANTOOR-LINKS] diepe link onverwacht mislukt", {
+      senderId, receiverId, error: e instanceof Error ? e.message : String(e),
+    });
+    return null;
+  }
+}
+
+async function resolve(supabase: Sb, senderId: string, receiverId: string, invoiceId: string): Promise<string | null> {
 
   // 1. THE QUESTION. Read under the client's own session: acc_status_client_read_invoice lets an
   //    owner see the questions asked about invoices they own, which is exactly the proof needed
@@ -105,4 +131,21 @@ export async function answerNoticeLink(supabase: Sb, input: AnswerNoticeInput): 
   // 3. The period comes from the invoice's own date; an unreadable one yields null here, and the
   //    caller falls back rather than naming a quarter nobody computed.
   return invoiceNoticeHref(senderId, invoice.id, invoice.invoice_date);
+}
+
+/**
+ * The `link` a message notification carries — the route's whole expression, in one place.
+ *
+ * Always a string, for every input and every failure: `ask` is null for a plain message (nothing
+ * to resolve), and answerNoticeLink returns null for everything else. Exported so the guarantee
+ * the route depends on can be TESTED at the seam the route actually uses, rather than asserted
+ * about a line of code that was copied into it.
+ */
+export async function notificationLinkFor(
+  supabase: Sb,
+  ask: AnswerNoticeInput | null,
+  conversationHref: string,
+): Promise<string> {
+  if (!ask) return conversationHref;
+  return (await answerNoticeLink(supabase, ask)) ?? conversationHref;
 }

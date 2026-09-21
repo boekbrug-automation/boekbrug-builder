@@ -8,7 +8,7 @@ import { createNotification } from '@/lib/notifications'
 import { sendMessageNotification } from '@/lib/email'
 import { appUrl } from "@/lib/app-origin"
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
-import { answerNoticeLink } from '@/lib/answer-notice'
+import { notificationLinkFor } from '@/lib/answer-notice'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -261,15 +261,26 @@ export async function POST(request: NextRequest) {
     // link is a convenience on the notification, and no failure of it may cost the send. The
     // question also stays open — the client answering is not the client resolving, and nothing
     // here writes to accountant_subject_status.
-    const deepLink = aboutInvoiceId && naarBoekhouder
-      ? await answerNoticeLink(supabase, { senderId: user.id, receiverId: receiver_id, invoiceId: aboutInvoiceId })
-      : null
+    //
+    // One expression, and it cannot fail: notificationLinkFor always answers with a string — the
+    // deep link when the question proves it, the conversation otherwise, and the conversation
+    // again for anything that failed or threw on the way. A throw here would reach the outer
+    // catch below and answer 500 for a message that is ALREADY STORED, which the person would
+    // answer by sending it a second time.
+    const conversationHref = `/dashboard/messages/${user.id}`
+    const noticeLink = await notificationLinkFor(
+      supabase,
+      aboutInvoiceId && naarBoekhouder
+        ? { senderId: user.id, receiverId: receiver_id, invoiceId: aboutInvoiceId }
+        : null,
+      conversationHref,
+    )
     const melding = await createNotification({
       userId: receiver_id,
       title: 'Nieuw bericht',
       body: content.trim().slice(0, 80),
       type: 'message',
-      link: deepLink ?? `/dashboard/messages/${user.id}`,
+      link: noticeLink,
     })
     if (!melding.ok) {
       console.error('[BERICHTEN] melding aan de ontvanger mislukt', { receiver_id, error: melding.error })

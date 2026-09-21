@@ -37791,18 +37791,32 @@ test("[KANTOOR-LINKS] an answer carries a typed invoice, never a parsed sentence
   // context is an id the answering screen already holds; the Dutch line `bouwAntwoordBericht`
   // writes ("Over je vraag bij …") is never read to find it — that breaks on the first rename.
   const messages = code("src/app/api/messages/route.ts");
+  const notice = code("src/lib/answer-notice.ts");
   assert.match(messages, /function askedAbout\(/);
   assert.doesNotMatch(messages, /Over je vraag/, "the message route parses the answer's own sentence");
   assert.match(messages, /naarBoekhouder/, "the direction check is gone — an owner could be sent to an accountant route");
-  assert.match(messages, /deepLink \?\? `\/dashboard\/messages\//, "the conversation link is no longer the fallback");
-  assert.match(messages, /answerNoticeLink\(supabase, \{ senderId: user\.id, receiverId: receiver_id/,
+  assert.match(messages, /const conversationHref = `\/dashboard\/messages\/\$\{user\.id\}`/,
+    "the conversation link is no longer the fallback");
+  assert.match(messages, /await notificationLinkFor\(\s*supabase,/,
     "the message route decides the deep link itself again");
+  assert.match(messages, /link: noticeLink,/, "the notification builds its link somewhere else");
+
+  // FAIL-SOFT, AND PROVABLY SO. The message row is written before this link is decided, so a
+  // throw here would answer 500 for a message that is ALREADY STORED — and the person answers a
+  // failed send by sending it again. Handling the `{ error }` PostgREST returns is not enough:
+  // a dead socket, an unparseable body or a misconfigured client RAISE instead.
+  assert.match(notice, /try \{[\s\S]{0,200}?return await resolve\(/,
+    "the deep-link read path is no longer inside a try/catch");
+  assert.match(notice, /\} catch \(e\) \{[\s\S]{0,400}?return null;/,
+    "an unexpected throw no longer becomes null");
+  assert.match(notice, /export async function notificationLinkFor\([\s\S]{0,400}?Promise<string>/,
+    "the call-site seam that always answers with a string is gone");
 
   // [GATE-VENSTER] The message must be written BEFORE the link is decided: the send is the
   // product and no failure of a convenience may cost it. Both markers asserted found, and the
   // order compared on real code.
   const inserted = messages.indexOf(".from('messages')");
-  const decided = messages.indexOf("answerNoticeLink(");
+  const decided = messages.indexOf("notificationLinkFor(");
   assert.notEqual(inserted, -1, "the message insert is not where this gate expects it");
   assert.notEqual(decided, -1, "the link decision is not where this gate expects it");
   assert.ok(inserted < decided, "the deep link is decided before the message is sent");
@@ -37810,7 +37824,6 @@ test("[KANTOOR-LINKS] an answer carries a typed invoice, never a parsed sentence
   // The proof the link rests on: this accountant's own OPEN question about THIS invoice. Owning
   // the invoice only proves the client may name it — with two offices on one administration it
   // does not even prove the receiver is the one who asked.
-  const notice = code("src/lib/answer-notice.ts");
   for (const pin of [
     /\.eq\("subject_type", "invoice"\)/,
     /\.eq\("subject_id", invoiceId\)/,
