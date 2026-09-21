@@ -34483,6 +34483,68 @@ test("[BOEKHOUDER-DEUR] only the door writes accountant_status or its actor", ()
     "the accountant's quarter screen no longer calls the door's route");
 });
 
+// ─── [VRAAG-EERST] The question comes first, then one write ──────────────────────────────────
+//
+// Measured in production on 21 September 2026, the day after PR #371 shipped: the accountant
+// pressed "Vraag" on the quarter screen and read "Status niet opgeslagen — probeer het opnieuw."
+// The screen still did what it had always done — post status 'vraag' to
+// /api/accountant/invoice-status FIRST and only then open the dialog for the words — while the
+// door had just learned to refuse a question without words (question_required). Nothing was
+// written, which was right; nothing could be asked, which was not. The order is now: the dialog,
+// then one POST to the question route, then the chip. The pure flow proves the order and the
+// single write (accountant-invoice-question-flow.test.ts); this gate pins the WIRING in the page,
+// and the absence of the two old writes.
+test("[VRAAG-EERST] the quarter screen asks the question before it writes, and writes it once", () => {
+  const page = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+
+  // 'vraag' never reaches the status route: it leaves handleAction before the optimistic chip and
+  // before the fetch, and takes its own path.
+  const handle = page.indexOf("async function handleAction(");
+  assert.ok(handle > 0, "handleAction is gone — this gate is measuring nothing");
+  const statusFetch = page.indexOf("fetch('/api/accountant/invoice-status'", handle);
+  assert.ok(statusFetch > handle, "the status route is no longer called from handleAction");
+  const head = page.slice(handle, statusFetch);
+  assert.match(head, /if \(action === 'vraag'\) \{\s*await askQuestion\(invoiceId\)\s*return\s*\}/,
+    "'vraag' must leave handleAction before any write or optimistic chip");
+  const exit = head.indexOf("if (action === 'vraag')");
+  assert.ok(exit >= 0 && head.indexOf("setInvoices(") > exit && head.indexOf("setUpdatingId(") > exit,
+    "the 'vraag' exit sits after an optimistic update or a busy flag — the chip would flash a question that does not exist");
+  assert.doesNotMatch(page, /(?<![_a-zA-Z])status:\s*'vraag'/, "the page posts 'vraag' as a status again");
+
+  // The question path: the pure flow, the dialog handed in and required, the POST to the question
+  // route with the body the flow built, and the chip only on 'asked'.
+  assert.match(page, /import \{ askInvoiceQuestion, INVOICE_QUESTION_ROUTE \} from '@\/lib\/accountant-invoice-question-flow'/,
+    "the page no longer uses the proven flow");
+  const ask = page.indexOf("async function askQuestion(");
+  assert.ok(ask > 0, "askQuestion is gone");
+  const askEnd = page.indexOf("\n  }\n", ask);
+  assert.ok(askEnd > ask, "askQuestion has no end");
+  const body = page.slice(ask, askEnd);
+  assert.match(body, /askInvoiceQuestion\(\{[\s\S]*?prompt: \(\) => dialog\.prompt\(\{[\s\S]*?required: true,[\s\S]*?\}\),[\s\S]*?post: /,
+    "the dialog is not handed to the flow, or it no longer requires a non-empty question");
+  assert.match(body, /fetch\(INVOICE_QUESTION_ROUTE, \{[\s\S]*?body: JSON\.stringify\(body\)/,
+    "the question no longer goes to the question route with the body the flow built");
+  assert.match(body, /if \(outcome\.kind === 'asked'\) \{[\s\S]*?accountant_status: 'vraag'/,
+    "the chip must turn to 'vraag' only once the server accepted the question");
+  assert.doesNotMatch(body, /notify-client/, "the question path sends its own notification — the route already did");
+  assert.doesNotMatch(body, /invoice-status/, "the question path calls the status route");
+
+  // The other three still go through the status route, and only 'verwerkt' is announced from here.
+  assert.match(page, /fetch\('\/api\/accountant\/invoice-status', \{[\s\S]*?body: JSON\.stringify\(\{ clientId, invoiceId, status: action \}\)/,
+    "'verwerkt', 'in_behandeling' and the undo no longer go through the status route");
+  assert.equal((page.match(/notify-client/g) ?? []).length, 1, "a second notification call appeared on this screen");
+  const verwerkt = page.indexOf("} else if (action === 'verwerkt') {");
+  assert.ok(verwerkt > 0, "the screen's own notification is no longer limited to 'verwerkt'");
+  assert.ok(page.indexOf("notify-client") > verwerkt, "the notification call sits outside the 'verwerkt' branch");
+
+  // And the flow itself: no write before a non-empty question, one write, the outcome decides.
+  const flow = code("src/lib/accountant-invoice-question-flow.ts");
+  assert.match(flow, /const raw = await args\.prompt\(\);[\s\S]*?if \(!question\) return \{ kind: "cancelled" \};[\s\S]*?await args\.post\(/,
+    "the flow writes before the dialog has closed with words");
+  assert.equal(flow.split("args.post(").length - 1, 1, "the flow posts more than once");
+  assert.match(flow, /export const INVOICE_QUESTION_ROUTE = "\/api\/accountant\/invoice-question";/);
+});
+
 test("[BOEKHOUDER-DEUR] a batch refused for the accountant's lock does not report 'already paid'", () => {
   // book_bank_batch counts four disjoint conditions into one number and raises one string — none of
   // whose four possible messages contains the word the callers triage on. So the 'verwerkt' test on

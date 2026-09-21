@@ -15230,8 +15230,8 @@ export const MESSAGES = {
   'bh.kwt.inclBtw': { nl: 'Incl. BTW', ar: 'شامل btw', en: 'Incl. VAT' },
   'bh.kwt.openen': { nl: 'Openen', ar: 'فتح', en: 'Open' },
   'bh.kwt.vraag.titel': { nl: 'Vraag aan de klant', ar: 'سؤال إلى العميل', en: 'Question for the client' },
-  'bh.kwt.vraag.uitleg': { nl: 'Je klant ziet dit bij factuur {nummer}{partij}. Laat je het leeg, dan melden we alleen dát je een vraag hebt.', ar: 'يرى عميلك هذا عند الفاتورة {nummer}{partij}. إن تركته فارغًا، أعلمناه فقط بأن لديك سؤالًا.', en: 'Your client sees this with invoice {nummer}{partij}. Leave it empty and we only say you have a question.' },
-  'bh.kwt.vraag.uitlegZonderNummer': { nl: 'Je klant ziet dit bij een factuur{partij}. Laat je het leeg, dan melden we alleen dát je een vraag hebt.', ar: 'يرى عميلك هذا عند إحدى الفواتير{partij}. إن تركته فارغًا، أعلمناه فقط بأن لديك سؤالًا.', en: 'Your client sees this with one of their invoices{partij}. Leave it empty and we only say you have a question.' },
+  'bh.kwt.vraag.uitleg': { nl: 'Je klant ziet dit bij factuur {nummer}{partij}.', ar: 'يرى عميلك هذا عند الفاتورة {nummer}{partij}.', en: 'Your client sees this with invoice {nummer}{partij}.' },
+  'bh.kwt.vraag.uitlegZonderNummer': { nl: 'Je klant ziet dit bij een factuur{partij}.', ar: 'يرى عميلك هذا عند إحدى الفواتير{partij}.', en: 'Your client sees this with one of their invoices{partij}.' },
   'bh.kwt.vraag.placeholder': { nl: 'Waar gaat deze factuur over?', ar: 'ما موضوع هذه الفاتورة؟', en: 'What is this invoice about?' },
   'bh.kwt.vraag.versturen': { nl: 'Vraag versturen', ar: 'إرسال السؤال', en: 'Send question' },
   // [VOORSTEL] Proposing a correction from the quarter page.
