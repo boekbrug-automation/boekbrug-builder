@@ -9,6 +9,7 @@
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { rowMatchesQuery } from '@/lib/search'
+import { clientQuarterHref } from '@/lib/accountant-deep-links'
 import type { ClientSummary, ClientReadiness } from '../accountant.types'
 import { EL1, M3, R, COLUMN } from '@/lib/design/tokens'
 // [BACK-CLOSES] Back closes what is open — see src/lib/use-close-on-back.ts.
@@ -478,20 +479,40 @@ export default function KlantenBeheer({ initialClients, clientsUnreadable, openI
                     </p>
                   </button>
 
-                  {/* [READINESS] honest facts, not a verdict */}
-                  <span style={{ fontSize: 11, color: '#5F6368', flexShrink: 0, whiteSpace: 'nowrap' }}>
-                    {readinessLine(t, client.readiness)}
-                  </span>
-                  {/* [NO-SILENT-EMPTY] Geen vragenbadge op een stand die niet gelezen kon
-                      worden: het getal is dan een ondergrens, geen telling. */}
-                  {!client.readiness.readFailed && client.readiness.openQuestions > 0 && (
-                    <span style={{
-                      fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 4, flexShrink: 0,
-                      backgroundColor: '#FCE8E6', color: '#C5221F',
-                    }}>
-                      {t('bh.klant.openQuestions', { count: client.readiness.openQuestions })}
+                  {/* [READINESS] honest facts, not a verdict.
+                      [KANTOOR-LINKS] And they open the period they are ABOUT. Every number on this
+                      line is counted over the aangifte quarter (accountant.repository.ts, via
+                      getActiveAangifte) and `readiness` carries that year/quarter with it — while
+                      the name beside it opened `/dashboard/clients/{id}`, whose quarter grid
+                      defaults to the CALENDAR quarter. So the accountant read "3 vraag" about Q2
+                      and landed on Q3. The name still opens the client; the STATE opens its own
+                      period. */}
+                  <button
+                    onClick={() => router.push(clientQuarterHref({
+                      clientId: client.id,
+                      year: client.readiness.year,
+                      quarter: client.readiness.quarter,
+                    }))}
+                    title={t('bh.klant.readiness.open', { kwartaal: `Q${client.readiness.quarter} ${client.readiness.year}` })}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+                      background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                    }}
+                  >
+                    <span style={{ fontSize: 11, color: '#5F6368', whiteSpace: 'nowrap' }}>
+                      {readinessLine(t, client.readiness)}
                     </span>
-                  )}
+                    {/* [NO-SILENT-EMPTY] Geen vragenbadge op een stand die niet gelezen kon
+                        worden: het getal is dan een ondergrens, geen telling. */}
+                    {!client.readiness.readFailed && client.readiness.openQuestions > 0 && (
+                      <span style={{
+                        fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 4,
+                        backgroundColor: '#FCE8E6', color: '#C5221F',
+                      }}>
+                        {t('bh.klant.openQuestions', { count: client.readiness.openQuestions })}
+                      </span>
+                    )}
+                  </button>
 
                   {/* Unlink button */}
                   <button

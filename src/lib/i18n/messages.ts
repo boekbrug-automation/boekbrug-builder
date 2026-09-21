@@ -15236,6 +15236,8 @@ export const MESSAGES = {
   // aanlevert, en dat is precies het soort zin waar een boekhouder op handelt zonder te twijfelen.
   'bh.klant.readiness.onleesbaar': { nl: 'Stand niet te lezen', ar: 'تعذّرت قراءة الحالة', en: 'Status could not be read' },
   'bh.klant.openQuestions': { nl: '{count} vraag', ar: '{count} سؤال', en: '{count} question' },
+  // [KANTOOR-LINKS] De titel van de statusknop: hij zegt WELKE periode hij opent.
+  'bh.klant.readiness.open': { nl: 'Open {kwartaal}', ar: 'فتح {kwartaal}', en: 'Open {kwartaal}' },
   'bh.klant.unlink.action': { nl: 'Ontkoppelen', ar: 'إلغاء الربط', en: 'Unlink' },
   'bh.klant.unlink.title': { nl: 'Klant ontkoppelen', ar: 'إلغاء ربط العميل', en: 'Unlink client' },
   'bh.klant.unlink.confirm': { nl: 'Weet je zeker dat je {name} wilt ontkoppelen? Je verliest toegang tot hun gegevens.', ar: 'هل أنت متأكد أنك تريد إلغاء الربط مع {name}؟ ستفقد الوصول إلى بياناتهم.', en: 'Are you sure you want to unlink {name}? You will lose access to their data.' },

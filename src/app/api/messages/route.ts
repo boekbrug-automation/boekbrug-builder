@@ -8,6 +8,7 @@ import { createNotification } from '@/lib/notifications'
 import { sendMessageNotification } from '@/lib/email'
 import { appUrl } from "@/lib/app-origin"
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { invoiceNoticeHref } from '@/lib/accountant-deep-links'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -133,6 +134,37 @@ async function resolvePartnerName(
   }
 }
 
+// ── [KANTOOR-LINKS] Where an ANSWER lands ────────────────────────────────────
+//
+// Every message notification said "Nieuw bericht" and pointed at the conversation. For a message
+// that is a plain message that is exactly right. For the ANSWER to a question an accountant asked
+// about one invoice it is a dead end: they get the answer far from the document they asked about,
+// and go looking for it.
+//
+// So the answering screen may name the invoice its answer is about — a TYPED id, never the text.
+// The sentence itself is deliberately not read: `bouwAntwoordBericht` writes a Dutch line with
+// the file name in it, and a link built by parsing that would break on the first rename, the
+// first quote, the first translation.
+//
+// Three things gate it, and all three must hold:
+//   · the sender OWNS the invoice (checked under their own session — RLS, plus an explicit
+//     ownership filter, so a stray id cannot point the link at somebody else's administration);
+//   · the receiver is the sender's ACCOUNTANT, not the other way round — `/dashboard/clients/...`
+//     is an accountant surface, and an owner sent there would land on a page that is not theirs;
+//   · the invoice has a readable date, because the target needs the period and a guessed quarter
+//     is a wrong answer rather than a smaller one.
+// Anything missing → the conversation link this route always wrote.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function askedAbout(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null
+  const about = (body as { about?: unknown }).about
+  if (!about || typeof about !== 'object') return null
+  const { type, id } = about as { type?: unknown; id?: unknown }
+  if (type !== 'invoice' || typeof id !== 'string' || !UUID_RE.test(id)) return null
+  return id
+}
+
 // ── POST: send a message ──────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
@@ -147,6 +179,8 @@ export async function POST(request: NextRequest) {
     const limited = await checkRateLimit({ userId: user.id, endpoint: 'messages-send', ...RATE_LIMITS.MESSAGE_SEND });
     if (!limited.allowed) return rateLimitResponse(limited);
     const { receiver_id, content } = body
+    // [KANTOOR-LINKS] Optional, typed, and validated below against ownership and direction.
+    const aboutInvoiceId = askedAbout(body)
 
     if (!receiver_id || !content?.trim()) {
       return NextResponse.json({ error: 'Ongeldig bericht' }, { status: 400 })
@@ -174,6 +208,11 @@ export async function POST(request: NextRequest) {
       (l) =>
         (l.accountant_id === user.id && l.zzper_id === receiver_id) ||
         (l.zzper_id === user.id && l.accountant_id === receiver_id),
+    )
+    // [KANTOOR-LINKS] Which way this message travels. Only owner → accountant may carry an
+    // accountant deep link; the same pair read the other way round must not.
+    const naarBoekhouder = (myLinks ?? []).some(
+      (l) => l.zzper_id === user.id && l.accountant_id === receiver_id,
     )
     if (!linked) {
       return NextResponse.json(
@@ -205,12 +244,28 @@ export async function POST(request: NextRequest) {
     // this is what finally makes a new message ring a phone. The direct insert that
     // stood here wrote the row and stopped there: push was built, documented and
     // wired to exactly the events a message is not.
+    // [KANTOOR-LINKS] The invoice the answer is about, when the answering screen named one.
+    // Best-effort in every branch: a failed read costs the deep link, never the notification.
+    let deepLink: string | null = null
+    if (aboutInvoiceId && naarBoekhouder) {
+      const { data: about, error: aboutErr } = await supabase
+        .from('invoices')
+        .select('id, invoice_date')
+        .eq('id', aboutInvoiceId)
+        .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
+        .maybeSingle()
+      if (aboutErr) {
+        console.error('[KANTOOR-LINKS] factuur bij antwoord niet leesbaar', { userId: user.id, error: aboutErr.message })
+      } else if (about) {
+        deepLink = invoiceNoticeHref(user.id, about.id, about.invoice_date)
+      }
+    }
     const melding = await createNotification({
       userId: receiver_id,
       title: 'Nieuw bericht',
       body: content.trim().slice(0, 80),
       type: 'message',
-      link: `/dashboard/messages/${user.id}`,
+      link: deepLink ?? `/dashboard/messages/${user.id}`,
     })
     if (!melding.ok) {
       console.error('[BERICHTEN] melding aan de ontvanger mislukt', { receiver_id, error: melding.error })

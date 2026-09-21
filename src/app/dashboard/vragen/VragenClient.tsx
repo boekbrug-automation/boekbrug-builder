@@ -210,7 +210,15 @@ function VraagKaart({ vraag, links, askerName }: { vraag: VraagView; links: Acco
       const res = await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiver_id: target.accountantId, content: bericht }),
+        // [KANTOOR-LINKS] Which invoice this answer is about, as a TYPED id — so the
+        // accountant's notification opens that invoice in its own quarter instead of a chat
+        // window. Only for an invoice question; a document question names no period, and the
+        // route ignores anything it cannot verify the sender owns.
+        body: JSON.stringify({
+          receiver_id: target.accountantId,
+          content: bericht,
+          ...(isFactuur && vraag.invoice?.id ? { about: { type: 'invoice', id: vraag.invoice.id } } : {}),
+        }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) {

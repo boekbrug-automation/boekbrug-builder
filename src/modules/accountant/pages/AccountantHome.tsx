@@ -18,6 +18,7 @@ import { useRouter } from 'next/navigation'
 import { copyToClipboard } from '@/lib/clipboard'
 import { createClient } from '@/lib/supabase'
 import { rowMatchesQuery } from '@/lib/search'
+import { clientQuarterHref, opvragenHref } from '@/lib/accountant-deep-links'
 import { DashboardHeader } from '@/app/dashboard/_shared'
 // [DRAFT-QUEUE-HIDDEN] Draft Queue is hidden from the UI for now (decision deferred).
 // Component + /api/draft-queue + the draft_queue table are intentionally kept intact;
@@ -445,7 +446,15 @@ export default function AccountantHome({ profile, overview, workQueues, clients,
             {todos.map((todo, idx) => (
               <button
                 key={`${todo.client_id}-${todo.type}`}
-                onClick={() => router.push(`/dashboard/clients/${todo.client_id}`)}
+                // [KANTOOR-LINKS] Land on the work, in the period this row was counted over.
+                // "geen bankgegevens dit kwartaal" is not a question about the invoice list — it
+                // is a piece the CLIENT has to deliver, and Opvragen is the screen that asks for
+                // it; the other two are about invoices, so they open that client's quarter.
+                onClick={() => router.push(
+                  todo.type === 'missing_file'
+                    ? opvragenHref({ clientId: todo.client_id, year: todo.year, quarter: todo.quarter })
+                    : clientQuarterHref({ clientId: todo.client_id, year: todo.year, quarter: todo.quarter }),
+                )}
                 style={{
                   width: '100%', display: 'flex', alignItems: 'center', gap: 12,
                   padding: '12px 16px', background: 'none', border: 'none',

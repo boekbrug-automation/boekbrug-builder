@@ -28,6 +28,7 @@ import { createNotification } from '@/lib/notifications'
 import { logAuditAction, getClientIP } from '@/lib/audit'
 import { isStale, isAlreadyApplied, isChangeList, proposalEndsOn, proposalPatchBody, CLAIM_LEASE_MS, type ProposableValues, type ProposedChange } from '@/lib/correction-proposal'
 import { PATCH as correctInvoiceAmounts } from '@/app/api/invoice/[id]/amounts/route'
+import { clientQuarterHref, invoiceNoticeHref } from '@/lib/accountant-deep-links'
 
 export const dynamic = 'force-dynamic'
 
@@ -40,6 +41,26 @@ type ProposalRow = {
 
 const READ_FAILED = 'Het voorstel kon niet worden gelezen — probeer het opnieuw.'
 const BUSY = 'Dit voorstel wordt op dit moment al verwerkt — ververs de pagina.'
+
+/**
+ * [KANTOOR-LINKS] Where the accountant lands when their client answers a correction proposal.
+ *
+ * Both notifications used to carry `/dashboard/clients/{id}/kwartaal` with no period and no row.
+ * That screen reads `q` and `year` from the URL and defaults to `q=1` and the CURRENT year when
+ * they are absent — so an answer about a Q3 invoice opened Q1, the invoice was not in the list,
+ * and the accountant went looking for the thing the app had just told them about.
+ *
+ * The period comes from the invoice's OWN date (never today's quarter) and the row from the
+ * `?focus=` contract that screen already has. An unreadable date falls back to the bare route —
+ * the link it always was — because a guessed quarter is not a smaller answer than none, it is a
+ * wrong one.
+ */
+function correctionNoticeLink(clientId: string, invoiceId: string, invoiceDate: string | null): string {
+  return (
+    invoiceNoticeHref(clientId, invoiceId, invoiceDate) ??
+    clientQuarterHref({ clientId, year: NaN, quarter: NaN })
+  )
+}
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -98,11 +119,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const r = await closeRow('declined', false)
     if (r === 'failed') return NextResponse.json({ error: 'Het antwoord kon niet worden opgeslagen — probeer het opnieuw.' }, { status: 503 })
     if (r === 'lost') return NextResponse.json({ error: 'Dit voorstel is al beantwoord.', code: 'decided' }, { status: 409 })
+    // [KANTOOR-LINKS] The invoice's own date, for the period the notification points at. Read
+    // under the client's own session (RLS: they are the receiver), best-effort — a failed read
+    // costs the period, never the notification.
+    const { data: declined } = await supabase
+      .from('invoices').select('invoice_date').eq('id', proposal.invoice_id).eq('receiver_id', user.id).maybeSingle()
     await createNotification({
       userId: proposal.accountant_id, type: 'status',
       title: 'Correctievoorstel afgewezen', // [TAAL-DB]
       body: 'Je klant ging niet akkoord met je correctievoorstel. De factuur is ongewijzigd.', // [TAAL-DB]
-      link: `/dashboard/clients/${proposal.client_id}/kwartaal`,
+      link: correctionNoticeLink(proposal.client_id, proposal.invoice_id, declined?.invoice_date ?? null),
     })
     await logAuditAction({ userId: user.id, action: 'invoice.correction_declined', entityType: 'invoice', entityId: proposal.invoice_id, newValue: { proposal_id: proposal.id }, ipAddress: getClientIP(request) })
     return NextResponse.json({ ok: true, status: 'declined' })
@@ -184,11 +210,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   // the next tap heals it through isAlreadyApplied, and the trail below still records the fact.
   const closed = await closeRow('accepted', true)
   if (closed !== 'moved') console.error('[VOORSTEL] factuur aangepast maar voorstelrij niet gesloten', { userId: user.id, id, closed })
+  const appliedInvoiceDate = proposal.changes.some((c) => c.field === 'invoice_date')
+    ? proposal.proposed.invoice_date
+    : inv.invoice_date
   await createNotification({
     userId: proposal.accountant_id, type: 'status',
     title: 'Correctievoorstel overgenomen', // [TAAL-DB]
     body: 'Je klant ging akkoord; de factuur is aangepast zoals je voorstelde.', // [TAAL-DB]
-    link: `/dashboard/clients/${proposal.client_id}/kwartaal`,
+    // [KANTOOR-LINKS] The date the invoice carries NOW, which is the proposed one when this
+    // proposal moved it — a correction may change invoice_date, and the row the accountant is
+    // being sent to look at has already moved to that quarter. Using the pre-correction date
+    // here would point at the quarter the invoice just left.
+    link: correctionNoticeLink(proposal.client_id, proposal.invoice_id, appliedInvoiceDate),
   })
   await logAuditAction({ userId: user.id, action: 'invoice.correction_accepted', entityType: 'invoice', entityId: proposal.invoice_id, newValue: { proposal_id: proposal.id, changes: proposal.changes }, ipAddress: getClientIP(request) })
   return NextResponse.json({ ok: true, status: 'accepted' })
