@@ -103,6 +103,25 @@ export interface Violation {
   euros: number;
   /** Dutch, owner-facing, and it names the two figures that disagree. */
   message: string;
+  /**
+   * [KANTOOR-RUST] The same finding for the boekhouder reading a CLIENT's books: every figure of
+   * `message`, no "je"/"jouw", no route or button that exists only on the owner's screens, and
+   * no consequence-for-the-owner sentence. Built beside `message` from the same numbers, so the
+   * two can never disagree about a figure — see findingText().
+   */
+  accountantMessage: string;
+}
+
+/** Who is reading a finding: the owner about their own books, or the accountant about a client's. */
+export type FindingAudience = "owner" | "accountant";
+
+/**
+ * The one place a finding's sentence is chosen by audience. A screen that picks `message` for the
+ * accountant by hand is the wrong-role text this exists to end; a screen that edits the string is
+ * the fragile string surgery a financial warning must never go through.
+ */
+export function findingText(f: { message: string; accountantMessage: string }, audience: FindingAudience): string {
+  return audience === "accountant" ? f.accountantMessage : f.message;
 }
 
 // [CENT] round2 comes from invoice-totals — one function for the whole app. This file had its
@@ -170,6 +189,7 @@ export function findMoneyViolations(input: {
         entityId: inv.id,
         euros: Math.abs(paid),
         message: `Op ${inv.invoiceNumber ?? "een factuur"} staat een NEGATIEF betaald bedrag (${eur(paid)}). Dat kan niet.`,
+        accountantMessage: `${inv.invoiceNumber ?? "Een factuur"}: het betaalde bedrag is NEGATIEF (${eur(paid)}).`,
       });
     }
 
@@ -181,6 +201,8 @@ export function findMoneyViolations(input: {
         message:
           `Op ${inv.invoiceNumber ?? "een factuur"} van ${eur(total)} staat ${eur(paid)} als betaald — ` +
           `${eur(paid - total)} te veel. Meestal hoort dat geld bij een andere factuur.`,
+        accountantMessage:
+          `${inv.invoiceNumber ?? "Een factuur"} van ${eur(total)}: ${eur(paid)} als betaald — ${eur(paid - total)} te veel.`,
       });
     }
 
@@ -221,6 +243,9 @@ export function findMoneyViolations(input: {
           message:
             `${inv.invoiceNumber ?? "Een factuur"} van ${eur(total)} is volledig betaald en de bankregels ` +
             `dekken hem precies — alleen het veld "betaald bedrag" is nooit weggeschreven. Er ontbreekt geen geld.`,
+          accountantMessage:
+            `${inv.invoiceNumber ?? "Een factuur"} van ${eur(total)}: de bankregels dekken het bedrag precies, ` +
+            `alleen het veld "betaald bedrag" is nooit weggeschreven. Er ontbreekt geen geld.`,
         });
       } else if (Math.abs(gap) > MONEY_EPSILON) {
         out.push({
@@ -231,6 +256,10 @@ export function findMoneyViolations(input: {
             gap > 0
               ? `${inv.invoiceNumber ?? "Een factuur"}: er staat ${eur(paid)} als betaald, maar de gekoppelde bankregels dekken maar ${eur(linkInfo.sum)}. Verschil ${eur(gap)}.`
               : `${inv.invoiceNumber ?? "Een factuur"}: er is ${eur(linkInfo.sum)} aan bankregels gekoppeld, maar er staat maar ${eur(paid)} als betaald. Verschil ${eur(gap)}.`,
+          accountantMessage:
+            gap > 0
+              ? `${inv.invoiceNumber ?? "Een factuur"}: ${eur(paid)} als betaald, gekoppelde bankregels dekken ${eur(linkInfo.sum)}. Verschil ${eur(gap)}.`
+              : `${inv.invoiceNumber ?? "Een factuur"}: ${eur(linkInfo.sum)} aan bankregels gekoppeld, ${eur(paid)} als betaald. Verschil ${eur(gap)}.`,
         });
       }
     }
@@ -246,6 +275,7 @@ export function findMoneyViolations(input: {
           entityId: inv.id,
           euros: round2(total - paid),
           message: `${inv.invoiceNumber ?? "Een factuur"} staat op betaald, maar er is ${eur(total - paid)} van open.`,
+          accountantMessage: `${inv.invoiceNumber ?? "Een factuur"}: status betaald, ${eur(total - paid)} nog open.`,
         });
       }
       if (!claimsPaid(inv) && covered && inv.status !== "archived" && inv.status !== "draft") {
@@ -264,6 +294,9 @@ export function findMoneyViolations(input: {
             (outgoing
               ? `Zo blijft er een herinnering gaan naar iemand die al betaald heeft.`
               : `Zo lijkt het alsof je dit nog moet betalen — het risico is dat je het twee keer doet.`),
+          accountantMessage:
+            `${inv.invoiceNumber ?? "Een factuur"} van ${eur(total)} (${outgoing ? "verkoop" : "inkoop"}): ` +
+            `volledig betaald, status nog open.`,
         });
       }
     }
@@ -299,6 +332,9 @@ export function findMoneyViolations(input: {
           message:
             `${inv.invoiceNumber ?? "Een factuur"}: ${eur(num(inv.totalExBtw))} + ${eur(num(inv.btwAmount))} btw ` +
             `is niet ${eur(num(inv.totalIncBtw))} — ${eur(gap)} verschil. Dit getal staat in je aangifte.`,
+          accountantMessage:
+            `${inv.invoiceNumber ?? "Een factuur"}: ${eur(num(inv.totalExBtw))} + ${eur(num(inv.btwAmount))} btw ` +
+            `is niet ${eur(num(inv.totalIncBtw))} — ${eur(gap)} verschil; dit telt zo in de aangifte.`,
         });
       }
     }
@@ -315,6 +351,9 @@ export function findMoneyViolations(input: {
         message:
           `${inv.invoiceNumber ?? "Een creditnota"} staat als creditnota geboekt met een POSITIEF bedrag ` +
           `(${eur(num(inv.totalIncBtw))}). Die telt nu op waar hij eraf hoort — een verschil van ${eur(Math.abs(num(inv.totalIncBtw)) * 2)}.`,
+        accountantMessage:
+          `${inv.invoiceNumber ?? "Een creditnota"}: creditnota met een POSITIEF bedrag (${eur(num(inv.totalIncBtw))}); ` +
+          `telt op in plaats van af — verschil ${eur(Math.abs(num(inv.totalIncBtw)) * 2)}.`,
       });
     }
   }
@@ -402,6 +441,13 @@ export function findMoneyViolations(input: {
             `Dezelfde kost telt zo dubbel mee in je kosten en je voorbelasting. Bewaar het origineel ` +
             `en zet de kopie bij Genegeerd; is de kopie al als betaald gemeld, draai die betaling ` +
             `daar eerst terug.`,
+        // The same two facts, no instruction: which copies exist, and — when they disagree — the
+        // two amounts. What to do with them is the owner's act on the owner's screens.
+        accountantMessage: oneens
+          ? `${wie} staat ${group.length} keer in de administratie (${counts.join(" en ")}); de versies ` +
+            `verschillen in bedrag: ${eur(laagste)} tegenover ${eur(hoogste)}.`
+          : `${wie} staat ${group.length} keer in de administratie (${counts.join(" en ")}); dezelfde kost ` +
+            `telt dubbel in kosten en voorbelasting.`,
       });
     }
   }
@@ -453,6 +499,9 @@ export function findMoneyViolations(input: {
           message:
             `Een bankregel van ${eur(moved)} is over facturen verdeeld voor ${eur(spent)} — ` +
             `${eur(spent - moved)} meer dan er is overgemaakt.`,
+          accountantMessage:
+            `Bankregel van ${eur(moved)} is over facturen verdeeld voor ${eur(spent)} — ` +
+            `${eur(spent - moved)} meer dan er is overgemaakt.`,
         });
       }
     }
@@ -499,6 +548,9 @@ export function findMoneyViolations(input: {
           `${linked.invoiceNumber ?? "een factuur"}. De facturenlijst zegt: die factuur staat nog ${eur(open)} open. ` +
           `Eén van de twee is onwaar — is de betaling echt, meld de factuur dan alsnog als betaald; ` +
           `zo niet, kies "Ontkoppelen" bij die bankregel en koppel opnieuw.`,
+        accountantMessage:
+          `Bankregel van ${eur(Math.abs(num(t.amount)))} staat als afgehandeld voor ` +
+          `${linked.invoiceNumber ?? "een factuur"}; die factuur staat nog ${eur(open)} open.`,
       });
     }
   }
@@ -554,6 +606,8 @@ export interface DrawerViolation {
   euros: number;
   /** Dutch, owner-facing, and it names which way the drawer is wrong. */
   message: string;
+  /** The accountant's reading of the same finding — see Violation.accountantMessage. */
+  accountantMessage: string;
 }
 
 /**
@@ -590,6 +644,9 @@ export function findDrawerViolations(input: {
       message:
         `${row.description} — deze contante betaling van ${eur(row.amount)} staat niet in je ` +
         `kasboek. Je kassaldo staat daardoor ${eur(row.amount)} HOGER dan het geld dat er ligt.`,
+      accountantMessage:
+        `${row.description} — contante betaling van ${eur(row.amount)} ontbreekt in het kasboek; ` +
+        `het kassaldo staat daardoor ${eur(row.amount)} HOGER dan de werkelijke kas.`,
     });
   }
 
@@ -607,6 +664,9 @@ export function findDrawerViolations(input: {
         `Een kasregel van ${eur(amount)}${entry?.entry_date ? ` op ${entry.entry_date}` : ""} hoort bij ` +
         `geen enkele contante betaling (meer). Je kassaldo staat daardoor ${eur(amount)} LAGER dan ` +
         `het geld dat er ligt.`,
+      accountantMessage:
+        `Kasregel van ${eur(amount)}${entry?.entry_date ? ` op ${entry.entry_date}` : ""} hoort bij geen ` +
+        `contante betaling (meer); het kassaldo staat daardoor ${eur(amount)} LAGER dan de werkelijke kas.`,
     });
   }
 
@@ -626,6 +686,11 @@ export function findDrawerViolations(input: {
         : `${row.description} — het bedrag klopt, maar ${dateMoved
             ? `de datum in je kasboek (${entry?.entry_date ?? "onbekend"}) is niet de betaaldatum van de factuur (${row.entry_date})`
             : "de richting van de kasregel volgt de factuur niet"}. Het saldo per dag klopt daardoor niet.`,
+      accountantMessage: drift > MONEY_EPSILON
+        ? `${row.description} — kasboek ${eur(num(entry?.amount))}, factuur ${eur(row.amount)}. Verschil ${eur(drift)}.`
+        : `${row.description} — het bedrag klopt, maar ${dateMoved
+            ? `de datum in het kasboek (${entry?.entry_date ?? "onbekend"}) is niet de betaaldatum van de factuur (${row.entry_date})`
+            : "de richting van de kasregel volgt de factuur niet"}. Het saldo per dag klopt daardoor niet.`,
     });
   }
 
@@ -643,6 +708,8 @@ export function findDrawerViolations(input: {
       message:
         `Het kassaldo stond op ${lp.date} ${eur(lp.balance)} ONDER nul. Dat kan fysiek niet, en het ` +
         `blokkeert de BTW-aangifte van dat kwartaal.`,
+      accountantMessage:
+        `Het kassaldo stond op ${lp.date} ${eur(lp.balance)} ONDER nul; dat blokkeert de BTW-aangifte van dat kwartaal.`,
     });
   }
 

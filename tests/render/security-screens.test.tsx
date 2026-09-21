@@ -222,6 +222,7 @@ const finding = (over: Record<string, unknown> = {}) => ({
   entityId: "inv-1",
   euros: 1210,
   message: "Factuur 20260046 staat op betaald, maar er staat geen enkele betaling tegenover (€ 1.210,00).",
+  accountantMessage: "20260046: € 1.210,00 als betaald, geen betaling ertegenover.",
   ...over,
 });
 
@@ -394,19 +395,37 @@ test("[KANTOOR-RUST] to the accountant books that agree are silent, a difference
     assert.match(failed, /boeken konden nu niet worden nagekeken/);
     assert.doesNotMatch(failed, /\bje\b/);
 
+    // The finding as the route hands it over: the owner's sentence and the accountant's, from the
+    // same rule. The panel picks by audience and edits neither.
+    const both = finding({
+      message: "Factuur 20260046 staat op betaald, maar er staat geen enkele betaling tegenover (€ 1.210,00). Dit getal staat in je aangifte.",
+      accountantMessage: "20260046: status betaald, € 1.210,00 zonder betaling ertegenover.",
+    });
     const diff = renderToStaticMarkup(
       React.createElement(GeldUitslag, {
-        audit: { headline: "", violations: [finding()], drawer: [], drawerChecked: true },
+        audit: { headline: "", violations: [both], drawer: [], drawerChecked: true },
         t: translator("nl"),
         audience: "accountant",
       }),
     );
-    // The rule's own sentence, euros included — summarising it here would lose the two figures.
-    assert.match(diff, /20260046 staat op betaald/);
+    // The accountant's sentence, euros included — never the owner's.
+    assert.match(diff, /20260046: status betaald/);
     assert.match(diff, /€ 1\.210,00/);
+    assert.doesNotMatch(diff, /staat in je aangifte/, "the owner's sentence reached the accountant");
+    assert.doesNotMatch(diff, /\bje\b/);
     // The why, folded, and without "leg het voor aan je boekhouder".
     assert.match(diff, /<details>[\s\S]*niet automatisch hersteld[\s\S]*<\/details>/);
     assert.doesNotMatch(diff, /boekhouder/);
+
+    // And the owner still reads the owner's sentence — the presentation is role-aware, not rewritten.
+    const owner = renderToStaticMarkup(
+      React.createElement(GeldUitslag, {
+        audit: { headline: "", violations: [both], drawer: [], drawerChecked: true },
+        t: translator("nl"),
+      }),
+    );
+    assert.match(owner, /staat in je aangifte/);
+    assert.doesNotMatch(owner, /20260046: status betaald/);
   })();
 });
 

@@ -37617,6 +37617,19 @@ test("[KANTOOR-RUST] the shared checks speak to the accountant in the accountant
   // The unreadable state stays its own sentence for both audiences ([NO-SILENT-EMPTY]).
   assert.match(nummering, /acc \? "doorlopend\.nietGelezenAcc" : "doorlopend\.nietGelezen"/);
   assert.match(geld, /acc \? "geld\.nietGelezenAcc" : "geld\.nietGelezen"/);
+
+  // The findings themselves: the rule writes both sentences, at the same site, from the same
+  // numbers — every push that carries a `message:` carries an `accountantMessage:` — and the
+  // panel chooses through findingText(), never by reading `message` for the accountant and never
+  // by editing the string. money-invariants-voice.test.ts proves what the sentences say.
+  const rule = code("src/lib/money-invariants.ts");
+  const pushes = (rule.match(/^\s+message:/gm) ?? []).length;
+  const accountant = (rule.match(/^\s+accountantMessage:/gm) ?? []).length;
+  assert.ok(pushes >= 14, `the rule module lost its findings (${pushes} message sites)`);
+  assert.equal(accountant, pushes, "a finding has an owner sentence and no accountant sentence — the boekhouder reads the owner's");
+  assert.match(geld, /\{findingText\(f, audience\)\}/, "the money panel no longer chooses the sentence by audience");
+  assert.doesNotMatch(geld, /\{f\.message\}/, "the money panel renders the owner's sentence to whoever is reading");
+  assert.doesNotMatch(geld, /\.replace\(/, "the money panel edits a financial sentence with string surgery");
 });
 
 test("[KANTOOR-RUST] legal rationale left the primary surface and opens on demand", () => {

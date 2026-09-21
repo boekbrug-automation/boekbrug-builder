@@ -22,10 +22,15 @@ import { useEffect, useState } from "react";
 import { translator } from "@/lib/i18n/t";
 import { useLocale } from "@/lib/i18n/use-locale";
 import type { MessageKey } from "@/lib/i18n/messages";
+import { findingText } from "@/lib/money-invariants";
 import type { PanelAudience } from "./NummeringPaneel";
 
-/** One finding, as the route hands it over: the sentence is Dutch and comes from the rule. */
-type Finding = { kind: string; entityId: string; euros: number; message: string };
+/**
+ * One finding, as the route hands it over: both sentences are Dutch and come from the rule —
+ * `message` for the owner, `accountantMessage` for the boekhouder ([KANTOOR-RUST]). The panel
+ * chooses between them through findingText() and never edits either.
+ */
+type Finding = { kind: string; entityId: string; euros: number; message: string; accountantMessage: string };
 
 type Audit = {
   headline: string;
@@ -139,7 +144,7 @@ export function GeldUitslag({
           would lose exactly that by being summarised here. */}
       {findings.slice(0, 12).map((f, i) => (
         <p key={`${f.kind}-${f.entityId}-${i}`} className="text-sm text-amber-900 leading-relaxed">
-          {f.message}
+          {findingText(f, audience)}
         </p>
       ))}
 
