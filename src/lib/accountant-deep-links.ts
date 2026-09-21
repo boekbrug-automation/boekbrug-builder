@@ -61,23 +61,38 @@ function usableId(id: string | null | undefined): id is string {
 }
 
 /**
+ * The client's file, with no period in it — the honest destination when we do not know one.
+ *
+ * `/dashboard/clients/[id]` shows the client and their four quarters; nothing on it claims a
+ * period was chosen. That is exactly why it is the fallback below.
+ */
+export function clientOverviewHref(clientId: string | null | undefined): string {
+  return usableId(clientId) ? `/dashboard/clients/${encodeURIComponent(clientId)}` : "/dashboard/clients/beheer";
+}
+
+/**
  * The client's quarter workspace — the Bron surface: this client's invoices for this period.
  *
  * `focusInvoiceId` opens and highlights one row through the contract that screen already has
  * ([BRIDGE-NOTIF], `?focus=`). Pass it ONLY when the signal names that one invoice. The screen
  * ignores a focus id that is not in the period's list, so a wrong one is silent — which is
  * precisely why it must not be written on a guess.
+ *
+ * NO PERIOD MEANS NO /kwartaal. The screen resolves a missing `q` and `year` to Q1 of the CURRENT
+ * year (page.tsx:165-166) — it does not refuse, it invents. So a period-less `/kwartaal` link is
+ * not a link with one fact missing, it is a link that asserts a quarter nobody computed, on the
+ * screen where an accountant decides a quarter is complete. When the period is not usable this
+ * returns the client's file instead, which claims nothing.
  */
 export function clientQuarterHref(
   period: ClientPeriod,
   focusInvoiceId?: string | null,
 ): string {
   if (!usableId(period.clientId)) return "/dashboard/clients/beheer";
-  const base = `/dashboard/clients/${encodeURIComponent(period.clientId)}/kwartaal`;
-  if (!usablePeriod(period)) return base;
+  if (!usablePeriod(period)) return clientOverviewHref(period.clientId);
   const qs = new URLSearchParams({ q: String(period.quarter), year: String(period.year) });
   if (usableId(focusInvoiceId)) qs.set("focus", focusInvoiceId);
-  return `${base}?${qs}`;
+  return `/dashboard/clients/${encodeURIComponent(period.clientId)}/kwartaal?${qs}`;
 }
 
 /**
@@ -138,9 +153,10 @@ export function periodOfInvoiceDate(iso: string | null | undefined): YearQuarter
 /**
  * The link an accountant notification about ONE invoice should carry.
  *
- * Returns null when the invoice's date could not be read — the caller then keeps the link it
- * would have written anyway. A period-less `/kwartaal` link is not a smaller answer than this
- * one, it is a WRONG one (q=1, current year), so "no period" must never be spelled as "Q1".
+ * Returns null when the invoice's date could not be read, and the caller then falls back to a
+ * surface that names no period at all (clientOverviewHref). A period-less `/kwartaal` link is not
+ * a smaller answer than this one, it is a WRONG one — the screen fills q and year in from the
+ * clock — so "we could not read the date" must never be spelled as "Q1 of this year".
  */
 export function invoiceNoticeHref(
   clientId: string,

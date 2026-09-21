@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  clientOverviewHref,
   clientQuarterHref,
   opvragenHref,
   brugDocumentsHref,
@@ -44,20 +45,54 @@ test("[KANTOOR-LINKS] focus is written only when one invoice is named", () => {
   }
 });
 
-test("[KANTOOR-LINKS] a period that cannot be trusted is left out, never guessed", () => {
-  const base = `/dashboard/clients/${CLIENT}/kwartaal`;
-  for (const bad of [
-    { year: NaN, quarter: NaN },
-    { year: 2026, quarter: 0 },
-    { year: 2026, quarter: 5 },
-    { year: 1999, quarter: 1 },
-    { year: 2101, quarter: 1 },
-    { year: 2026.5, quarter: 2 },
-  ]) {
-    assert.equal(clientQuarterHref({ clientId: CLIENT, ...bad }), base, JSON.stringify(bad));
+/**
+ * The periods a link may not carry — and the rule that "no period" is never spelled as "/kwartaal".
+ *
+ * `/dashboard/clients/[id]/kwartaal` does not refuse a missing `q`/`year`: it fills them in from
+ * the clock (page.tsx:165-166 — `q = 1`, `year = new Date().getFullYear()`). So a bare `/kwartaal`
+ * link is not this link with one fact missing; it is a link that ASSERTS Q1 of the current year,
+ * on the screen where an accountant decides a quarter is complete. The client's own file claims
+ * nothing, and that is where an unknown period lands.
+ */
+const UNUSABLE_PERIODS = [
+  { year: NaN, quarter: NaN },
+  { year: 2026, quarter: 0 },
+  { year: 2026, quarter: 5 },
+  { year: 1999, quarter: 1 },
+  { year: 2101, quarter: 1 },
+  { year: 2026.5, quarter: 2 },
+  { year: Infinity, quarter: 3 },
+];
+
+test("[KANTOOR-LINKS] a period that cannot be trusted never produces a /kwartaal link", () => {
+  for (const bad of UNUSABLE_PERIODS) {
+    const href = clientQuarterHref({ clientId: CLIENT, ...bad });
+    assert.equal(href, `/dashboard/clients/${CLIENT}`, JSON.stringify(bad));
+    assert.ok(!href.includes("/kwartaal"), `a period-less /kwartaal for ${JSON.stringify(bad)}`);
+  }
+  // …with a focus id in hand it is still not a quarter: the row lives in a period we cannot name.
+  for (const bad of UNUSABLE_PERIODS) {
+    const href = clientQuarterHref({ clientId: CLIENT, ...bad }, INVOICE);
+    assert.ok(!href.includes("/kwartaal"), `a period-less /kwartaal for ${JSON.stringify(bad)}`);
+    assert.ok(!href.includes("focus"), "a focus id on a surface that cannot show it");
   }
   // …and a missing client is not a link into someone's administration.
   assert.equal(clientQuarterHref({ clientId: "", year: 2026, quarter: 3 }), "/dashboard/clients/beheer");
+  assert.equal(clientOverviewHref(""), "/dashboard/clients/beheer");
+  assert.equal(clientOverviewHref(CLIENT), `/dashboard/clients/${CLIENT}`);
+});
+
+test("[KANTOOR-LINKS] an unreadable invoice date can never end on a /kwartaal URL", () => {
+  // This is the whole of the correction notification's fallback, asserted at the source: whatever
+  // the caller does with a null, it cannot be handed a period-less quarter link by this module.
+  for (const bad of [null, undefined, "", "   ", "onbekend", "31-12-2026", "2026-13-01", "0000-00-00"]) {
+    assert.equal(invoiceNoticeHref(CLIENT, INVOICE, bad), null, JSON.stringify(bad));
+    // The fallback the callers use in its place.
+    const fallback = invoiceNoticeHref(CLIENT, INVOICE, bad) ?? clientOverviewHref(CLIENT);
+    assert.equal(fallback, `/dashboard/clients/${CLIENT}`);
+    assert.ok(!fallback.includes("/kwartaal"), "the fallback reached /kwartaal without a period");
+    assert.ok(!fallback.includes("q=") && !fallback.includes("year="), fallback);
+  }
 });
 
 test("[KANTOOR-LINKS] Opvragen and the Brug are named with the parameters THEY read", () => {

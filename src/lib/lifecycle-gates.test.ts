@@ -37703,9 +37703,13 @@ test("[KANTOOR-LINKS] every accountant signal that knows a period writes it down
   // src/lib/accountant-deep-links.test.ts. What this gate watches is the CALLERS: a href written
   // by hand beside them is how the spelling drifts back apart.
   const links = code("src/lib/accountant-deep-links.ts");
-  for (const fn of ["clientQuarterHref", "opvragenHref", "brugDocumentsHref", "invoiceNoticeHref"]) {
+  for (const fn of ["clientQuarterHref", "clientOverviewHref", "opvragenHref", "brugDocumentsHref", "invoiceNoticeHref"]) {
     assert.ok(links.includes(`export function ${fn}`), `${fn} left the deep-link module`);
   }
+  // NO PERIOD MEANS NO /kwartaal. That screen answers a missing q/year with Q1 of the current
+  // year, so the bare route is not the link minus a fact — it asserts a quarter nobody computed.
+  assert.match(links, /if \(!usablePeriod\(period\)\) return clientOverviewHref\(period\.clientId\)/,
+    "clientQuarterHref can return a period-less /kwartaal again");
 
   // The correction answers: both notifications used to point at a period-less /kwartaal, which
   // that screen reads as q=1 of the current year.
@@ -37720,6 +37724,10 @@ test("[KANTOOR-LINKS] every accountant signal that knows a period writes it down
     3, // the helper itself + accepted + declined
     "a correction notification stopped going through the one link builder",
   );
+  // …and the builder's fallback is a surface with no period in it, for both answers.
+  assert.match(corr, /invoiceNoticeHref\([^)]*\) \?\? clientOverviewHref\(clientId\)/,
+    "the correction notification can fall back to a period-less quarter again");
+  assert.doesNotMatch(corr, /clientQuarterHref/, "the correction route builds a quarter link by hand again");
 
   // The quarter screen's Documenten button: it had the client and the quarter in scope and pushed
   // a bare route.
@@ -37787,6 +37795,32 @@ test("[KANTOOR-LINKS] an answer carries a typed invoice, never a parsed sentence
   assert.doesNotMatch(messages, /Over je vraag/, "the message route parses the answer's own sentence");
   assert.match(messages, /naarBoekhouder/, "the direction check is gone — an owner could be sent to an accountant route");
   assert.match(messages, /deepLink \?\? `\/dashboard\/messages\//, "the conversation link is no longer the fallback");
+  assert.match(messages, /answerNoticeLink\(supabase, \{ senderId: user\.id, receiverId: receiver_id/,
+    "the message route decides the deep link itself again");
+
+  // [GATE-VENSTER] The message must be written BEFORE the link is decided: the send is the
+  // product and no failure of a convenience may cost it. Both markers asserted found, and the
+  // order compared on real code.
+  const inserted = messages.indexOf(".from('messages')");
+  const decided = messages.indexOf("answerNoticeLink(");
+  assert.notEqual(inserted, -1, "the message insert is not where this gate expects it");
+  assert.notEqual(decided, -1, "the link decision is not where this gate expects it");
+  assert.ok(inserted < decided, "the deep link is decided before the message is sent");
+
+  // The proof the link rests on: this accountant's own OPEN question about THIS invoice. Owning
+  // the invoice only proves the client may name it — with two offices on one administration it
+  // does not even prove the receiver is the one who asked.
+  const notice = code("src/lib/answer-notice.ts");
+  for (const pin of [
+    /\.eq\("subject_type", "invoice"\)/,
+    /\.eq\("subject_id", invoiceId\)/,
+    /\.eq\("accountant_id", receiverId\)/,
+    /\.eq\("status", VRAAG_STATUS\)/,
+  ]) {
+    assert.match(notice, pin, `the question read stopped pinning ${pin}`);
+  }
+  // And the lifecycle is untouched: the client answering is not the client resolving.
+  assert.doesNotMatch(notice, /\.(insert|update|upsert|delete)\(/, "answer-notice writes to the database");
 
   const vragen = code("src/app/dashboard/vragen/VragenClient.tsx");
   assert.match(vragen, /about: \{ type: 'invoice', id: vraag\.invoice\.id \}/);

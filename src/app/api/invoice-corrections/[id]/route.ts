@@ -28,7 +28,7 @@ import { createNotification } from '@/lib/notifications'
 import { logAuditAction, getClientIP } from '@/lib/audit'
 import { isStale, isAlreadyApplied, isChangeList, proposalEndsOn, proposalPatchBody, CLAIM_LEASE_MS, type ProposableValues, type ProposedChange } from '@/lib/correction-proposal'
 import { PATCH as correctInvoiceAmounts } from '@/app/api/invoice/[id]/amounts/route'
-import { clientQuarterHref, invoiceNoticeHref } from '@/lib/accountant-deep-links'
+import { clientOverviewHref, invoiceNoticeHref } from '@/lib/accountant-deep-links'
 
 export const dynamic = 'force-dynamic'
 
@@ -51,15 +51,16 @@ const BUSY = 'Dit voorstel wordt op dit moment al verwerkt — ververs de pagina
  * and the accountant went looking for the thing the app had just told them about.
  *
  * The period comes from the invoice's OWN date (never today's quarter) and the row from the
- * `?focus=` contract that screen already has. An unreadable date falls back to the bare route —
- * the link it always was — because a guessed quarter is not a smaller answer than none, it is a
- * wrong one.
+ * `?focus=` contract that screen already has.
+ *
+ * And when the date cannot be read, the notification does NOT fall back to `/kwartaal` without a
+ * period: that screen answers a missing `q`/`year` with Q1 of the current year, so the bare route
+ * is not "the link minus one fact" — it is a link that puts the accountant in a quarter nobody
+ * computed and shows them a list that looks complete. The client's own file says nothing about a
+ * period, and that is the honest place to land.
  */
 function correctionNoticeLink(clientId: string, invoiceId: string, invoiceDate: string | null): string {
-  return (
-    invoiceNoticeHref(clientId, invoiceId, invoiceDate) ??
-    clientQuarterHref({ clientId, year: NaN, quarter: NaN })
-  )
+  return invoiceNoticeHref(clientId, invoiceId, invoiceDate) ?? clientOverviewHref(clientId)
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {

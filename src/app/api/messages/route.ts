@@ -8,7 +8,7 @@ import { createNotification } from '@/lib/notifications'
 import { sendMessageNotification } from '@/lib/email'
 import { appUrl } from "@/lib/app-origin"
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
-import { invoiceNoticeHref } from '@/lib/accountant-deep-links'
+import { answerNoticeLink } from '@/lib/answer-notice'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -146,14 +146,23 @@ async function resolvePartnerName(
 // the file name in it, and a link built by parsing that would break on the first rename, the
 // first quote, the first translation.
 //
-// Three things gate it, and all three must hold:
+// FOUR things gate it, and all four must hold:
 //   · the sender OWNS the invoice (checked under their own session — RLS, plus an explicit
 //     ownership filter, so a stray id cannot point the link at somebody else's administration);
 //   · the receiver is the sender's ACCOUNTANT, not the other way round — `/dashboard/clients/...`
 //     is an accountant surface, and an owner sent there would land on a page that is not theirs;
+//   · THIS accountant has an OPEN question about THIS invoice. Ownership alone proves the client
+//     may name the invoice, not that the message answers anything: a client could attach any
+//     invoice of their own and aim an accountant's notification at an unrelated row. And with two
+//     offices on one administration, the office that receives the answer is not necessarily the
+//     one that asked — so the row is matched on accountant_id too, never on "an" open question;
 //   · the invoice has a readable date, because the target needs the period and a guessed quarter
 //     is a wrong answer rather than a smaller one.
-// Anything missing → the conversation link this route always wrote.
+//
+// Anything missing — no row, the wrong accountant, a question already cleared, or a read that
+// FAILED — and the notification carries the conversation link this route always wrote. The
+// message itself is never affected by any of it: it is sent either way. A deep link is a
+// convenience; the answer reaching the accountant is the product.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function askedAbout(body: unknown): string | null {
@@ -244,22 +253,17 @@ export async function POST(request: NextRequest) {
     // this is what finally makes a new message ring a phone. The direct insert that
     // stood here wrote the row and stopped there: push was built, documented and
     // wired to exactly the events a message is not.
-    // [KANTOOR-LINKS] The invoice the answer is about, when the answering screen named one.
-    // Best-effort in every branch: a failed read costs the deep link, never the notification.
-    let deepLink: string | null = null
-    if (aboutInvoiceId && naarBoekhouder) {
-      const { data: about, error: aboutErr } = await supabase
-        .from('invoices')
-        .select('id, invoice_date')
-        .eq('id', aboutInvoiceId)
-        .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
-        .maybeSingle()
-      if (aboutErr) {
-        console.error('[KANTOOR-LINKS] factuur bij antwoord niet leesbaar', { userId: user.id, error: aboutErr.message })
-      } else if (about) {
-        deepLink = invoiceNoticeHref(user.id, about.id, about.invoice_date)
-      }
-    }
+    // [KANTOOR-LINKS] The invoice the answer is about, when the answering screen named one — and
+    // only when an exact open question of THIS accountant proves the message answers it. The whole
+    // decision, with its two reads and its five reasons to return null, lives in answer-notice.ts.
+    //
+    // Note where this sits: AFTER the message row is written. The message is the product; the deep
+    // link is a convenience on the notification, and no failure of it may cost the send. The
+    // question also stays open — the client answering is not the client resolving, and nothing
+    // here writes to accountant_subject_status.
+    const deepLink = aboutInvoiceId && naarBoekhouder
+      ? await answerNoticeLink(supabase, { senderId: user.id, receiverId: receiver_id, invoiceId: aboutInvoiceId })
+      : null
     const melding = await createNotification({
       userId: receiver_id,
       title: 'Nieuw bericht',
