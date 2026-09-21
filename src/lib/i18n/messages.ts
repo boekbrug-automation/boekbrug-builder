@@ -15263,6 +15263,9 @@ export const MESSAGES = {
   'bh.kwt.sectie.crediteurenSub': { nl: 'ontvangen — nog te betalen', ar: 'واردة — لم تُدفع بعد', en: 'received — not yet paid' },
   'bh.kwt.sectie.voldaan': { nl: 'Voldaan', ar: 'مسدَّدة', en: 'Settled' },
   'bh.kwt.sectie.voldaanSub': { nl: 'betaald', ar: 'مدفوعة', en: 'paid' },
+  // [KWT-TABS] The selected view is empty while the quarter is not. Its own sentence, because
+  // 'Geen facturen in Q3 2026' would be a claim about the whole quarter made by one of three tabs.
+  'bh.kwt.sectie.geen': { nl: 'Geen facturen in deze lijst', ar: 'لا فواتير في هذه القائمة', en: 'No invoices in this list' },
   'bh.kwt.kop': { nl: 'Q{q} {jaar}', ar: 'الربع {q} {jaar}', en: 'Q{q} {jaar}' },
   'bh.kwt.kop.metKlant': { nl: 'Q{q} {jaar} — {klant}', ar: 'الربع {q} {jaar} — {klant}', en: 'Q{q} {jaar} — {klant}' },
   'bh.kwt.sorteerOudste': { nl: 'Oudste ↑', ar: 'الأقدم ↑', en: 'Oldest ↑' },
@@ -15317,6 +15320,20 @@ export const MESSAGES = {
   'bh.kwt.voorstel.status.accepted': { nl: 'Voorstel overgenomen', ar: 'قُبل الاقتراح', en: 'Proposal accepted' },
   'bh.kwt.voorstel.status.declined': { nl: 'Voorstel afgewezen', ar: 'رُفض الاقتراح', en: 'Proposal declined' },
   'bh.kwt.voorstel.status.stale': { nl: 'Voorstel vervallen', ar: 'انتهت صلاحية الاقتراح', en: 'Proposal lapsed' },
+  // [KWT-TABS] Said once when the accountant leaves a view with an unsent proposal open in it.
+  // Someone who typed a correction and then picked another view has probably mis-clicked, and a
+  // word is worth more than a silent disappearance from the screen.
+  //
+  // THE SENTENCE PROMISES PAGE MEMORY, AND NOT ONE WORD MORE. What was typed survives every way
+  // the visible tab can change — a click, an arrow key, Back, Forward, a ?focus= deep link — and
+  // nothing beyond that: it is React state on this screen, so leaving the page or reloading it
+  // takes the draft with it. An earlier draft of this message said «blijft bewaard», which an
+  // owner reads as SAVED — the one promise a screen with no persistence may not make, and the
+  // kind that is discovered by losing an afternoon's work. "Stays on this page" is the whole
+  // truth, and it is also exactly what the accountant needs to decide whether to click on.
+  'bh.kwt.voorstel.verlatenVraag': { nl: 'Voorstel nog niet verstuurd', ar: 'الاقتراح لم يُرسَل بعد', en: 'Proposal not sent yet' },
+  'bh.kwt.voorstel.verlatenUitleg': { nl: 'Je invoer blijft op deze pagina staan. Je ziet hem weer als je teruggaat naar deze factuur.', ar: 'ستبقى مدخلاتك في هذه الصفحة، وستظهر مجددًا عند العودة إلى هذه الفاتورة.', en: 'Your entries stay on this page. You’ll see them again when you return to this invoice.' },
+  'bh.kwt.voorstel.verlatenKnop': { nl: 'Verdergaan', ar: 'متابعة', en: 'Continue' },
   'bh.det.laden': { nl: 'Laden...', ar: 'جارٍ التحميل…', en: 'Loading...' },
   'bh.det.ontkoppelTitel': { nl: 'Klant ontkoppelen?', ar: 'إلغاء ربط العميل؟', en: 'Unlink client?' },
   'bh.det.ontkoppelUitleg': { nl: 'Je verliest de toegang tot de administratie van {naam}. Hij houdt alles zelf; later opnieuw koppelen kan.', ar: 'ستفقد الوصول إلى دفاتر {naam}. يحتفظ هو بكل شيء؛ ويمكن الربط من جديد لاحقًا.', en: 'You lose access to the books of {naam}. They keep everything; you can link again later.' },

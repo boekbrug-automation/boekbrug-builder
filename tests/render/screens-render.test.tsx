@@ -394,11 +394,18 @@ test("[WIT-SCHERM] the service-worker registrar renders — it sits in the root 
 
 test("[WIT-SCHERM] the accountant's correction proposal form renders, including on unreadable amounts", async () => {
   const { translator } = await import("../../src/lib/i18n/t");
+  const { voorstelConceptVan } = await import("../../src/app/dashboard/clients/[id]/VoorstelFormulier");
   const DateField = ({ value }: { value: string }) => React.createElement("input", { defaultValue: value });
+  // [KWT-TABS] The draft is the screen's now, not the form's — the quarter's invoice lists sit
+  // behind tabs, so the row carrying this form unmounts whenever another view is shown and state
+  // held here would die with it. The prefill rule it used to apply internally is the function
+  // handed in below, which is also what this test still exercises: every amount null must stay
+  // empty, because a zero here would be a proposal to change the figures to zero.
   const draai = async (invoice: Record<string, unknown>) => renderScreen(
     "../../src/app/dashboard/clients/[id]/VoorstelFormulier",
     {
       clientId: "c-1", invoice, t: translator("nl"), DateField,
+      concept: voorstelConceptVan(invoice as never), onConcept: () => {},
       onClose: () => {}, onSent: () => {}, onError: () => {},
     },
     "VoorstelFormulier",
