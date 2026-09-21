@@ -21,6 +21,7 @@ import { EL1, FONT, M3, R, COLUMN } from '@/lib/design/tokens'
 import { translator, type Translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { rowMatchesQuery } from '@/lib/search'
+import { opvragenHref } from '@/lib/accountant-deep-links'
 import { getAangifteDeadline, daysUntil } from '../accountant.service'
 import {
   summarizeBoard,
@@ -447,8 +448,18 @@ export default function AccountantWerkboard({ clients, klantenOnleesbaar = false
                   </span>
                 </button>
                 {openSoort === g.key && (
-                  <p style={{ fontSize: 12, color: '#5F6368', margin: '0 0 2px', paddingInlineStart: 12 }}>
-                    {g.clients.map(c => c.name).join(' · ')}
+                  /* [KANTOOR-LINKS] De KOP van de groep blijft tekst: "Bankafschrift ontbreekt bij
+                     7 klanten" is een verzameling, en er is geen scherm dat precies die verzameling
+                     toont — er een willekeurige klant van maken om maar te kunnen linken is erger
+                     dan niet linken. De NAMEN eronder zijn wél precies één klant in precies dit
+                     kwartaal, en gaan dus naar Opvragen voor die klant-periode. */
+                  <p style={{ fontSize: 12, color: '#5F6368', margin: '0 0 2px', paddingInlineStart: 12, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {g.clients.map((c, i) => (
+                      <span key={c.id}>
+                        <a href={opvragenHref({ clientId: c.id, year, quarter })} style={{ color: M3.primary, textDecoration: 'none' }}>{c.name}</a>
+                        {i < g.clients.length - 1 ? ' ·' : ''}
+                      </span>
+                    ))}
                   </p>
                 )}
                 </div>
@@ -594,14 +605,26 @@ export default function AccountantWerkboard({ clients, klantenOnleesbaar = false
                       er niets te melden is — een bord dat altijd vol staat leest niemand. */}
                   {row.state === 'ok' && ((row.missingTitles?.length ?? 0) > 0 || row.status === 'ready' || vers[row.id]) && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '0 16px 12px', marginTop: -4 }}>
+                      {/* [KANTOOR-LINKS] Een gat is nu een deur. De chip was het enige
+                          niet-aanklikbare element op deze regel: de boekhouder las "Bankafschrift
+                          ontbreekt" en moest daarna zelf naar Opvragen, daar de klant kiezen en
+                          daar het kwartaal kiezen — terwijl hij op een regel stond die alle drie
+                          al wist. `/dashboard/accountant/opvragen` haalt exact deze lijst op
+                          (/api/readiness `missing[]`, dezelfde bron als `missingTitles`), dus hij
+                          landt op het lijstje waar de chip uit komt, met het verzoekformulier
+                          eronder. NIET de `fix`-href van het readiness-item: die is een
+                          EIGENAARSroute (readiness-board.ts:26-32). En geen gat-per-gat
+                          voorselectie: `missing[]` heeft alleen een titel, geen stabiele sleutel,
+                          dus alle chips van een regel wijzen naar dezelfde klant-periode. */}
                       {(row.missingTitles ?? []).slice(0, 3).map((titel) => (
-                        <span
+                        <a
                           key={titel}
+                          href={opvragenHref({ clientId: row.id, year, quarter })}
                           title={titel}
-                          style={{ fontSize: 11.5, color: '#7C5800', backgroundColor: '#FEF7E0', border: '1px solid #FDE9B8', borderRadius: 6, padding: '3px 8px', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          style={{ fontSize: 11.5, color: '#7C5800', backgroundColor: '#FEF7E0', border: '1px solid #FDE9B8', borderRadius: 6, padding: '3px 8px', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'none' }}
                         >
                           {titel}
-                        </span>
+                        </a>
                       ))}
                       {(row.missingTitles?.length ?? 0) > 3 && (
                         <span style={{ fontSize: 11.5, color: '#5F6368' }}>{t('bh.werk.meer', { n: (row.missingTitles?.length ?? 0) - 3 })}</span>

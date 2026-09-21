@@ -90,6 +90,17 @@ export interface TodoItem {
   type: TodoType
   description: string          // Dutch, ready to display
   count?: number               // number of invoices affected (when relevant)
+  /**
+   * [KANTOOR-LINKS] The period this to-do was COUNTED over — the aangifte quarter, not today's.
+   *
+   * Every row here is "{klant} — … dit kwartaal", and the row used to open
+   * `/dashboard/clients/{id}`, whose quarter grid defaults to the CALENDAR quarter. In the last
+   * week of July that is Q3: the accountant read a to-do about Q2, tapped it, and arrived in a
+   * quarter three weeks old and by definition nearly empty. The feed knows which period it meant;
+   * carrying it is the whole fix.
+   */
+  year: number
+  quarter: number
 }
 
 // ─────────────────────────────────────────────────────────

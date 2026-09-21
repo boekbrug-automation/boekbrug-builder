@@ -8,6 +8,7 @@ import { createNotification } from '@/lib/notifications'
 import { sendMessageNotification } from '@/lib/email'
 import { appUrl } from "@/lib/app-origin"
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { notificationLinkFor } from '@/lib/answer-notice'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -133,6 +134,46 @@ async function resolvePartnerName(
   }
 }
 
+// ── [KANTOOR-LINKS] Where an ANSWER lands ────────────────────────────────────
+//
+// Every message notification said "Nieuw bericht" and pointed at the conversation. For a message
+// that is a plain message that is exactly right. For the ANSWER to a question an accountant asked
+// about one invoice it is a dead end: they get the answer far from the document they asked about,
+// and go looking for it.
+//
+// So the answering screen may name the invoice its answer is about — a TYPED id, never the text.
+// The sentence itself is deliberately not read: `bouwAntwoordBericht` writes a Dutch line with
+// the file name in it, and a link built by parsing that would break on the first rename, the
+// first quote, the first translation.
+//
+// FOUR things gate it, and all four must hold:
+//   · the sender OWNS the invoice (checked under their own session — RLS, plus an explicit
+//     ownership filter, so a stray id cannot point the link at somebody else's administration);
+//   · the receiver is the sender's ACCOUNTANT, not the other way round — `/dashboard/clients/...`
+//     is an accountant surface, and an owner sent there would land on a page that is not theirs;
+//   · THIS accountant has an OPEN question about THIS invoice. Ownership alone proves the client
+//     may name the invoice, not that the message answers anything: a client could attach any
+//     invoice of their own and aim an accountant's notification at an unrelated row. And with two
+//     offices on one administration, the office that receives the answer is not necessarily the
+//     one that asked — so the row is matched on accountant_id too, never on "an" open question;
+//   · the invoice has a readable date, because the target needs the period and a guessed quarter
+//     is a wrong answer rather than a smaller one.
+//
+// Anything missing — no row, the wrong accountant, a question already cleared, or a read that
+// FAILED — and the notification carries the conversation link this route always wrote. The
+// message itself is never affected by any of it: it is sent either way. A deep link is a
+// convenience; the answer reaching the accountant is the product.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function askedAbout(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null
+  const about = (body as { about?: unknown }).about
+  if (!about || typeof about !== 'object') return null
+  const { type, id } = about as { type?: unknown; id?: unknown }
+  if (type !== 'invoice' || typeof id !== 'string' || !UUID_RE.test(id)) return null
+  return id
+}
+
 // ── POST: send a message ──────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
@@ -147,6 +188,8 @@ export async function POST(request: NextRequest) {
     const limited = await checkRateLimit({ userId: user.id, endpoint: 'messages-send', ...RATE_LIMITS.MESSAGE_SEND });
     if (!limited.allowed) return rateLimitResponse(limited);
     const { receiver_id, content } = body
+    // [KANTOOR-LINKS] Optional, typed, and validated below against ownership and direction.
+    const aboutInvoiceId = askedAbout(body)
 
     if (!receiver_id || !content?.trim()) {
       return NextResponse.json({ error: 'Ongeldig bericht' }, { status: 400 })
@@ -174,6 +217,11 @@ export async function POST(request: NextRequest) {
       (l) =>
         (l.accountant_id === user.id && l.zzper_id === receiver_id) ||
         (l.zzper_id === user.id && l.accountant_id === receiver_id),
+    )
+    // [KANTOOR-LINKS] Which way this message travels. Only owner → accountant may carry an
+    // accountant deep link; the same pair read the other way round must not.
+    const naarBoekhouder = (myLinks ?? []).some(
+      (l) => l.zzper_id === user.id && l.accountant_id === receiver_id,
     )
     if (!linked) {
       return NextResponse.json(
@@ -205,12 +253,34 @@ export async function POST(request: NextRequest) {
     // this is what finally makes a new message ring a phone. The direct insert that
     // stood here wrote the row and stopped there: push was built, documented and
     // wired to exactly the events a message is not.
+    // [KANTOOR-LINKS] The invoice the answer is about, when the answering screen named one — and
+    // only when an exact open question of THIS accountant proves the message answers it. The whole
+    // decision, with its two reads and its five reasons to return null, lives in answer-notice.ts.
+    //
+    // Note where this sits: AFTER the message row is written. The message is the product; the deep
+    // link is a convenience on the notification, and no failure of it may cost the send. The
+    // question also stays open — the client answering is not the client resolving, and nothing
+    // here writes to accountant_subject_status.
+    //
+    // One expression, and it cannot fail: notificationLinkFor always answers with a string — the
+    // deep link when the question proves it, the conversation otherwise, and the conversation
+    // again for anything that failed or threw on the way. A throw here would reach the outer
+    // catch below and answer 500 for a message that is ALREADY STORED, which the person would
+    // answer by sending it a second time.
+    const conversationHref = `/dashboard/messages/${user.id}`
+    const noticeLink = await notificationLinkFor(
+      supabase,
+      aboutInvoiceId && naarBoekhouder
+        ? { senderId: user.id, receiverId: receiver_id, invoiceId: aboutInvoiceId }
+        : null,
+      conversationHref,
+    )
     const melding = await createNotification({
       userId: receiver_id,
       title: 'Nieuw bericht',
       body: content.trim().slice(0, 80),
       type: 'message',
-      link: `/dashboard/messages/${user.id}`,
+      link: noticeLink,
     })
     if (!melding.ok) {
       console.error('[BERICHTEN] melding aan de ontvanger mislukt', { receiver_id, error: melding.error })

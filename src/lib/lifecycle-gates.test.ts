@@ -37690,3 +37690,152 @@ test("[KANTOOR-RUST] the accountant is not notified of every sale, and reads no 
   assert.match(kwartaal, /t\('bh\.kwt\.btwNummer'\)/);
 });
 
+
+// ─── [KANTOOR-LINKS] A signal lands on the work, or it does not pretend to ─────────────────────
+//
+// Batch 2 fixed one shape of defect in five places: a signal that knew the client, the period and
+// sometimes the very invoice, and then navigated somewhere that knew none of it. The gates below
+// hold the two halves of that decision — the links that WERE fixed, and the findings that were
+// deliberately NOT given a link because no honest target exists yet.
+
+test("[KANTOOR-LINKS] every accountant signal that knows a period writes it down", () => {
+  // One module builds these URLs, and the destinations' parameter names are asserted in
+  // src/lib/accountant-deep-links.test.ts. What this gate watches is the CALLERS: a href written
+  // by hand beside them is how the spelling drifts back apart.
+  const links = code("src/lib/accountant-deep-links.ts");
+  for (const fn of ["clientQuarterHref", "clientOverviewHref", "opvragenHref", "brugDocumentsHref", "invoiceNoticeHref"]) {
+    assert.ok(links.includes(`export function ${fn}`), `${fn} left the deep-link module`);
+  }
+  // NO PERIOD MEANS NO /kwartaal. That screen answers a missing q/year with Q1 of the current
+  // year, so the bare route is not the link minus a fact — it asserts a quarter nobody computed.
+  assert.match(links, /if \(!usablePeriod\(period\)\) return clientOverviewHref\(period\.clientId\)/,
+    "clientQuarterHref can return a period-less /kwartaal again");
+
+  // The correction answers: both notifications used to point at a period-less /kwartaal, which
+  // that screen reads as q=1 of the current year.
+  const corr = code("src/app/api/invoice-corrections/[id]/route.ts");
+  assert.doesNotMatch(
+    corr,
+    /link: `\/dashboard\/clients\/\$\{proposal\.client_id\}\/kwartaal`/,
+    "a correction notification points at a quarter screen with no period again",
+  );
+  assert.equal(
+    (corr.match(/correctionNoticeLink\(/g) ?? []).length,
+    3, // the helper itself + accepted + declined
+    "a correction notification stopped going through the one link builder",
+  );
+  // …and the builder's fallback is a surface with no period in it, for both answers.
+  assert.match(corr, /invoiceNoticeHref\([^)]*\) \?\? clientOverviewHref\(clientId\)/,
+    "the correction notification can fall back to a period-less quarter again");
+  assert.doesNotMatch(corr, /clientQuarterHref/, "the correction route builds a quarter link by hand again");
+
+  // The quarter screen's Documenten button: it had the client and the quarter in scope and pushed
+  // a bare route.
+  const kwartaal = code("src/app/dashboard/clients/[id]/kwartaal/page.tsx");
+  assert.doesNotMatch(kwartaal, /router\.push\('\/dashboard\/brug'\)/, "Documenten drops the client and the period again");
+  assert.match(kwartaal, /brugDocumentsHref\(\{ clientId, year, quarter: q \}\)/);
+
+  // The client roster: the readiness line is counted over the aangifte quarter and carries it.
+  const beheer = code("src/modules/accountant/pages/KlantenBeheer.tsx");
+  assert.match(beheer, /clientQuarterHref\(\{[\s\S]{0,160}client\.readiness\.year/, "the status no longer opens its own period");
+
+  // The to-do feed: the rows are counted over the aangifte quarter, so they may not land on the
+  // calendar one.
+  const feed = code("src/modules/accountant/accountant.repository.ts");
+  assert.ok((feed.match(/^\s+year, quarter,$/gm) ?? []).length >= 3, "a to-do row stopped carrying its period");
+  const home = code("src/modules/accountant/pages/AccountantHome.tsx");
+  assert.doesNotMatch(home, /push\(`\/dashboard\/clients\/\$\{todo\.client_id\}`\)/, "a to-do lands on the client card again");
+});
+
+test("[KANTOOR-LINKS] a finding with no honest target stays factual and unlinked", () => {
+  // The money rules' `entityId` is NOT universally an invoice id: it is a bank transaction for
+  // transaction_overallocated and matched_tx_unpaid_invoice (accountants have no bank surface),
+  // one arbitrary member of a PAIR for duplicate_live_pair, a settlement's invoice for the drawer
+  // kinds and a DATE for drawer_negative. /api/money-audit also returns no invoice date, so the
+  // panel cannot know which quarter to open. Wrapping them all in `?focus=${entityId}` would
+  // produce links that quietly highlight nothing — and, for the duplicate, would claim the app
+  // knows which half of the pair is the real one.
+  //
+  // Same for the numbering panel: a gap in a series is not a document, so there is nothing to open.
+  // Batch 3's exception surface is where these get a home. Until then: no link.
+  for (const file of [
+    "src/components/beveiliging/GeldPaneel.tsx",
+    "src/components/beveiliging/NummeringPaneel.tsx",
+  ]) {
+    const panel = code(file);
+    assert.doesNotMatch(panel, /focus=/, `${file} deep-links a finding that has no exact target`);
+    assert.doesNotMatch(panel, /\/dashboard\/clients\//, `${file} navigates somewhere on a finding`);
+    // `entityId` stays in the React key (it identifies the row); what it may never become is a
+    // destination — that is the "wrap every finding in ?focus=" mistake this gate exists for.
+    assert.doesNotMatch(panel, /(href|router\.push\(|window\.open)[^\n]*entityId/, `${file} navigates on entityId`);
+  }
+
+  // And the aggregate half of the same rule: the werkboard's work-KIND group covers many clients
+  // and must not resolve to one of them. The expanded client NAMES are exact and do link.
+  const board = code("src/modules/accountant/pages/AccountantWerkboard.tsx");
+  // [GATE-VENSTER] Both ends on real code, both asserted found, and the end searched AFTER the
+  // start — `WorkDonePanel` is also an import line near the top of the file, and slicing to that
+  // would run the window backwards and quietly measure nothing.
+  const groepStart = board.indexOf("werkSoorten.map");
+  assert.notEqual(groepStart, -1, "the work-kind group is not where this gate expects it");
+  const groepEind = board.indexOf("<WorkDonePanel", groepStart);
+  assert.notEqual(groepEind, -1, "the end of the work-kind group is not where this gate expects it");
+  const groep = board.slice(groepStart, groepEind);
+  assert.ok(groep.length > 500, "the work-kind window is too small to be the block it claims");
+  assert.doesNotMatch(groep, /opvragenHref\(\{ clientId: g\./, "the work-KIND group resolves to a single client");
+  assert.match(groep, /opvragenHref\(\{ clientId: c\.id, year, quarter \}\)/, "the expanded client names lost their target");
+});
+
+test("[KANTOOR-LINKS] an answer carries a typed invoice, never a parsed sentence", () => {
+  // The accountant's "Nieuw bericht" for an ANSWER to an invoice question opens that invoice. The
+  // context is an id the answering screen already holds; the Dutch line `bouwAntwoordBericht`
+  // writes ("Over je vraag bij …") is never read to find it — that breaks on the first rename.
+  const messages = code("src/app/api/messages/route.ts");
+  const notice = code("src/lib/answer-notice.ts");
+  assert.match(messages, /function askedAbout\(/);
+  assert.doesNotMatch(messages, /Over je vraag/, "the message route parses the answer's own sentence");
+  assert.match(messages, /naarBoekhouder/, "the direction check is gone — an owner could be sent to an accountant route");
+  assert.match(messages, /const conversationHref = `\/dashboard\/messages\/\$\{user\.id\}`/,
+    "the conversation link is no longer the fallback");
+  assert.match(messages, /await notificationLinkFor\(\s*supabase,/,
+    "the message route decides the deep link itself again");
+  assert.match(messages, /link: noticeLink,/, "the notification builds its link somewhere else");
+
+  // FAIL-SOFT, AND PROVABLY SO. The message row is written before this link is decided, so a
+  // throw here would answer 500 for a message that is ALREADY STORED — and the person answers a
+  // failed send by sending it again. Handling the `{ error }` PostgREST returns is not enough:
+  // a dead socket, an unparseable body or a misconfigured client RAISE instead.
+  assert.match(notice, /try \{[\s\S]{0,200}?return await resolve\(/,
+    "the deep-link read path is no longer inside a try/catch");
+  assert.match(notice, /\} catch \(e\) \{[\s\S]{0,400}?return null;/,
+    "an unexpected throw no longer becomes null");
+  assert.match(notice, /export async function notificationLinkFor\([\s\S]{0,400}?Promise<string>/,
+    "the call-site seam that always answers with a string is gone");
+
+  // [GATE-VENSTER] The message must be written BEFORE the link is decided: the send is the
+  // product and no failure of a convenience may cost it. Both markers asserted found, and the
+  // order compared on real code.
+  const inserted = messages.indexOf(".from('messages')");
+  const decided = messages.indexOf("notificationLinkFor(");
+  assert.notEqual(inserted, -1, "the message insert is not where this gate expects it");
+  assert.notEqual(decided, -1, "the link decision is not where this gate expects it");
+  assert.ok(inserted < decided, "the deep link is decided before the message is sent");
+
+  // The proof the link rests on: this accountant's own OPEN question about THIS invoice. Owning
+  // the invoice only proves the client may name it — with two offices on one administration it
+  // does not even prove the receiver is the one who asked.
+  for (const pin of [
+    /\.eq\("subject_type", "invoice"\)/,
+    /\.eq\("subject_id", invoiceId\)/,
+    /\.eq\("accountant_id", receiverId\)/,
+    /\.eq\("status", VRAAG_STATUS\)/,
+  ]) {
+    assert.match(notice, pin, `the question read stopped pinning ${pin}`);
+  }
+  // And the lifecycle is untouched: the client answering is not the client resolving.
+  assert.doesNotMatch(notice, /\.(insert|update|upsert|delete)\(/, "answer-notice writes to the database");
+
+  const vragen = code("src/app/dashboard/vragen/VragenClient.tsx");
+  assert.match(vragen, /about: \{ type: 'invoice', id: vraag\.invoice\.id \}/);
+  assert.match(vragen, /isFactuur && vraag\.invoice\?\.id/, "a document question would now claim an invoice");
+});

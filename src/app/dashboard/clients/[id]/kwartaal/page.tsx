@@ -21,6 +21,7 @@ import { useToast } from '@/components/ui/Toast'
 import { EL1, M3, R, COLUMN, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 // [FOCUS-KOP] Where a deep-linked row must come to rest — see the header of that file.
 import { landRowUnderChrome } from '@/lib/focus-scroll'
+import { brugDocumentsHref } from '@/lib/accountant-deep-links'
 import { translator } from '@/lib/i18n/t'
 import { useLocale } from '@/lib/i18n/use-locale'
 import { isOverdue } from '@/components/invoice/InvoiceRow'
@@ -536,9 +537,13 @@ export default function KwartaalPage() {
       <div style={{ maxWidth: COLUMN.work, margin: '0 auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
 
         {/* [BRIDGE-A][POLISH ب-2/ب-3] Dead buttons removed (PDF Bank/CAMT/KW — legacy
-            pre-pivot idea, never wired). Documenten now opens the Brug — the hub. */}
+            pre-pivot idea, never wired). Documenten now opens the Brug — the hub.
+            [KANTOOR-LINKS] …and opens it ON this client and this quarter. It used to push the bare
+            route, so the accountant left a screen headed "Klant X · Q3 2026" and arrived somewhere
+            that asked them for the client and the quarter again. All three were already in scope
+            here; the only thing missing was writing them down. */}
         <button
-          onClick={() => router.push('/dashboard/brug')}
+          onClick={() => router.push(brugDocumentsHref({ clientId, year, quarter: q }))}
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px 16px', backgroundColor: M3.surface, borderRadius: R.lg, boxShadow: EL1, cursor: 'pointer', transition: 'background 0.1s ease', width: '100%' }}
         >
           <span className="text-xl">📂</span>

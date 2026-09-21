@@ -469,6 +469,7 @@ export async function getTodoFeed(accountantId: string): Promise<TodoFeedResult>
           client_id: clientId,
           client_name: clientName,
           type: 'client_question',
+          year, quarter,
           description: `${clientName} — vraag open`,
           count: vraagCount ?? 0,
         })
@@ -495,6 +496,7 @@ export async function getTodoFeed(accountantId: string): Promise<TodoFeedResult>
           client_id: clientId,
           client_name: clientName,
           type: 'invoices_to_process',
+          year, quarter,
           description: `${clientName} — ${unprocessedCount} factuur${(unprocessedCount ?? 0) > 1 ? 'en' : ''} te verwerken`,
           count: unprocessedCount ?? 0,
         })
@@ -524,6 +526,7 @@ export async function getTodoFeed(accountantId: string): Promise<TodoFeedResult>
           client_id: clientId,
           client_name: clientName,
           type: 'missing_file',
+          year, quarter,
           description: `${clientName} — geen bankgegevens dit kwartaal`,
         })
       }

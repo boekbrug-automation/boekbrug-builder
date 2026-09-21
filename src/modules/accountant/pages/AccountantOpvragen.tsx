@@ -22,6 +22,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { M3, R, EL1, COLUMN } from '@/lib/design/tokens'
 import { MAX_EXTRA, buildDocumentRequest } from '@/lib/document-request'
 import { failureText } from '@/lib/server-message'
@@ -50,8 +51,28 @@ export default function AccountantOpvragen({ klanten, kwartalen }: Props) {
   // Dutch, because it is read by the client and not by whoever composes it.
   const locale = useLocale()
   const t = translator(locale)
-  const [klantId, setKlantId] = useState(klanten.length === 1 ? klanten[0].id : '')
-  const [periode, setPeriode] = useState(kwartalen[0] ? `${kwartalen[0].year}-${kwartalen[0].quarter}` : '')
+  // [KANTOOR-LINKS] Opened FROM a gap on the werkboard: `?clientId=&q=&year=`.
+  //
+  // The chip the accountant clicked already knew which client and which quarter it was about, so
+  // this screen must not ask again — that was the whole dead end. Both are VALIDATED against what
+  // this screen can actually be set to: an id that is not in `klanten` (an unlinked client, a
+  // stale link) and a quarter that is not one of the offered options are ignored, and the screen
+  // opens exactly as it did before. A select bound to a value that has no option renders blank,
+  // and a blank client on the screen that MAILS AN ENTREPRENEUR is not a state to invent.
+  const searchParams = useSearchParams()
+  const geopend = useMemo(() => {
+    const askedClient = searchParams.get('clientId')
+    const klantHit = klanten.find((k) => k.id === askedClient) ?? null
+    const y = Number(searchParams.get('year'))
+    const q = Number(searchParams.get('q'))
+    const kwartaalHit = kwartalen.find((k) => k.year === y && k.quarter === q) ?? null
+    return { klantId: klantHit?.id ?? null, periode: kwartaalHit ? `${kwartaalHit.year}-${kwartaalHit.quarter}` : null }
+  }, [searchParams, klanten, kwartalen])
+
+  const [klantId, setKlantId] = useState(geopend.klantId ?? (klanten.length === 1 ? klanten[0].id : ''))
+  const [periode, setPeriode] = useState(
+    geopend.periode ?? (kwartalen[0] ? `${kwartalen[0].year}-${kwartalen[0].quarter}` : ''),
+  )
   const [extra, setExtra] = useState('')
   const [bezig, setBezig] = useState(false)
 

@@ -7,7 +7,7 @@
 // that all lives server-side in bridge-tree.ts.
 
 import { useMemo, useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSubPageHeader } from '@/components/nav/SubPageHeaderContext'
 import type { TreeNode, NodeBadge } from '@/lib/bridge-tree'
 import { lastCompletedQuarter } from '@/lib/quarter'
@@ -119,10 +119,77 @@ function hasHidden(nodes: TreeNode[]): boolean {
   return nodes.some(n => n.hidden)
 }
 
+// ─── [KANTOOR-LINKS] Opened FROM a client's quarter screen ────────────────────
+//
+// The Documenten button there used to push a bare `/dashboard/brug`, so the accountant arrived on
+// the hub with nothing selected and picked the client, the tab and the quarter again — the three
+// things they had just chosen. The button now carries `clientId`, `q`, `year` and `tab`, and the
+// two readers below turn those back into this hub's own state.
+//
+// Nothing about the hub changes for anyone who opens it from the menu: no params → exactly the
+// defaults it had (no client, Overzicht, last completed quarter).
+
+/** A param value only becomes state when it is one this hub can actually be in. */
+function paramTab(raw: string | null): 'overzicht' | 'kwartaal' | 'documenten' | null {
+  return raw === 'overzicht' || raw === 'kwartaal' || raw === 'documenten' ? raw : null
+}
+
+/**
+ * How deep into the tree the requested client/period actually goes.
+ *
+ * The folders here are VIRTUAL — a path exists only because some node carries it. Seeding
+ * `['Klanten', 'Bakkerij', '2026', 'Q3']` when that client filed nothing in Q3 would open an empty
+ * folder, which reads as "the documents are gone" rather than "this quarter is empty". So the path
+ * is walked segment by segment and truncated at the first one no node has: the accountant lands as
+ * deep as there is something to land on, and the breadcrumb says where that is.
+ */
+function existingPrefix(nodes: TreeNode[], desired: string[]): string[] {
+  const out: string[] = []
+  for (const segment of desired) {
+    const next = [...out, segment]
+    const exists = nodes.some(n => next.every((s, i) => n.path[i] === s))
+    if (!exists) return out
+    out.push(segment)
+  }
+  return out
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function BrugClient({ nodes, role, clientSummaries, docStatus, readFailed }: { nodes: TreeNode[]; role: string | null; clientSummaries?: ClientSummary[]; docStatus: DocStatusMap; readFailed?: string[] }) {
   const t = translator(useLocale())
-  const [cwd, setCwd] = useState<string[]>([])
+
+  // [KANTOOR-LINKS] What the caller asked for, validated against what this hub can be.
+  // `lastCompletedQuarter()` reads the clock, so it is computed once here and reused by the three
+  // initialisers below — two calls either side of midnight on 1 April would seed a year and a
+  // quarter from different periods.
+  const searchParams = useSearchParams()
+  const lastCompleted = lastCompletedQuarter()
+  const opened = useMemo(() => {
+    const askedClient = searchParams.get('clientId')
+    // Only a client this accountant actually has on the bridge. An id that is not in the roster
+    // is not an error to report here — it is a stale link, and the hub opens as it always did.
+    const client =
+      role === 'accountant' && askedClient
+        ? (clientSummaries ?? []).find(c => c.id === askedClient) ?? null
+        : null
+    const y = Number(searchParams.get('year'))
+    const q = Number(searchParams.get('q'))
+    const period =
+      Number.isInteger(y) && y >= 2000 && y <= 2100 && [1, 2, 3, 4].includes(q)
+        ? { year: y, quarter: q }
+        : null
+    return { client, period, tab: paramTab(searchParams.get('tab')) }
+    // Deliberately keyed on the raw string: a new URLSearchParams object every render would
+    // rebuild this (and re-seed nothing, but it is derived state and should read as such).
+  }, [searchParams, role, clientSummaries])
+
+  const [cwd, setCwd] = useState<string[]>(() => {
+    // Only the Documenten tab has a tree to point at; the other two tabs are their own panels.
+    if (!opened.client || opened.tab !== 'documenten') return []
+    const wanted = ['Klanten', opened.client.label]
+    if (opened.period) wanted.push(String(opened.period.year), `Q${opened.period.quarter}`)
+    return existingPrefix(nodes, wanted)
+  })
   const [showHidden, setShowHidden] = useState(false)
   const router = useRouter()
 
@@ -148,8 +215,11 @@ export default function BrugClient({ nodes, role, clientSummaries, docStatus, re
   // then switch tabs (Kwartaal / Documenten). The classic folder tree is reused
   // for the Documenten tab, scoped to the selected client.
   const isAccountant = role === 'accountant'
-  const [selectedClientId, setSelectedClientId] = useState<string>('')
-  const [hubTab, setHubTab] = useState<'overzicht' | 'kwartaal' | 'documenten'>('overzicht')
+  // [KANTOOR-LINKS] Seeded from the link when there is one; otherwise exactly the old defaults.
+  const [selectedClientId, setSelectedClientId] = useState<string>(opened.client?.id ?? '')
+  const [hubTab, setHubTab] = useState<'overzicht' | 'kwartaal' | 'documenten'>(
+    opened.client && opened.tab ? opened.tab : 'overzicht',
+  )
   const selectedClient = useMemo(
     () => clientSummaries?.find(c => c.id === selectedClientId) ?? null,
     [clientSummaries, selectedClientId]
@@ -210,9 +280,9 @@ export default function BrugClient({ nodes, role, clientSummaries, docStatus, re
     }
   }
 
-  const lastCompleted = lastCompletedQuarter()
-  const [selectedYear, setSelectedYear] = useState<number>(lastCompleted.year)
-  const [selectedQuarter, setSelectedQuarter] = useState<number>(lastCompleted.quarter)
+  // [KANTOOR-LINKS] The period the link named, or the one this hub always opened on.
+  const [selectedYear, setSelectedYear] = useState<number>(opened.period?.year ?? lastCompleted.year)
+  const [selectedQuarter, setSelectedQuarter] = useState<number>(opened.period?.quarter ?? lastCompleted.quarter)
 
   // [PAKKET-VERS] De vraag hoort bij het gekozen kwartaal, niet bij de gekozen klant: het
   // antwoord dekt alle klanten, dus wisselen van klant kost geen extra rondje.
