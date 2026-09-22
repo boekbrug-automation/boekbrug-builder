@@ -159,7 +159,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.accountant_directory_publication_needs_evidence() IS
-  '[KANTOORGIDS-BEWIJS] Weigert een publicatie waarvoor op het moment van COMMIT geen bevestigde klantkoppeling (meer) bestaat. Een rij die bij een boekhouder AANKOMT (INSERT, ook via upsert, of een UPDATE die accountant_id wijzigt) neemt eerst de advisory lock van die boekhouder; een gewone UPDATE niet, want die houdt de rij al vast. SECURITY INVOKER: leest alleen wat de aanroeper zelf al mag zien.';
+  '[KANTOORGIDS-BEWIJS] Refuses a publication for which no consented client link exists (any longer) at COMMIT time. A row that ARRIVES at an accountant (an INSERT, including through an upsert, or an UPDATE that changes accountant_id) first takes the advisory lock of that accountant; a plain UPDATE does not, because it already holds the row. SECURITY INVOKER: reads only what the caller may already see.';
 
 REVOKE ALL ON FUNCTION public.accountant_directory_publication_needs_evidence()
   FROM PUBLIC, anon, authenticated, service_role;
@@ -231,7 +231,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.accountant_directory_unpublish_on_last_unlink() IS
-  '[KANTOORGIDS-BEWIJS] Zet een kantoorvermelding op published = false zodra de laatste bevestigde klantkoppeling verdwijnt. Neemt eerst de advisory lock per boekhouder en dan de directory-rij, zodat twee gelijktijdige ontkoppelingen elkaar niet allebei voor "niet de laatste" aanzien. SECURITY DEFINER omdat de klant die ontkoppelt geen rechten heeft op de rij van het kantoor. Raakt één kolom op één rij aan, publiceert nooit, verwijdert nooit.';
+  '[KANTOORGIDS-BEWIJS] Sets an office listing to published = false as soon as the last consented client link disappears. Takes the per-accountant advisory lock first and then the directory row, so that two concurrent unlinks cannot both conclude they are "not the last one". SECURITY DEFINER because the client who unlinks has no rights on the office row. Touches one column on one row, never publishes, never deletes.';
 
 -- Nobody needs EXECUTE on either function. Supabase attaches a NAMED grant to anon, authenticated
 -- and service_role on every new function, and REVOKE … FROM PUBLIC does not touch a named grantee
