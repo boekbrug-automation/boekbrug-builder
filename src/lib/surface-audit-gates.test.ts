@@ -806,12 +806,20 @@ test("[NUMMER-EENMALIG] the confirmation asks the authority, and never decides f
   assert.doesNotMatch(page, /\bnj\?\.locked|json\?\.locked|\.locked\s*===|!!\s*\w+\.locked/,
     "the screen started reading the lock flag by itself instead of through the classifier");
 
-  // 2 — The refresh happens when the dialog OPENS, not only at page load. The state that decides
-  // whether a form is offered must be the state at the moment of deciding.
-  assert.match(page, /function opendeBevestiging\(\)/, "the confirmation opens without refreshing the numbering state");
-  inOrder(page, "setShowSendConfirm(true)", "void verversNummerstand()",
-    "invoice/new/page.tsx", "the dialog must open first and refresh after — a slow GET may not hold up the confirmation");
-  assert.match(page, /opendeBevestiging\(\)/, "the send button no longer goes through the refreshing opener");
+  // 2 — The confirmation opens on a FRESHLY READ state, never on the page-load one. The opener
+  // used to do `setShowSendConfirm(true)` and then `void verversNummerstand()`, so the first paint
+  // borrowed whatever the page load had answered — an edit door over a series that may have been
+  // fixed in the meantime. The ordering itself is proven executably in
+  // numbering-first-send.test.ts; what is pinned here is that the screen still routes through it.
+  assert.match(page, /async function opendeBevestiging\(\)/, "the opener is synchronous again — it cannot await its own read");
+  assert.match(page, /await openWithFreshNumbering\(\s*\n\s*verversNummerstand,\s*\n\s*setNumState,\s*\n\s*\(\) => \{ setLoading\(false\); setShowSendConfirm\(true\) \},/,
+    "the opener no longer reads, applies and opens through the one ordered helper");
+  assert.doesNotMatch(page, /void verversNummerstand\(\)/,
+    "the refresh is fired and forgotten again — the confirmation would open on the previous answer");
+  assert.equal([...page.matchAll(/verversNummerstand/g)].length, 2,
+    "the refresh has a second call site, which could apply a state outside the ordered opener");
+  assert.match(page, /await opendeBevestiging\(\)/,
+    "the preflight no longer awaits the opener — it would return before the fresh read landed");
 
   // 3 — ZERO SETUP. Accepting the default must cost no request at all, and that is decided by the
   // shared predicate rather than by an inline truthiness test that would fire on whitespace.
@@ -886,7 +894,7 @@ test("[NUMMER-EENMALIG] the numbering step sits before the send and changes noth
 
   // A creditnota and an offerte never reach the confirmation, so the numbering notice is never
   // their business either. The condition lives in the preflight now, not on the button.
-  assert.match(page, /if \(mode === 'sent' && invoiceType === 'factuur' && !confirmed\) \{\s*\n\s*opendeBevestiging\(\)\s*\n\s*return\s*\n\s*\}/,
+  assert.match(page, /if \(mode === 'sent' && invoiceType === 'factuur' && !confirmed\) \{\s*\n\s*await opendeBevestiging\(\)\s*\n\s*return\s*\n\s*\}/,
     "the confirmation gate lost its narrow condition, or no longer returns — a creditnota or an offerte would be sent through a numbering dialog");
   assert.match(page, /if \(invoiceType !== 'factuur'\) return/,
     "the refresh runs for a document that draws no number from this series");
@@ -973,6 +981,5 @@ test("[NUMMER-EENMALIG] the numbering write is reachable only after the validati
   // And the button no longer decides any of this: one entry for all three document types.
   assert.doesNotMatch(page, /if \(invoiceType === 'factuur'\) \{\s*\n\s*opendeBevestiging/,
     "the button opens the confirmation directly again, skipping the preflight entirely");
-  assert.match(page, /setShowSendConfirm\(true\)\s*\n[\s\S]{0,400}?void verversNummerstand\(\)/,
-    "the opener no longer refreshes the lock state after opening");
+
 });

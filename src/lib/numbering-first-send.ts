@@ -146,6 +146,50 @@ export function saveAllowsSend(save: NumberingSave): save is { outcome: "saved";
 }
 
 /**
+ * Open a confirmation on a FRESHLY READ numbering state, and never on the previous one.
+ *
+ * ── THE DEFECT THIS CLOSES ──
+ * The opener used to fire the refresh and open in the same breath:
+ *
+ *     setShowSendConfirm(true)
+ *     void verversNummerstand()       // resolves later
+ *
+ * So the dialog's first paint used whatever `numState` held from the page load. An owner who
+ * opened the screen while the series was open, and pressed send after a number had been issued
+ * elsewhere, saw «Nummering aanpassen» over a series that was already fixed. The POST authority
+ * still refused the rewrite, so nothing could corrupt — but the screen had borrowed a permission
+ * from an older answer, which is exactly what this batch says must never happen. And the same
+ * gap had a second cost: the owner could confirm the send before the fresh read landed, so the
+ * one-time sentence 2C exists to show might never be shown at all.
+ *
+ * ── WHY THE PREVIOUS ANSWER IS DROPPED BEFORE THE READ, NOT AFTER ──
+ * `apply({ kind: "unknown" })` runs FIRST. Awaiting the read before opening would already be
+ * enough to keep a stale answer off the screen, but then the guarantee rests on the await staying
+ * where it is. Dropping it up front makes it structural: between "send pressed" and "dialog open"
+ * there is no moment at which the state holds the older answer, whatever anyone later does to the
+ * ordering around this call.
+ *
+ * `open` is invoked LAST and exactly once, so a caller cannot show a confirmation that is not yet
+ * answerable. It takes the three effects as callbacks because that is what makes the sequence
+ * testable outside React — see the ordering test, which resolves the read by hand and asserts that
+ * nothing opened before it did.
+ *
+ * It decides nothing about numbering itself: no parse, no lock rule, no authority. It orders three
+ * things the caller already had.
+ */
+export async function openWithFreshNumbering(
+  read: () => Promise<NumberingState>,
+  apply: (state: NumberingState) => void,
+  open: () => void,
+): Promise<NumberingState> {
+  apply({ kind: "unknown" });
+  const fresh = await read();
+  apply(fresh);
+  open();
+  return fresh;
+}
+
+/**
  * Is there anything to send to the authority at all?
  *
  * THE ZERO-SETUP PATH RUNS THROUGH HERE. An owner who reads the sentence and presses send has

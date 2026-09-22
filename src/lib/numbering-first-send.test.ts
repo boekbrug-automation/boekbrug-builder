@@ -16,6 +16,7 @@ import {
   classifyNumberingSave,
   firstSendNumbering,
   numberingChangeRequested,
+  openWithFreshNumbering,
   saveAllowsSend,
   type NumberingState,
 } from "./numbering-first-send";
@@ -210,4 +211,95 @@ test("[NUMMER-EENMALIG] this module names no number of its own", () => {
   assert.doesNotMatch(src, /next_invoice_seq|formatInvoiceNumber|padStart|\+\s*1\b/,
     "the module started producing a number instead of relaying one");
   assert.doesNotMatch(src, /fetch\(|supabase/, "the module started doing I/O");
+});
+
+// ── A new confirmation may never borrow the previous answer ────────────────────────────────────
+//
+// The defect this proves closed: the opener fired the refresh and opened in the same breath, so
+// the dialog's first paint used the page-load state. An owner who loaded the screen while the
+// series was open and pressed send after a number had been issued elsewhere was shown an edit door
+// over a series that was already fixed. Nothing could corrupt — the POST still refused — but a
+// permission was borrowed from a stale answer, and the one-time sentence could be confirmed away
+// before the fresh read even landed.
+//
+// EXECUTABLE, not a source assertion: the read is resolved by hand, so the window between "send
+// pressed" and "read settled" is a real window this test sits inside.
+
+/** A read this test controls: it records that it started and resolves only when told. */
+function handRead(): { read: () => Promise<NumberingState>; settle: (s: NumberingState) => void; started: () => boolean } {
+  let started = false;
+  let settle!: (s: NumberingState) => void;
+  const read = () => {
+    started = true;
+    return new Promise<NumberingState>((resolve) => { settle = (s) => resolve(s); });
+  };
+  return { read, settle: (s) => settle(s), started: () => started };
+}
+
+test("[NUMMER-EENMALIG] a confirmation cannot open, or act, on the previous numbering answer", async () => {
+  // The screen is holding a stale `open` — the page-load answer for a series that has since issued.
+  let rendered: NumberingState = { kind: "open", next: "20260001", isCustom: false };
+  const log: string[] = [];
+
+  const { read, settle, started } = handRead();
+  const apply = (s: NumberingState) => { rendered = s; log.push(`apply:${s.kind}`); };
+  // What the confirmation would offer AT THE MOMENT it is opened.
+  const open = () => { log.push(`open:${firstSendNumbering(rendered) === null ? "no-offer" : "offer"}`); };
+
+  const pending = openWithFreshNumbering(read, apply, open);
+
+  // ── inside the window: the read is in flight ──
+  assert.equal(started(), true, "the refresh has not been started");
+  assert.equal(rendered.kind, "unknown",
+    "the stale answer is still the rendered state while the fresh read is unresolved — an older " +
+      "permission is being borrowed");
+  assert.equal(firstSendNumbering(rendered), null, "an unresolved state is offering an edit door");
+  assert.deepEqual(log, ["apply:unknown"], "the confirmation opened before its own read had settled");
+
+  // ── the truth arrives, and it is the opposite of the stale answer ──
+  settle({ kind: "locked" });
+  const fresh = await pending;
+
+  assert.deepEqual(fresh, { kind: "locked" });
+  assert.deepEqual(log, ["apply:unknown", "apply:locked", "open:no-offer"],
+    "the opening did not happen exactly once, after the fresh answer was applied");
+  assert.equal(firstSendNumbering(rendered), null, "a locked series is offered an edit after all");
+});
+
+test("[NUMMER-EENMALIG] a fresh open answer is what the confirmation acts on", async () => {
+  // The other direction: a stale `locked` must not suppress a genuinely open series either.
+  let rendered: NumberingState = { kind: "locked" };
+  const log: string[] = [];
+  const { read, settle } = handRead();
+
+  const pending = openWithFreshNumbering(
+    read,
+    (s) => { rendered = s; log.push(`apply:${s.kind}`); },
+    () => { log.push(`open:${firstSendNumbering(rendered)?.next ?? "no-offer"}`); },
+  );
+
+  assert.equal(rendered.kind, "unknown", "the stale answer survived into the new opening");
+  settle({ kind: "open", next: "046-2026", isCustom: false });
+  await pending;
+
+  assert.deepEqual(log, ["apply:unknown", "apply:open", "open:046-2026"]);
+  const notice = firstSendNumbering(rendered);
+  assert.ok(notice);
+  assert.equal(notice.next, "046-2026", "the confirmation shows a number from the wrong read");
+  assert.equal(notice.explainOnce, true);
+});
+
+test("[NUMMER-EENMALIG] a read that fails leaves an ordinary confirmation, not a blocked send", async () => {
+  // A failed read must cost the owner the numbering OFFER, never the ability to send. The opener
+  // still opens; firstSendNumbering just has nothing to give.
+  let rendered: NumberingState = { kind: "open", next: "20260001", isCustom: false };
+  let opened = false;
+  const fresh = await openWithFreshNumbering(
+    async () => ({ kind: "unknown" }),
+    (s) => { rendered = s; },
+    () => { opened = true; },
+  );
+  assert.deepEqual(fresh, { kind: "unknown" });
+  assert.equal(opened, true, "a failed numbering read blocked the confirmation, and with it the send");
+  assert.equal(firstSendNumbering(rendered), null, "a failed read still offered an edit door");
 });

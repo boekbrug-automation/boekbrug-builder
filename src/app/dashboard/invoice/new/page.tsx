@@ -22,7 +22,8 @@ import {
 // PARSEN, het zaaien en het uitgeven blijven bij /api/invoice/numbering en de verzendroute.
 import {
   classifyNumberingRead, classifyNumberingSave, firstSendNumbering,
-  numberingChangeRequested, saveAllowsSend as numberingSaveAllowsSend,
+  numberingChangeRequested, openWithFreshNumbering,
+  saveAllowsSend as numberingSaveAllowsSend,
   type NumberingState,
 } from '@/lib/numbering-first-send'
 // [NUMMER-EENMALIG] Dezelfde parser die de route AUTORITATIEF opnieuw draait — hier alleen voor de
@@ -1311,24 +1312,40 @@ function NewInvoicePageContent() {
   // stond, en "doorgaan met de standaard" blijft nul handelingen.
 
   /** De stand bij het MOMENT van beslissen — niet die van toen het scherm openging. */
-  async function verversNummerstand() {
-    if (invoiceType !== 'factuur') return
+  async function verversNummerstand(): Promise<NumberingState> {
+    if (invoiceType !== 'factuur') return { kind: 'unknown' }
     try {
       const res = await fetch('/api/invoice/numbering')
       const json = await res.json().catch(() => null)
-      setNumState(classifyNumberingRead(res.status, json))
+      return classifyNumberingRead(res.status, json)
     } catch {
       // Onbekend is de enige eerlijke uitkomst, en 'unknown' biedt niets aan.
-      setNumState({ kind: 'unknown' })
+      return { kind: 'unknown' }
     }
   }
 
-  function opendeBevestiging() {
+  /**
+   * [NUMMER-EENMALIG] Openen op een VERS gelezen stand, nooit op de vorige — en dat is een correctie.
+   *
+   * Dit deed `setShowSendConfirm(true)` en dáárna `void verversNummerstand()`, dus de eerste
+   * weergave van de dialoog gebruikte de stand van toen het scherm openging. Wie het scherm opende
+   * terwijl de reeks nog open was en verstuurde nadat er elders een nummer was uitgegeven, zag
+   * «Nummering aanpassen» boven een reeks die al vaststond. De POST weigerde dat wel, dus er kon
+   * niets stukgaan — maar het scherm leende een toestemming van een ouder antwoord, en dat is
+   * precies wat deze batch verbiedt. Bovendien kon de eigenaar bevestigen vóór de verse lezing
+   * binnen was, waardoor de eenmalige zin hem soms helemaal niet bereikte.
+   *
+   * De ordening zelf staat in openWithFreshNumbering, waar een test haar kan afdwingen: het oude
+   * antwoord gaat er eerst af, dan de lezing, dan pas de dialoog.
+   */
+  async function opendeBevestiging() {
     setNumOpen(false); setNumInput(''); setNumError('')
-    setShowSendConfirm(true)
-    // Bewust NIET afgewacht: de dialoog moet direct open, en tot het antwoord binnen is staat de
-    // nummerstand op wat hij was. Een trage GET mag de bevestiging niet ophouden.
-    void verversNummerstand()
+    setLoading(true)
+    await openWithFreshNumbering(
+      verversNummerstand,
+      setNumState,
+      () => { setLoading(false); setShowSendConfirm(true) },
+    )
   }
 
   /**
@@ -1503,7 +1520,7 @@ function NewInvoicePageContent() {
     // implementatie van de regels, één verkoperspoort, en de verkopercontrole staat nóg een keer
     // vlak voor het concept.
     if (mode === 'sent' && invoiceType === 'factuur' && !confirmed) {
-      opendeBevestiging()
+      await opendeBevestiging()
       return
     }
 
