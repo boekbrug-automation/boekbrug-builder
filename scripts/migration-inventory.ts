@@ -85,17 +85,17 @@ interface Probe {
  * Wat hier NIET thuishoort: een object dat gewoon ontbreekt. Dat hoort OPEN te heten.
  */
 const NIETS_BEWIJZEND: Record<string, { object: string; reden: string }[]> = {
-  "accountant_directory_requires_accountant_role.sql": [
+  "accountant_directory_publish_requires_client_link.sql": [
     {
       object: "accountant_directory_own_write",
       reden:
         "Deze policy BESTOND al — accountant_directory.sql maakt haar aan. Deze migratie VERVANGT " +
-        "haar body (er komt een rolcontrole bij) en houdt met opzet dezelfde naam: twee policies " +
-        "met dezelfde taak onder verschillende namen zou de DROP/CREATE-vorm zijn die elders in " +
-        "deze map juist de idempotente standaard is. Haar bestaan bewijst dus niets — het antwoord " +
-        "is 'ja, die staat er' ook op de dag VOORDAT deze migratie draaide. Wat wél alleen door " +
-        "deze migratie waar wordt is de INHOUD van de twee schrijfpolicies, en die staat in " +
-        "STAND_CONTROLE.",
+        "haar body (publiceren gaat op bewijs in plaats van op de zelfgekozen rol) en houdt met " +
+        "opzet dezelfde naam: twee policies met dezelfde taak onder verschillende namen zou de " +
+        "DROP/CREATE-vorm zijn die elders in deze map juist de idempotente standaard is. Haar " +
+        "bestaan bewijst dus niets — het antwoord is 'ja, die staat er' ook op de dag VOORDAT deze " +
+        "migratie draaide. Wat wél alleen door deze migratie waar wordt is de INHOUD van de twee " +
+        "schrijfpolicies, en die staat in STAND_CONTROLE.",
     },
     {
       object: "accountant_directory_own_update",
@@ -230,33 +230,43 @@ const GELIJKE_BODY_NIEUWSTE: Record<string, { nieuwste: string; kopieen: string[
 };
 
 const STAND_CONTROLE: Record<string, Stand> = {
-  "accountant_directory_requires_accountant_role.sql": {
+  "accountant_directory_publish_requires_client_link.sql": {
     soort: "controle",
     vraag:
-      "alleen een boekhouder kan een kantoorvermelding aanmaken of publiceren, en niemand zit " +
-      "vast in een vermelding die hij niet meer weg kan halen",
-    // Drie onafhankelijke helften, want elke helft is los terug te draaien zonder dat de andere
-    // twee het merken:
-    //   · de twee SCHRIJFpolicies moeten de rolvraag stellen — zonder dat schrijft elke ingelogde
-    //     ondernemer zich via de Data API in de lijst van kantoren;
-    //   · DELETE moet hem JUIST NIET stellen — een rolcontrole daar sluit een gedegradeerd kantoor
-    //     op in een openbare vermelding die het niet meer kan weghalen, en dat is erger dan het
-    //     gat dat deze migratie dicht doet;
-    //   · de publieke leesregel mag niet zijn meebewogen: anon leest gepubliceerde rijen, en niets
-    //     anders.
+      "een kantoorvermelding wordt alleen openbaar op BEWIJS — een bevestigde klantkoppeling — " +
+      "en niet op de zelfgekozen profiles.role, en niemand zit vast in een vermelding die hij " +
+      "niet meer weg kan halen",
+    // Vier onafhankelijke helften, want elke helft is los terug te draaien zonder dat de andere
+    // drie het merken:
+    //   · de twee SCHRIJFpolicies moeten op accountant_clients leunen — zonder dat publiceert
+    //     elke ingelogde ondernemer zich via de Data API in de lijst van kantoren;
+    //   · ze mogen JUIST NIET op profiles leunen. profiles.role is een zelfverklaring die de
+    //     eigenaar zelf mag schrijven (profiles_update_own, geen kolomgrens), dus een policy die
+    //     hem uitleest bewijst alleen wat de gebruiker over zichzelf heeft ingevuld. Deze regel
+    //     staat er omdat precies die versie eerst geschreven is;
+    //   · DELETE moet geen bewijs eisen — anders zit een kantoor dat zijn laatste klant verliest
+    //     opgesloten in een openbare vermelding die het niet meer kan weghalen;
+    //   · en accountant_clients moet ZELF onvervalsbaar blijven: alleen SELECT en DELETE. Komt
+    //     daar ooit een INSERT- of UPDATE-policy bij, dan is het bewijs weer een zelfverklaring
+    //     en valt de hele grens hierboven stilletjes om. Dat is de dragende AFWEZIGHEID.
     // Gemeten op de policy-EXPRESSIE, niet op de naam: de namen zijn hier juist ongewijzigd.
     sql: `(select count(*) from pg_policy
              where polrelid = 'public.accountant_directory'::regclass
                and polcmd in ('a', 'w')
-               and pg_get_expr(polwithcheck, polrelid) like '%profiles%') = 2
+               and pg_get_expr(polwithcheck, polrelid) like '%accountant_clients%') = 2
+          and not exists (
+            select 1 from pg_policy
+             where polrelid = 'public.accountant_directory'::regclass
+               and polcmd in ('a', 'w')
+               and pg_get_expr(polwithcheck, polrelid) like '%profiles%')
           and not exists (
             select 1 from pg_policy
              where polrelid = 'public.accountant_directory'::regclass and polcmd = 'd'
-               and pg_get_expr(polqual, polrelid) like '%profiles%')
-          and exists (
+               and pg_get_expr(polqual, polrelid) like '%accountant_clients%')
+          and not exists (
             select 1 from pg_policy
-             where polrelid = 'public.accountant_directory'::regclass and polcmd = 'r'
-               and pg_get_expr(polqual, polrelid) = 'published')`,
+             where polrelid = 'public.accountant_clients'::regclass
+               and polcmd in ('a', 'w'))`,
   },
   "bank_transactions_column_grant.sql": {
     soort: "controle",

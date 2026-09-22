@@ -727,19 +727,24 @@ with controle(bestand, vraag, toegepast) as (
       and policyname = 'accountant_clients_update')
   )
   union all
-  select 'accountant_directory_requires_accountant_role.sql'::text, 'alleen een boekhouder kan een kantoorvermelding aanmaken of publiceren, en niemand zit vast in een vermelding die hij niet meer weg kan halen'::text, (
+  select 'accountant_directory_publish_requires_client_link.sql'::text, 'een kantoorvermelding wordt alleen openbaar op BEWIJS — een bevestigde klantkoppeling — en niet op de zelfgekozen profiles.role, en niemand zit vast in een vermelding die hij niet meer weg kan halen'::text, (
     (select count(*) from pg_policy
        where polrelid = 'public.accountant_directory'::regclass
          and polcmd in ('a', 'w')
-         and pg_get_expr(polwithcheck, polrelid) like '%profiles%') = 2
+         and pg_get_expr(polwithcheck, polrelid) like '%accountant_clients%') = 2
+    and not exists (
+      select 1 from pg_policy
+       where polrelid = 'public.accountant_directory'::regclass
+         and polcmd in ('a', 'w')
+         and pg_get_expr(polwithcheck, polrelid) like '%profiles%')
     and not exists (
       select 1 from pg_policy
        where polrelid = 'public.accountant_directory'::regclass and polcmd = 'd'
-         and pg_get_expr(polqual, polrelid) like '%profiles%')
-    and exists (
+         and pg_get_expr(polqual, polrelid) like '%accountant_clients%')
+    and not exists (
       select 1 from pg_policy
-       where polrelid = 'public.accountant_directory'::regclass and polcmd = 'r'
-         and pg_get_expr(polqual, polrelid) = 'published')
+       where polrelid = 'public.accountant_clients'::regclass
+         and polcmd in ('a', 'w'))
   )
   union all
   select 'accountant_guard_fixed_search_path.sql'::text, 'de bedragbewaker draait met een vast zoekpad'::text, (
@@ -969,9 +974,9 @@ where direction = 'incoming'
 -- Ze staan in NIETS_BEWIJZEND in scripts/migration-inventory.ts. Een object dat gewoon
 -- ontbreekt hoort daar NIET in: dat hoort OPEN te heten.
 --
---   accountant_directory_requires_accountant_role.sql → accountant_directory_own_write
---       Deze policy BESTOND al — accountant_directory.sql maakt haar aan. Deze migratie VERVANGT haar body (er komt een rolcontrole bij) en houdt met opzet dezelfde naam: twee policies met dezelfde taak onder verschillende namen zou de DROP/CREATE-vorm zijn die elders in deze map juist de idempotente standaard is. Haar bestaan bewijst dus niets — het antwoord is 'ja, die staat er' ook op de dag VOORDAT deze migratie draaide. Wat wél alleen door deze migratie waar wordt is de INHOUD van de twee schrijfpolicies, en die staat in STAND_CONTROLE.
---   accountant_directory_requires_accountant_role.sql → accountant_directory_own_update
+--   accountant_directory_publish_requires_client_link.sql → accountant_directory_own_write
+--       Deze policy BESTOND al — accountant_directory.sql maakt haar aan. Deze migratie VERVANGT haar body (publiceren gaat op bewijs in plaats van op de zelfgekozen rol) en houdt met opzet dezelfde naam: twee policies met dezelfde taak onder verschillende namen zou de DROP/CREATE-vorm zijn die elders in deze map juist de idempotente standaard is. Haar bestaan bewijst dus niets — het antwoord is 'ja, die staat er' ook op de dag VOORDAT deze migratie draaide. Wat wél alleen door deze migratie waar wordt is de INHOUD van de twee schrijfpolicies, en die staat in STAND_CONTROLE.
+--   accountant_directory_publish_requires_client_link.sql → accountant_directory_own_update
 --       Zelfde verhaal als accountant_directory_own_write hierboven: bestond al, wordt vervangen, houdt zijn naam. De vraag die er wél toe doet staat in STAND_CONTROLE.
 --   bank_transactions_column_grant.sql → bank_transactions_update_own
 --       Deze policy BESTOND al — ze komt uit de oorspronkelijke dashboard-opzet en staat in geen enkele migratie, net als de basispolicies van invoices. De migratie maakt haar opnieuw aan omdat ze de hele vorm wil opschrijven die ze achterlaat, niet omdat ze nieuw is. Haar bestaan bewijst dus niets: op productie is het antwoord 'ja, die staat er' ook op de dag VOORDAT deze migratie ooit draaide. Wat wél alleen door deze migratie waar wordt, is de STAND eronder — het kolom-recht en de verdwenen delete-policy — en die staat in STAND_CONTROLE.

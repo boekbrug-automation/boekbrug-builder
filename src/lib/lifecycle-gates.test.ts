@@ -34004,68 +34004,112 @@ test("[KANTOORGIDS-TAAL] the repo carries the language contract the database alr
 });
 
 
-// ─── [KANTOORGIDS-ROL] Only an accountant establishes or publishes a listing ──────────────────
+// ─── [KANTOORGIDS-BEWIJS] A listing goes public on evidence, never on a self-declaration ──────
 //
 // /boekhouders is headed "Boekhouders die met BoekBrug werken". Its write policies asked only
 // `accountant_id = auth.uid()`, which proves ownership and not profession — and the foreign key
 // does not help, because `REFERENCES profiles(id)` says the id is a real profile, never that the
-// profile is an accountant's. /api/kantoorgids checks the role, but a route is one door and the
-// Data API is another: the anon key ships in every browser and PostgREST takes a POST on this
-// table directly.
+// profile is an office's. /api/kantoorgids checks the role, but a route is one door and the Data
+// API is another: the anon key ships in every browser and PostgREST takes a POST on this table.
 //
-// This gate holds the SHAPE of the repair in the repository. It cannot prove the database refuses
-// anything — no static read can — and it does not pretend to: the behaviour is proven by attempt
-// in tests/sql/accountant_directory_rls.test.sql, against a real PostgreSQL with RLS on. This gate
-// exists so the migration and that proof cannot quietly drift apart.
-test("[KANTOORGIDS-ROL] the write boundary asks for the role, and traps nobody in a listing", () => {
+// THE FIRST FIX FOR THAT WAS WRONG, AND THIS GATE EXISTS MOSTLY TO KEEP IT FROM COMING BACK.
+// It tested `profiles.role = 'accountant'` — which the profile's own owner may write.
+// profiles_update_own carries no column restriction and UPDATE is granted on every column, so the
+// whole guard was one self-UPDATE away from nothing:
+//
+//     UPDATE profiles SET role = 'accountant' WHERE id = auth.uid();   -- permitted, today
+//     INSERT INTO accountant_directory (...) VALUES (..., published => true);
+//
+// ai_spend_guard.sql had already settled this for the paywall, and its reasoning is why the
+// obvious repair — guard the column — is not taken here either. It was written, tested and
+// rejected as BOTH breaking and useless: six legitimate paths write profiles.role with the user's
+// own session client, and /register has a role picker that hands out 'accountant' at signup
+// anyway. A self-declaration cannot be made trustworthy by guarding one of its doors.
+//
+// So the boundary rests where that migration put it: EVIDENCE. A row in accountant_clients naming
+// this caller as the accountant, which no session can write — that table has a SELECT policy and
+// a DELETE policy and nothing else, by two deliberate removals.
+//
+// This gate holds the SHAPE of that in the repository. It cannot prove the database refuses
+// anything, and does not pretend to: the behaviour is proven by attempt in
+// tests/sql/accountant_directory_rls.test.sql, which runs the full bypass — self-promote, then
+// publish — against a real PostgreSQL.
+test("[KANTOORGIDS-BEWIJS] publishing rests on the client link, never on the self-declared role", () => {
   const migratie = readFileSync(
-    "supabase/migrations/accountant_directory_requires_accountant_role.sql", "utf8");
-  // The DDL alone, with the `--` comments cut away. Every doesNotMatch below MUST read this and
-  // not the file: a migration that explains in prose why it does NOT use a SECURITY DEFINER
-  // helper contains the words "SECURITY DEFINER", and a gate that reads the comments fails on the
-  // reasoning rather than on the code. That is the same shape as [STRIPPER-BLIND] above, arriving
-  // from the other side — there a stripper ate code and made gates pass vacuously, here unstripped
-  // prose makes one fail honestly but for the wrong reason. Either way the gate stops measuring
-  // what it claims to.
+    "supabase/migrations/accountant_directory_publish_requires_client_link.sql", "utf8");
+  // The DDL alone, with the `--` comments cut away. Every assertion below MUST read this and not
+  // the file: a migration that explains at length why it does NOT trust `profiles.role` and does
+  // NOT use a SECURITY DEFINER helper contains both phrases, and a gate reading the comments
+  // measures the reasoning instead of the code. Same shape as [STRIPPER-BLIND] above, arriving
+  // from the other side.
   const ddl = migratie.split("\n").map((r) => r.replace(/--.*$/, "")).join("\n");
 
-  // Both WRITE policies carry the role test…
+  // The two write policy BODIES, cut on real code. Scoped deliberately: the assertions below are
+  // about what a policy READS, and the table's own COMMENT names profiles.role in order to say
+  // that the boundary is not built on it — true documentation that a whole-file match would
+  // read as the very thing it warns against.
+  const policyBodies: string[] = [];
   for (const beleid of ["accountant_directory_own_write", "accountant_directory_own_update"]) {
-    const start = migratie.indexOf(`CREATE POLICY ${beleid}`);
+    const start = ddl.indexOf(`CREATE POLICY ${beleid}`);
     assert.ok(start > 0, `${beleid} is no longer redefined — the hole is open again`);
-    const venster = migratie.slice(start, migratie.indexOf("COMMENT ON TABLE", start));
-    assert.ok(venster.length > 0 && venster.length < 1200,
-      `the window for ${beleid} did not close on real code`);
-    assert.match(venster, /p\.role = 'accountant'/,
-      `${beleid} no longer proves the writer is an accountant`);
+    const eind = ddl.indexOf(");", ddl.indexOf("WITH CHECK", start));
+    assert.ok(eind > start, `the window for ${beleid} did not close on real code`);
+    const venster = ddl.slice(start, eind);
+    assert.ok(venster.length < 1400, `the window for ${beleid} ran past the policy`);
+    policyBodies.push(venster);
+
+    // It rests on the evidence…
+    assert.match(venster, /FROM public\.accountant_clients ac\s+WHERE ac\.accountant_id = \(select auth\.uid\(\)\)/,
+      `${beleid} no longer proves the caller is somebody's accountant`);
   }
 
-  // …and DELETE deliberately does NOT. A role test there strands every listing whose office is no
-  // longer an accountant: public, and impossible for its own owner to take down. That is worse
-  // than the hole this migration closes, so its absence is asserted rather than assumed.
+  // …and on NOTHING the caller can write about themselves. This is the assertion that would have
+  // caught the first version of this migration, so it is stated as its own refusal rather than
+  // left implied by the one above.
+  for (const venster of policyBodies) {
+    assert.doesNotMatch(venster, /profiles/,
+      "a directory write policy reads profiles again — profiles.role is a self-declaration its own " +
+      "owner may UPDATE, so a policy resting on it proves only what the user typed about themselves");
+    assert.doesNotMatch(venster, /role\s*=\s*'accountant'/,
+      "the write boundary tests the self-declared role again — see ai_spend_guard.sql");
+  }
+
+  // The load-bearing ABSENCE: accountant_clients takes no session write. If any migration ever
+  // grants one, the evidence becomes forgeable and this whole boundary silently becomes a
+  // self-declaration again — with no other gate able to see it.
+  const migraties = readdirSync("supabase/migrations").filter((f) => f.endsWith(".sql"));
+  for (const f of migraties) {
+    const sql = readFileSync(`supabase/migrations/${f}`, "utf8")
+      .split("\n").map((r) => r.replace(/--.*$/, "")).join("\n");
+    assert.doesNotMatch(sql,
+      /CREATE POLICY[^;]*ON public\.accountant_clients\s+FOR (INSERT|UPDATE)/i,
+      `${f} gives accountant_clients a session write policy — that makes the directory's evidence ` +
+      "forgeable. Linking must stay service-role-only, through the e-mail-verified accept route.");
+  }
+
+  // DELETE deliberately does NOT ask for evidence. An office that loses its last client would
+  // otherwise be stranded in a public listing it cannot take down — worse than the hole this
+  // closes. Same for unpublishing, which is why the check is gated on the row coming out published.
   assert.doesNotMatch(ddl, /CREATE POLICY accountant_directory_own_delete/,
-    "the delete policy was redefined — an office that stops being an accountant must always be " +
-    "able to remove its own listing");
+    "the delete policy was redefined — an office must always be able to remove its own listing");
+  const updatePolicy = ddl.slice(ddl.indexOf("CREATE POLICY accountant_directory_own_update"));
+  assert.match(updatePolicy, /NOT published\s*\n?\s*OR EXISTS/,
+    "the update policy no longer lets an office unpublish without evidence — that traps a listing");
 
-  // Unpublishing is never blocked either: the UPDATE check is gated on the row coming out
-  // PUBLISHED, so setting published = false passes whatever the role.
-  assert.match(ddl, /NOT published\s*\n?\s*OR EXISTS/,
-    "the update policy no longer lets a non-accountant unpublish — that traps a live listing");
-
-  // No SECURITY DEFINER was introduced. F asked for the smallest safe repair, and a plain EXISTS
-  // over profiles is enough because the caller only needs their OWN row, which profiles_select_own
-  // already admits. A helper here would add an owner, a signature, a search_path and four EXECUTE
-  // grants to reason about, for nothing.
+  // No SECURITY DEFINER was introduced. A plain EXISTS is enough because the caller needs only
+  // rows that name them, which accountant_clients_select already admits.
   assert.doesNotMatch(ddl, /SECURITY DEFINER/,
     "a SECURITY DEFINER helper appeared — if it is genuinely needed, its grants need reviewing too");
 
-  // And the proof by attempt exists, naming this migration. A shape gate without it proves only
-  // that someone typed the right words.
+  // And the proof by attempt exists, naming this migration AND running the bypass. A shape gate
+  // without it proves only that someone typed the right words.
   const seam = readFileSync("tests/sql/accountant_directory_rls.test.sql", "utf8");
-  assert.match(seam, /^-- migrations:.*accountant_directory_requires_accountant_role\.sql/m,
+  assert.match(seam, /^-- migrations:.*accountant_directory_publish_requires_client_link\.sql/m,
     "the SQL contract test no longer loads the authorization migration");
-  assert.match(seam, /an ondernemer INSERTED a directory listing/,
-    "the contract test no longer tries the write that the hole allowed");
+  assert.match(seam, /UPDATE public\.profiles SET role = 'accountant'/,
+    "the contract test no longer performs the self-promotion — the bypass is untested again");
+  assert.match(seam, /SELF-PROMOTION BYPASS/,
+    "the contract test no longer asserts that self-promotion buys nothing");
 });
 
 

@@ -358,7 +358,7 @@ WITH repo(name) AS (VALUES
   ('accountant_clients_update_consent'),
   ('accountant_confirm_mandate'),
   ('accountant_directory'),
-  ('accountant_directory_requires_accountant_role'),
+  ('accountant_directory_publish_requires_client_link'),
   ('accountant_directory_talen'),
   ('accountant_discount_guard'),
   ('accountant_guard_fixed_search_path'),
