@@ -4280,9 +4280,9 @@ test("[OFFERTE-EEN-KNOP] the offerte's two buttons exist because they now genuin
   assert.ok(einde > begin, "the window's end marker is gone or moved — the slice would run to the end of the file");
   const body = page.slice(begin, einde);
   assert.ok(body.length > 500, "the handleSubmit slice is real");
-  // `mode` branches exactly FOUR times: the signature, the seller gate, the minting-route
-  // exclusion, and the offerte-send branch. A fifth is a new path nobody gated — reconsider,
-  // never ignore.
+  // `mode` branches exactly FIVE times: the signature, the seller gate, the CONFIRMATION gate,
+  // the minting-route exclusion, and the offerte-send branch. A sixth is a new path nobody gated
+  // — reconsider, never ignore.
   //
   // The fourth arrived with [VERKOPER-COMPLEET] and was looked at rather than counted away: it
   // carries the SAME condition as the minting exclusion (`'sent'` and not an offerte), placed
@@ -4291,10 +4291,27 @@ test("[OFFERTE-EEN-KNOP] the offerte's two buttons exist because they now genuin
   // through which door — the two asserts below still hold — and it must stay narrow: running the
   // gate on a DRAFT would demand a complete profile to save a concept, and running it on an
   // OFFERTE would demand it for a document that carries no number and no legal obligation.
+  //
+  // The fifth is [NUMMER-EENMALIG], and it is a FIX rather than a feature. The send confirmation
+  // used to be the first thing the factuur button did, which put an optional numbering write in
+  // front of every check that can refuse the send — and seed_invoice_counter is one-way, so a
+  // failed attempt left a permanent numbering floor on a series that had never issued anything.
+  // The confirmation is now opened from inside this function, after the validations and after the
+  // seller gate, and `confirmed` is what the second pass carries back. Its own reachability chain
+  // is asserted in the [NUMMER-EENMALIG] gate in surface-audit-gates.test.ts; here it only has to
+  // stay narrow, which the factuur-only assert below pins.
   assert.equal(
-    [...body.matchAll(/\bmode\b/g)].length, 4,
-    "`mode` appears in the signature, the seller gate, the minting exclusion, and the " +
-      "offerte-send branch. Another use means a new path this gate has never seen",
+    [...body.matchAll(/\bmode\b/g)].length, 5,
+    "`mode` appears in the signature, the seller gate, the confirmation gate, the minting " +
+      "exclusion, and the offerte-send branch. Another use means a new path this gate has never seen",
+  );
+  // [NUMMER-EENMALIG] The confirmation gate is for a FACTUUR only. A creditnota goes out without
+  // one (it always did) and an offerte mints no number, so neither may be routed through a dialog
+  // about a numbering series it does not draw from.
+  assert.match(
+    body, /if \(mode === 'sent' && invoiceType === 'factuur' && !confirmed\)/,
+    "the confirmation gate lost its narrow condition — a creditnota or an offerte would now be " +
+      "held behind a numbering dialog",
   );
   assert.match(
     body, /if \(mode === 'sent' && invoiceType !== 'offerte'\)/,

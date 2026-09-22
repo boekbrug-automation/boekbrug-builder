@@ -836,8 +836,12 @@ test("[NUMMER-EENMALIG] the confirmation asks the authority, and never decides f
   assert.match(bevestig, /if \(!numberingSaveAllowsSend\(bewaard\)\)/, "a refused or failed numbering save may reach the send");
   inOrder(bevestig, "if (!numberingSaveAllowsSend(bewaard))", "setShowSendConfirm(false)",
     "bevestigVerzenden", "the dialog closes and sends before the numbering outcome is judged");
-  inOrder(bevestig, "const bewaard = classifyNumberingSave(res.status, json)", "await handleSubmit('sent')",
+  inOrder(bevestig, "const bewaard = classifyNumberingSave(res.status, json)", "await handleSubmit('sent', true)",
     "bevestigVerzenden", "the send runs before the numbering answer is read");
+  // It CONTINUES the same submit rather than starting a parallel one: `confirmed` is the flag that
+  // skips the confirmation on the second pass, and nothing else in the file may set it.
+  assert.equal([...page.matchAll(/handleSubmit\('sent', true\)/g)].length, 1,
+    "more than one place claims an already-confirmed send — the confirmation would be skippable from elsewhere");
   // Both refusal paths RETURN. A branch that only sets an error and falls through would show the
   // message and send the invoice anyway — which is the one outcome that cannot be undone. Asserted
   // by shape rather than by counting `return`s: a tally breaks on any harmless refactor and says
@@ -880,10 +884,10 @@ test("[NUMMER-EENMALIG] the numbering step sits before the send and changes noth
   assert.doesNotMatch(body, /numbering|numState|numInput/,
     "numbering leaked into handleSubmit — the choice belongs on the confirmation, not on the send path");
 
-  // A creditnota and an offerte reach handleSubmit without passing the confirmation at all, so the
-  // numbering notice may never be their business either.
-  assert.match(page, /if \(invoiceType === 'factuur'\) \{[\s\S]{0,300}opendeBevestiging\(\)/,
-    "the confirmation — and with it the numbering notice — is no longer limited to a factuur");
+  // A creditnota and an offerte never reach the confirmation, so the numbering notice is never
+  // their business either. The condition lives in the preflight now, not on the button.
+  assert.match(page, /if \(mode === 'sent' && invoiceType === 'factuur' && !confirmed\) \{\s*\n\s*opendeBevestiging\(\)\s*\n\s*return\s*\n\s*\}/,
+    "the confirmation gate lost its narrow condition, or no longer returns — a creditnota or an offerte would be sent through a numbering dialog");
   assert.match(page, /if \(invoiceType !== 'factuur'\) return/,
     "the refresh runs for a document that draws no number from this series");
 
@@ -901,4 +905,74 @@ test("[NUMMER-EENMALIG] the numbering step sits before the send and changes noth
     "invoice/new/page.tsx", "the notice is rendered above the confirmation it belongs to");
   inOrder(page, "data-nummer-eenmalig", "void bevestigVerzenden()",
     "invoice/new/page.tsx", "the notice sits below the confirmation's own send button — it has left the dialog");
+});
+
+// ─── [NUMMER-EENMALIG] A numbering write may only follow a passing preflight ──────────────────
+//
+// THE DEFECT THIS EXISTS FOR, in the shape it actually had. The confirmation used to be the FIRST
+// thing the factuur button did, so the flow was:
+//
+//     open confirmation → optional POST /api/invoice/numbering → handleSubmit → validations →
+//     verkoperPoort → draft → /api/invoice/send
+//
+// A numbering write could therefore land on a document that then failed validation or the seller
+// gate. And seed_invoice_counter is deliberately one-way — `last_seq = GREATEST(existing,
+// requested)` — so an owner who typed a number equivalent to sequence 100, hit a field error, and
+// afterwards wanted 45 could not get there: the floor had moved, on a series that had never issued
+// a single invoice. A failed attempt left a permanent change behind.
+//
+// The order is now: validations → verkoperPoort → confirmation → optional POST → draft → send.
+//
+// ── WHY THIS IS NOT A PLAIN inOrder OVER THE FILE ──
+// The ordering is no longer textual. `bevestigVerzenden` (which holds the POST) sits ABOVE
+// handleSubmit in the source, because handleSubmit calls back into it via the dialog. Source
+// position therefore proves nothing on its own. What CAN be proven is the reachability chain: the
+// POST lives in one function, that function is reached from one button, that button only exists
+// inside a dialog opened by one function, and that function is called from exactly one place —
+// inside handleSubmit, after the poort. Each link is a uniqueness count, so a second door anywhere
+// along it turns this red.
+test("[NUMMER-EENMALIG] the numbering write is reachable only after the validations and the seller gate", () => {
+  const page = code("src/app/dashboard/invoice/new/page.tsx");
+
+  // LINK 1 — the POST exists in exactly one place, and that place is bevestigVerzenden.
+  assert.equal([...page.matchAll(/invoice_start: numInput\.trim\(\)/g)].length, 1,
+    "the numbering write has a second call site");
+  const bevestig = between(page, "async function bevestigVerzenden()", "async function handleSubmit(mode:",
+    "the numbering write must live in the confirmation handler");
+  assert.match(bevestig, /invoice_start: numInput\.trim\(\)/, "the numbering write left the confirmation handler");
+
+  // LINK 2 — bevestigVerzenden is reached from exactly one control, and it is inside the dialog.
+  assert.equal([...page.matchAll(/bevestigVerzenden\(\)/g)].length, 2,
+    "bevestigVerzenden has more than its declaration and the confirmation's own button");
+  inOrder(page, "{showSendConfirm && (", "void bevestigVerzenden()",
+    "invoice/new/page.tsx", "the confirm handler is invoked from outside the confirmation");
+
+  // LINK 3 — the dialog can only be opened by opendeBevestiging, from exactly one place.
+  assert.equal([...page.matchAll(/setShowSendConfirm\(true\)/g)].length, 1,
+    "something other than opendeBevestiging opens the confirmation — a numbering dialog would be reachable without a preflight");
+  const opener = between(page, "function opendeBevestiging()", "async function bevestigVerzenden()",
+    "the one opener must sit above the confirm handler");
+  assert.match(opener, /setShowSendConfirm\(true\)/, "the opener no longer opens the dialog");
+  assert.equal([...page.matchAll(/opendeBevestiging\(\)/g)].length, 2,
+    "opendeBevestiging is called from more than one place — only the preflight may open the confirmation");
+
+  // LINK 4 — and that one call sits inside handleSubmit, AFTER the field validations and AFTER the
+  // seller gate. This is the assertion the defect would have failed.
+  const body = between(page, "async function handleSubmit(mode:", "const cfg = TYPE_CONFIG[invoiceType]",
+    "the confirmation must be opened from inside the preflight");
+  assert.match(body, /opendeBevestiging\(\)/, "the preflight no longer opens the confirmation");
+  inOrder(body, "setFieldErrors({ ...errs, lines: lineErrs })", "const poort = await verkoperPoort()",
+    "handleSubmit", "the seller gate runs before the ordinary field validation has spoken");
+  inOrder(body, "const poort = await verkoperPoort()", "opendeBevestiging()",
+    "handleSubmit", "THE DEFECT: the confirmation — and with it the numbering write — is reachable before the seller gate");
+  inOrder(body, "opendeBevestiging()", "await fetch('/api/invoice/draft'",
+    "handleSubmit", "the draft is created before the confirmation is answered");
+  inOrder(body, "await fetch('/api/invoice/draft'", "await fetch('/api/invoice/send'",
+    "handleSubmit", "the send door is called before the draft exists");
+
+  // And the button no longer decides any of this: one entry for all three document types.
+  assert.doesNotMatch(page, /if \(invoiceType === 'factuur'\) \{\s*\n\s*opendeBevestiging/,
+    "the button opens the confirmation directly again, skipping the preflight entirely");
+  assert.match(page, /setShowSendConfirm\(true\)\s*\n[\s\S]{0,400}?void verversNummerstand\(\)/,
+    "the opener no longer refreshes the lock state after opening");
 });

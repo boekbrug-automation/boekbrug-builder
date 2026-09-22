@@ -1368,12 +1368,14 @@ function NewInvoicePageContent() {
     }
 
     setShowSendConfirm(false)
-    await handleSubmit('sent')
+    // Dezelfde weg, tweede doorloop: de controles en de verkoperspoort draaien opnieuw en slaan
+    // deze keer de bevestiging over. Geen tweede implementatie van iets.
+    await handleSubmit('sent', true)
   }
 
   // ─── Main submit ───────────────────────────────────────────────────────────
 
-  async function handleSubmit(mode: 'draft' | 'sent') {
+  async function handleSubmit(mode: 'draft' | 'sent', confirmed = false) {
     // [BOEK-031] wait for lines to load from DB before submitting — May 2026
     if (linesLoading) return
     // [BOEK-031] Validate all fields at once — show red borders — May 2026
@@ -1481,6 +1483,28 @@ function NewInvoicePageContent() {
       const poort = await verkoperPoort()
       setLoading(false)
       if (poort === 'stop') return
+    }
+
+    // [NUMMER-EENMALIG] De bevestiging is een POORT, niet het beginpunt — en dat is een correctie.
+    //
+    // Ze stond vóór dit alles: de knop opende haar en pas daarna liep handleSubmit. Dan kan een
+    // nummerwijziging worden weggeschreven voor een factuur die het niet haalt, en
+    // seed_invoice_counter is met opzet EENRICHTINGSVERKEER —
+    // last_seq = GREATEST(bestaand, gevraagd). Wie 100 intikt, een veldfout krijgt en daarna 45
+    // wil, kan niet meer terug: de vloer staat. Een mislukte poging liet dus een blijvende
+    // wijziging achter in een reeks waar nog nooit een factuur uit is gegaan.
+    //
+    // Nu staat ze hier: ná de gewone factuurcontroles en ná de verkoperspoort van
+    // [VERKOPER-COMPLEET]. Alles wat een verzending kan tegenhouden, heeft dan al gesproken, en
+    // een nummerschrijving volgt alleen op een document dat écht klaar is.
+    //
+    // `confirmed` komt terug van bevestigVerzenden(). Dezelfde functie, tweede doorloop: de
+    // controles en de poort zijn zuivere/idempotente leesacties, dus ze draaien opnieuw — één
+    // implementatie van de regels, één verkoperspoort, en de verkopercontrole staat nóg een keer
+    // vlak voor het concept.
+    if (mode === 'sent' && invoiceType === 'factuur' && !confirmed) {
+      opendeBevestiging()
+      return
     }
 
     setLoading(true); setError('')
@@ -2574,13 +2598,11 @@ function NewInvoicePageContent() {
                   // [FACTUUR-A] Factuur send is irreversible (number consumed
                   // + e-mail with PDF delivered) → confirm first. Offerte and
                   // creditnota keep their existing direct flow.
-                  if (invoiceType === 'factuur') {
-                    // [NUMMER-EENMALIG] Opent de bevestiging en ververst de nummerstand — de stand
-                    // die telt is die van het moment van beslissen, niet van toen het scherm openging.
-                    opendeBevestiging()
-                  } else {
-                    handleSubmit('sent')
-                  }
+                  // [NUMMER-EENMALIG] Eén ingang voor alle drie de soorten. De knop opent de
+                  // bevestiging niet meer zelf: handleSubmit doet eerst de controles en de
+                  // verkoperspoort, en opent haar pas als een factuur er klaar voor is. Zo kan
+                  // geen nummerschrijving plaatsvinden voor een document dat het niet haalt.
+                  handleSubmit('sent')
                 }} disabled={loading || linesLoading} style={{ width: '100%', minHeight: 48, borderRadius: 9999, border: 'none', backgroundColor: loading || linesLoading ? '#9AA0A6' : cfg.primaryBtn, color: 'white', fontSize: 16, fontWeight: 600, cursor: loading || linesLoading ? 'not-allowed' : 'pointer', transition: 'all 0.15s cubic-bezier(0.4,0,0.2,1)' }}>
                   {linesLoading ? t('nieuw.actie.laden') : loading ? t('nieuw.actie.bezig') : invoiceType === 'factuur' ? `✉ ${t('nieuw.actie.versturen')}` : invoiceType === 'offerte' ? `✉ ${t('nieuw.actie.offerteVersturen')}` /* via send-offerte — never /api/invoice/send, see handleSubmit */ : `↩ ${t('lijst.versturen')}`}
                 </button>
