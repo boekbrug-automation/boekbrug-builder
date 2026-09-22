@@ -86,6 +86,17 @@ test("[VERKOPER-COMPLEET] the invoice form opens as an invoice form, with no com
     html, /href="\/dashboard\/settings"/,
     "the invoice form sends the owner to Instellingen to finish an invoice",
   );
+
+  // [NUMMER-EENMALIG] NOT asserted here, and the reason is worth writing down rather than leaving
+  // as a gap. The one-time numbering notice needs two things this harness cannot produce: a
+  // confirmation the owner opened, and a lock state fetched by an effect. renderToStaticMarkup
+  // gives neither, so "the notice is absent" is true here no matter what the code does — a
+  // mutation that starts the numbering state at `open` leaves this file green. An assertion that
+  // cannot fail is worse than no assertion, because it reads as coverage.
+  //
+  // Where it IS checked: every branch of the decision in numbering-first-send.test.ts, and the
+  // containment (notice inside the confirmation, never in the form body) in the [NUMMER-EENMALIG]
+  // wiring gate, which can see source order where a render cannot.
 });
 
 test("[VERKOPER-COMPLEET] the archive and carried-role doors reach the same form, unchanged", async () => {
