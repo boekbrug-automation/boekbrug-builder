@@ -11,6 +11,10 @@
 //   · clients.created_by         — same migration
 //   · invoice_lines.unit         — supabase/migrations/invoice_line_unit.sql (text, nullable)
 //   · accountant_directory       — supabase/migrations/accountant_directory.sql ([KANTOORGIDS])
+//   · accountant_directory.languages — supabase/migrations/accountant_directory_talen.sql
+//     ([KANTOORGIDS-TAAL]; text[] NOT NULL DEFAULT '{}'). Applied to production as migration
+//     20260913084506 on 2026-09-13, but absent from this file until the artifact was recovered —
+//     which is how the write route came to omit the column and every publish came back a 503.
 //   · plan_grants                — supabase/migrations/plan_grants.sql ([TOEKENNING])
 //   · bank_connections           — supabase/migrations/bank_connections.sql
 //   · bank_connection_accounts   — same migration (incl. identification_hash, [EB-ACCOUNT-IDENTITY])
@@ -110,6 +114,7 @@ export type Database = {
           city: string
           contact_email: string
           created_at: string
+          languages: string[]
           office_name: string
           published: boolean
           specialisms: string[]
@@ -122,6 +127,7 @@ export type Database = {
           city?: string
           contact_email?: string
           created_at?: string
+          languages?: string[]
           office_name?: string
           published?: boolean
           specialisms?: string[]
@@ -134,6 +140,7 @@ export type Database = {
           city?: string
           contact_email?: string
           created_at?: string
+          languages?: string[]
           office_name?: string
           published?: boolean
           specialisms?: string[]

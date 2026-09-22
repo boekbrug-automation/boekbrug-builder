@@ -47,7 +47,11 @@ test("[KANTOORGIDS] the office's own panel renders before anything has loaded", 
 
 test("[KANTOORGIDS] every field the panel offers is one the rules know about", () => {
   const html = renderToStaticMarkup(React.createElement(KantoorgidsPaneel));
-  for (const veld of ["kantoornaam", "plaats", "specialisaties", "mail", "site", "ruimte"]) {
+  for (const veld of ["kantoornaam", "plaats", "specialisaties", "mail", "site", "ruimte",
+                      // [KANTOORGIDS-TAAL] One checkbox per language the product speaks. Without
+                      // these the office cannot publish at all: the database refuses a published
+                      // listing that names no language.
+                      "taal-nl", "taal-en", "taal-ar", "taal-tr"]) {
     assert.match(html, new RegExp(`id="${veld}"`), `the panel lost the field ${veld}`);
   }
   // Publishing is one button and un-publishing is another: no single toggle that an office can
@@ -79,7 +83,10 @@ test("[KANTOORGIDS] the order the page renders is the module's order, availabili
   // Nothing in a rendered entry can carry a rank: the type has no field for one.
   assert.deepStrictEqual(
     Object.keys(gesorteerd[0]!).sort(),
-    ["acceptingClients", "accountantId", "city", "contactEmail", "officeName", "specialisms", "website"],
+    // [KANTOORGIDS-TAAL] `languages` joined the entry and was argued past this tripwire on the way
+    // in: it is what the office says it speaks, it is printed and never sorted on. The list stays
+    // so the next field has to be argued for too.
+    ["acceptingClients", "accountantId", "city", "contactEmail", "languages", "officeName", "specialisms", "website"],
     "a directory entry grew a field — check it is not a rank, a score or a paid position",
   );
 });
@@ -91,4 +98,30 @@ test("[KANTOORGIDS] a listing that cannot be reached is never publishable", () =
     accountantId: "a", officeName: "Kantoor", city: "Utrecht", contactEmail: "",
   });
   assert.ok(entryProblems(zonderMail).length > 0, "a listing with no e-mail passed as publishable");
+});
+
+test("[KANTOORGIDS-TAAL] the panel asks the language question, and answers none of it itself", () => {
+  const html = renderToStaticMarkup(React.createElement(KantoorgidsPaneel));
+
+  // The question is on the screen, and it says what it is for. An office that cannot find this
+  // field cannot publish at all — the database refuses a published listing that names no language.
+  assert.match(html, /In welke talen kun je ondernemers helpen\?/);
+  assert.match(html, /kies er minstens één/i, "the panel does not say a language is required");
+
+  // Each language in its own name, exactly as the language switch writes it — not translated, and
+  // not invented here.
+  for (const naam of ["Nederlands", "English", "العربية", "Türkçe"]) {
+    assert.ok(html.includes(naam), `the panel does not offer ${naam}`);
+  }
+
+  // And NOTHING is ticked on first paint. "Has not said" and "said Dutch" are different answers,
+  // and a pre-ticked box would put every office that never opened this form into the Dutch
+  // results while telling them they had chosen it.
+  assert.doesNotMatch(html, /id="taal-[a-z]{2}"[^>]*checked/,
+    "a language is pre-selected — the office is being made to say something it did not say");
+
+  // A closed set of checkboxes, never a text field: "Arabisch", "arabic", "العربية" and "AR" are
+  // four values for one language, and free text here is what makes a directory unmatchable.
+  assert.doesNotMatch(html, /id="taal-[a-z]{2}"[^>]*type="text"/,
+    "the language field became free text");
 });

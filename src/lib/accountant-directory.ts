@@ -28,6 +28,28 @@
 // it on, and can turn it off again — its name, its town and its e-mail are its own to publish,
 // and an accountant discovering their own listing they never made is an accountant who leaves.
 
+import { LOCALES, type Locale } from "./i18n/locale";
+
+/**
+ * [KANTOORGIDS-TAAL] The languages an office may say it works in.
+ *
+ * Exactly the languages the PRODUCT speaks, and derived from that list rather than repeated, so
+ * the gids can never offer one BoekBrug cannot serve a client in. The database holds the same set
+ * in `accountant_directory_languages_known`, written out literally because a CHECK cannot import;
+ * the [KANTOORGIDS-TAAL] gate asserts the two still agree, so adding a fifth locale goes red here
+ * instead of turning into a 503 the day an office picks it.
+ *
+ * Free text was the alternative and it cannot be matched: "Arabisch", "arabic", "العربية" and "AR"
+ * are four values for one language. An office that also speaks Polish says so in its specialisms,
+ * which are free text precisely because they carry no closed-set promise.
+ */
+export const DIRECTORY_LANGUAGES: readonly Locale[] = LOCALES;
+
+/** Is this one of the languages the gids knows? Narrows, so a caller can trust it after the check. */
+export function isDirectoryLanguage(value: string): value is Locale {
+  return (DIRECTORY_LANGUAGES as readonly string[]).includes(value);
+}
+
 /** What an office chose to show. Every field is typed by the office itself. */
 export interface DirectoryEntry {
   accountantId: string;
@@ -39,6 +61,17 @@ export interface DirectoryEntry {
   acceptingClients: boolean;
   contactEmail: string;
   website: string | null;
+  /**
+   * [KANTOORGIDS-TAAL] The languages this office says it can help an ondernemer in.
+   *
+   * Typed as `string[]` and not `Locale[]` on purpose. normaliseEntry takes untrusted input, and a
+   * code it does not know has to SURVIVE normalisation so that entryProblems can refuse it by
+   * name. Narrowing here would mean dropping the unknown value silently, and an office told
+   * nothing is an office that never learns why its listing will not save.
+   *
+   * Never read to sort. It is listing data, not a rank.
+   */
+  languages: readonly string[];
 }
 
 /** The most an office may put in each field. Long enough to be useful, short enough to be a list. */
@@ -61,7 +94,9 @@ export type DirectoryProblem =
   | "Naam van het kantoor is te lang"
   | "Plaats is te lang"
   | "Eén specialisatie is te lang"
-  | "Kies er maximaal zes";
+  | "Kies er maximaal zes"
+  | "Kies minstens één taal waarin je ondernemers kunt helpen"
+  | "Die taal kennen we niet";
 
 /**
  * Trim, drop the empties, and cap the list — before validation, so "  " is an empty field and not
@@ -75,6 +110,7 @@ export function normaliseEntry(raw: {
   acceptingClients?: boolean | null;
   contactEmail?: string | null;
   website?: string | null;
+  languages?: readonly (string | null | undefined)[] | null;
 }): DirectoryEntry {
   const text = (v: string | null | undefined): string => (typeof v === "string" ? v.trim() : "");
   const site = text(raw.website);
@@ -89,7 +125,43 @@ export function normaliseEntry(raw: {
     acceptingClients: raw.acceptingClients === true,
     contactEmail: text(raw.contactEmail).toLowerCase(),
     website: site.length > 0 ? site : null,
+    // [KANTOORGIDS-TAAL] Lower-cased and de-duplicated, and NOT filtered against the known set —
+    // an unknown code is carried through so entryProblems can name it.
+    //
+    // The cap is the size of the set PLUS ONE, and the plus one is load-bearing. Capping at
+    // exactly the set size swallows the very thing this list exists to report: a caller sending
+    // ['nl','en','ar','tr','xx'] would keep the four valid codes, drop 'xx', and the office would
+    // be told nothing was wrong. One slot more guarantees the opposite — any list with more
+    // distinct values than the set has MUST contain an unknown, so an unknown always survives the
+    // cap and always gets named. It still bounds the input, which is the cap's actual job:
+    // de-duplication already makes 'nl' ten thousand times into one.
+    //
+    // No default is chosen when the list is empty. Empty means "the office has not said", and the
+    // difference between that and "the office said Dutch" is the difference between a question
+    // unanswered and an answer we invented for them.
+    languages: [...new Set(
+      (raw.languages ?? [])
+        .map((l) => text(l).toLowerCase())
+        .filter((l) => l.length > 0),
+    )].slice(0, DIRECTORY_LANGUAGES.length + 1),
   };
+}
+
+/**
+ * [KANTOORGIDS-TAAL] What the database refuses whatever `published` says — so, what a DRAFT must
+ * already satisfy.
+ *
+ * There is exactly one such rule and the asymmetry is the database's, not a choice made here:
+ * `accountant_directory_languages_known` is unconditional, while
+ * `accountant_directory_published_has_language` is gated on `published`. An unknown code in a
+ * draft is therefore refused by Postgres with a 23514 the office cannot read, so it has to be
+ * refused here first, in a sentence.
+ *
+ * A draft may still be as EMPTY as it likes — that is what a draft is. This refuses wrong, never
+ * incomplete.
+ */
+export function draftProblems(entry: DirectoryEntry): DirectoryProblem[] {
+  return entry.languages.some((l) => !isDirectoryLanguage(l)) ? ["Die taal kennen we niet"] : [];
 }
 
 /**
@@ -97,6 +169,8 @@ export function normaliseEntry(raw: {
  *
  * Deliberately not a boolean: an office that is told "er klopt iets niet" goes looking, and an
  * office that goes looking on a form it filled in once does not come back to it.
+ *
+ * Includes draftProblems, so a caller that is publishing needs this one call and not two.
  */
 export function entryProblems(entry: DirectoryEntry): DirectoryProblem[] {
   const problems: DirectoryProblem[] = [];
@@ -120,6 +194,13 @@ export function entryProblems(entry: DirectoryEntry): DirectoryProblem[] {
   }
   if (entry.specialisms.some((s) => s.length > LIMITS.specialism)) problems.push("Eén specialisatie is te lang");
   if (entry.specialisms.length > LIMITS.specialisms) problems.push("Kies er maximaal zes");
+
+  // [KANTOORGIDS-TAAL] A published listing that names no language cannot answer the question the
+  // owner arrived with, so it would sit in the gids being passed over — worse for the office than
+  // not being listed. The database says the same in
+  // accountant_directory_published_has_language; this says it first, and in a sentence.
+  if (entry.languages.length === 0) problems.push("Kies minstens één taal waarin je ondernemers kunt helpen");
+  problems.push(...draftProblems(entry));
 
   return problems;
 }

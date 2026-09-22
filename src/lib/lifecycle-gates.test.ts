@@ -52,7 +52,11 @@ import { decide as decideAutonomy } from "./autonomy-scope";
 import { workDoneLedger as workDoneLedgerFor, estimateMinutes as estimateMinutesFor } from "./work-done";
 import { firstPaidBand, referralCeilingExclBtw, REFERRAL_RATE_HYPOTHESIS } from "./accountant-pricing";
 import { OFFICE_GETS as OFFICE_GETS_FOR, unavailableBenefits as unavailableBenefitsFor } from "./office-offer";
-import { normaliseEntry as normaliseEntryFor, entryProblems as entryProblemsFor } from "./accountant-directory";
+import {
+  normaliseEntry as normaliseEntryFor,
+  entryProblems as entryProblemsFor,
+  DIRECTORY_LANGUAGES as DIRECTORY_LANGUAGES_FOR,
+} from "./accountant-directory";
 import { grantStanding as grantStandingFor } from "./plan-grants";
 import {
   confirmed as confirmedFor, refused as refusedFor, unknown as unknownFor,
@@ -33886,7 +33890,11 @@ test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought i
     normaliseEntryFor({ accountantId: "x", officeName: "n", city: "c", contactEmail: "a@b.nl" }),
   ).sort();
   assert.deepStrictEqual(velden,
-    ["acceptingClients", "accountantId", "city", "contactEmail", "officeName", "specialisms", "website"],
+    // [KANTOORGIDS-TAAL] `languages` was reviewed against this tripwire on the way in and is
+    // listing data, not a rank: sortForOwner does not read it (asserted separately in the
+    // [KANTOORGIDS-TAAL] gate below), and the public page only prints it. The list stays here so
+    // the NEXT field still has to be argued for.
+    ["acceptingClients", "accountantId", "city", "contactEmail", "languages", "officeName", "specialisms", "website"],
     "a directory entry gained a field — check it is not a rank, a score or a paid position");
 
   // 2 — off by default, in the code and in the migration that outlives it.
@@ -33918,6 +33926,146 @@ test("[KANTOORGIDS] the office list refers work outwards, and cannot be bought i
   // "no accountant", and an owner whose links we could not read is not sent to the directory.
   assert.match(vragen, /linksKnown && !heeftBoekhouder && \(/,
     "the list is offered to owners who already have an accountant, which is noise on a done screen");
+});
+
+
+// ─── [KANTOORGIDS-TAAL] The repo knows every rule the database already enforces ───────────────
+//
+// This gate exists because of a specific, measured failure, and its whole job is to make that
+// failure impossible to repeat quietly.
+//
+// On 2026-09-13 migration 20260913084506 `accountant_directory_talen` was applied to production:
+// it added `languages`, restricted it to a closed set, and refused a PUBLISHED listing that names
+// none. Its artifact never reached this repository — it was written on a branch that was not
+// merged. So for nine days the repo described a ten-column table and the database had eleven, and
+// nothing in the entire gate set could see the difference, because every gate over this feature
+// reads the migration FILES and the file was not there to disagree.
+//
+// The consequence was not subtle. The write route knew nothing about the column, so it sent
+// `published = true` with `languages` at its '{}' default, and every publish an office attempted
+// violated the CHECK and came back as a bare 503. The directory held zero rows the whole time, and
+// the existing [KANTOORGIDS] gate above stayed green throughout.
+//
+// So this gate asserts the REPOSITORY carries the contract the database enforces. It is
+// deterministic and reads only files — no database connection, so it runs on a clean checkout
+// with an empty environment like every other gate here. Comparing the repo against a live
+// database is a separate, explicitly-run job (docs/WELKE_MIGRATIES_STAAN_ER.sql); ordinary CI must
+// never need production to go green.
+test("[KANTOORGIDS-TAAL] the repo carries the language contract the database already enforces", () => {
+  const migratie = readFileSync("supabase/migrations/accountant_directory_talen.sql", "utf8");
+
+  // 1 — the column and BOTH constraints, by name. These are the three objects production holds.
+  assert.match(migratie, /ADD COLUMN IF NOT EXISTS languages\s+text\[\]\s+NOT NULL DEFAULT '\{\}'/,
+    "the languages column left the migration");
+  assert.match(migratie, /accountant_directory_languages_known/, "the closed-set constraint is gone");
+  assert.match(migratie, /accountant_directory_published_has_language/,
+    "the constraint that refuses a published listing with no language is gone");
+
+  // 2 — THE DRIFT CATCHER. The database spells the closed set out literally, because a CHECK
+  //     cannot import; the domain derives it from the product's own locales. Adding a fifth locale
+  //     to locale.ts would therefore make the app offer a language the database refuses — a 23514
+  //     the office reads as "opslaan is niet gelukt", which is this batch's defect returning by a
+  //     different door. Asserting the two agree is what turns that into a red gate here instead.
+  const set = migratie.match(/languages <@ ARRAY\[([^\]]+)\]/);
+  assert.ok(set, "the closed-set CHECK no longer has a readable ARRAY literal");
+  const inDeDb = set![1]!.split(",").map((s) => s.trim().replace(/^'|'$/g, "")).sort();
+  assert.deepStrictEqual(inDeDb, [...DIRECTORY_LANGUAGES_FOR].sort(),
+    "the gids offers languages the database refuses, or refuses ones it offers — update the CHECK " +
+    "in accountant_directory_talen.sql and apply it before adding a locale");
+
+  // 3 — the route SENDS the column. This one line is the entire original defect: the upsert
+  //     payload had no `languages` key, so the column took its default and every publish failed.
+  const route = code("src/app/api/kantoorgids/route.ts");
+  assert.match(route, /languages:\s*\[\.\.\.entry\.languages\]/,
+    "the write route no longer sends languages — a published listing will take the '{}' default " +
+    "and violate accountant_directory_published_has_language, exactly as before");
+
+  // 4 — and validates on EVERY write, not only when publishing. accountant_directory_languages_known
+  //     is not conditional on `published`, so an unknown code in a DRAFT is refused by Postgres
+  //     too. A route that only checks when publishing turns that into an unreadable 503.
+  assert.match(route, /wantsPublished \? entryProblems\(entry\) : draftProblems\(entry\)/,
+    "a draft no longer has its languages checked — an unknown code becomes a bare 503");
+
+  // 5 — the public page names its columns. Every column of this table is anon-readable under the
+  //     published-only policy, so a select('*') publishes each future column with no review. That
+  //     is how `languages` itself became publicly readable before any screen knew it existed.
+  const pagina = code("src/app/boekhouders/page.tsx");
+  assert.match(pagina, /\.select\('accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, languages'\)/,
+    "the public gids no longer selects an explicit column list");
+  assert.doesNotMatch(pagina, /select\(\s*['"`]\*/, "the public gids selects * from a table anon can read");
+
+  // 6 — and language never reaches the order. The promise the whole directory rests on.
+  const puur = code("src/lib/accountant-directory.ts");
+  const sorteer = puur.slice(puur.indexOf("export function sortForOwner"));
+  assert.ok(sorteer.length > 0, "sortForOwner is gone");
+  assert.doesNotMatch(sorteer.slice(0, 600), /languages/,
+    "the ordering reads the language list — a field that moves the order is a lever, and a list " +
+    "with a lever is an advertisement");
+});
+
+
+// ─── [KANTOORGIDS-ROL] Only an accountant establishes or publishes a listing ──────────────────
+//
+// /boekhouders is headed "Boekhouders die met BoekBrug werken". Its write policies asked only
+// `accountant_id = auth.uid()`, which proves ownership and not profession — and the foreign key
+// does not help, because `REFERENCES profiles(id)` says the id is a real profile, never that the
+// profile is an accountant's. /api/kantoorgids checks the role, but a route is one door and the
+// Data API is another: the anon key ships in every browser and PostgREST takes a POST on this
+// table directly.
+//
+// This gate holds the SHAPE of the repair in the repository. It cannot prove the database refuses
+// anything — no static read can — and it does not pretend to: the behaviour is proven by attempt
+// in tests/sql/accountant_directory_rls.test.sql, against a real PostgreSQL with RLS on. This gate
+// exists so the migration and that proof cannot quietly drift apart.
+test("[KANTOORGIDS-ROL] the write boundary asks for the role, and traps nobody in a listing", () => {
+  const migratie = readFileSync(
+    "supabase/migrations/accountant_directory_requires_accountant_role.sql", "utf8");
+  // The DDL alone, with the `--` comments cut away. Every doesNotMatch below MUST read this and
+  // not the file: a migration that explains in prose why it does NOT use a SECURITY DEFINER
+  // helper contains the words "SECURITY DEFINER", and a gate that reads the comments fails on the
+  // reasoning rather than on the code. That is the same shape as [STRIPPER-BLIND] above, arriving
+  // from the other side — there a stripper ate code and made gates pass vacuously, here unstripped
+  // prose makes one fail honestly but for the wrong reason. Either way the gate stops measuring
+  // what it claims to.
+  const ddl = migratie.split("\n").map((r) => r.replace(/--.*$/, "")).join("\n");
+
+  // Both WRITE policies carry the role test…
+  for (const beleid of ["accountant_directory_own_write", "accountant_directory_own_update"]) {
+    const start = migratie.indexOf(`CREATE POLICY ${beleid}`);
+    assert.ok(start > 0, `${beleid} is no longer redefined — the hole is open again`);
+    const venster = migratie.slice(start, migratie.indexOf("COMMENT ON TABLE", start));
+    assert.ok(venster.length > 0 && venster.length < 1200,
+      `the window for ${beleid} did not close on real code`);
+    assert.match(venster, /p\.role = 'accountant'/,
+      `${beleid} no longer proves the writer is an accountant`);
+  }
+
+  // …and DELETE deliberately does NOT. A role test there strands every listing whose office is no
+  // longer an accountant: public, and impossible for its own owner to take down. That is worse
+  // than the hole this migration closes, so its absence is asserted rather than assumed.
+  assert.doesNotMatch(ddl, /CREATE POLICY accountant_directory_own_delete/,
+    "the delete policy was redefined — an office that stops being an accountant must always be " +
+    "able to remove its own listing");
+
+  // Unpublishing is never blocked either: the UPDATE check is gated on the row coming out
+  // PUBLISHED, so setting published = false passes whatever the role.
+  assert.match(ddl, /NOT published\s*\n?\s*OR EXISTS/,
+    "the update policy no longer lets a non-accountant unpublish — that traps a live listing");
+
+  // No SECURITY DEFINER was introduced. F asked for the smallest safe repair, and a plain EXISTS
+  // over profiles is enough because the caller only needs their OWN row, which profiles_select_own
+  // already admits. A helper here would add an owner, a signature, a search_path and four EXECUTE
+  // grants to reason about, for nothing.
+  assert.doesNotMatch(ddl, /SECURITY DEFINER/,
+    "a SECURITY DEFINER helper appeared — if it is genuinely needed, its grants need reviewing too");
+
+  // And the proof by attempt exists, naming this migration. A shape gate without it proves only
+  // that someone typed the right words.
+  const seam = readFileSync("tests/sql/accountant_directory_rls.test.sql", "utf8");
+  assert.match(seam, /^-- migrations:.*accountant_directory_requires_accountant_role\.sql/m,
+    "the SQL contract test no longer loads the authorization migration");
+  assert.match(seam, /an ondernemer INSERTED a directory listing/,
+    "the contract test no longer tries the write that the hole allowed");
 });
 
 

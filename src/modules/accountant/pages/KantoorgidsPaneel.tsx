@@ -15,7 +15,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { LIMITS, entryProblems, normaliseEntry } from '@/lib/accountant-directory'
+import { DIRECTORY_LANGUAGES, LIMITS, entryProblems, normaliseEntry } from '@/lib/accountant-directory'
+import { LOCALE_META } from '@/lib/i18n/locale'
 // [SERVER-ZIN] Een code is geen zin: wat de route stuurt gaat hier langs failureText, dat een
 // Nederlandse zin doorlaat en een machinewoord vervangt door wat dit scherm zelf zegt.
 import { failureText } from '@/lib/server-message'
@@ -45,6 +46,10 @@ export default function KantoorgidsPaneel() {
   const [acceptingClients, setAcceptingClients] = useState(false)
   const [contactEmail, setContactEmail] = useState('')
   const [website, setWebsite] = useState('')
+  // [KANTOORGIDS-TAAL] Begint leeg, en blijft leeg tot het kantoor zelf aanvinkt. Geen enkele taal
+  // staat voorgeselecteerd — ook Nederlands niet: "nog niet gezegd" en "zei Nederlands" zijn twee
+  // verschillende antwoorden, en het tweede is niet aan ons om in te vullen.
+  const [languages, setLanguages] = useState<string[]>([])
   const [published, setPublished] = useState(false)
 
   const [laden, setLaden] = useState(true)
@@ -71,6 +76,7 @@ export default function KantoorgidsPaneel() {
           setAcceptingClients(json.entry.acceptingClients === true)
           setContactEmail(json.entry.contactEmail ?? '')
           setWebsite(json.entry.website ?? '')
+          setLanguages(Array.isArray(json.entry.languages) ? json.entry.languages : [])
         }
         setPublished(json?.published === true)
       } catch {
@@ -92,8 +98,9 @@ export default function KantoorgidsPaneel() {
         acceptingClients,
         contactEmail,
         website,
+        languages,
       }),
-    [officeName, city, specialisms, acceptingClients, contactEmail, website],
+    [officeName, city, specialisms, acceptingClients, contactEmail, website, languages],
   )
 
   const bewaar = async (wilPubliceren: boolean) => {
@@ -101,6 +108,10 @@ export default function KantoorgidsPaneel() {
 
     // Dezelfde controle als de route, vóór het versturen — zodat het kantoor de zin bij het veld
     // ziet in plaats van na een rondje langs de server.
+    //
+    // Alleen bij publiceren: een concept mag zo onaf zijn als het wil. De taalcontrole die ÓÓK
+    // voor een concept geldt (een onbekende code) staat in de route, want dit scherm kan er geen
+    // maken — het biedt vier vinkjes en geen tekstveld.
     if (wilPubliceren) {
       const lokaal = entryProblems(huidig())
       if (lokaal.length > 0) { setProblemen(lokaal); setBezig(false); return }
@@ -114,6 +125,7 @@ export default function KantoorgidsPaneel() {
           officeName, city,
           specialisms: specialisms.split(','),
           acceptingClients, contactEmail, website,
+          languages,
           published: wilPubliceren,
         }),
       })
@@ -188,6 +200,36 @@ export default function KantoorgidsPaneel() {
                  placeholder="zzp, transport, horeca" />
           <p style={hint}>Dit is geen keurmerk en wordt door ons niet gecontroleerd — het staat er zoals jij het typt.</p>
         </div>
+
+        {/*
+          [KANTOORGIDS-TAAL] Vinkjes en geen tekstveld, en dat is de hele reden dat dit werkt:
+          "Arabisch", "arabic", "العربية" en "AR" zijn vier waarden voor één taal, en een
+          ondernemer die zijn eigen taal zoekt zou te horen krijgen dat er geen kantoor is terwijl
+          er drie zitten. Een gesloten lijst kan dat niet.
+        */}
+        <fieldset style={{ ...veld, border: 0, margin: 0, padding: 0 }}>
+          <legend style={{ ...label, padding: 0 }}>In welke talen kun je ondernemers helpen?</legend>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 6 }}>
+            {DIRECTORY_LANGUAGES.map((taal) => (
+              <label key={taal} htmlFor={`taal-${taal}`}
+                     style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 15, color: '#3c4043' }}>
+                <input id={`taal-${taal}`} type="checkbox" disabled={laden}
+                       checked={languages.includes(taal)}
+                       onChange={(e) => setLanguages((was) =>
+                         e.target.checked
+                           ? (was.includes(taal) ? was : [...was, taal])
+                           : was.filter((t) => t !== taal))}
+                       style={{ width: 18, height: 18 }} />
+                {/* De taal in zijn eigen naam, net als in de taalkiezer — niet vertaald. */}
+                <span>{LOCALE_META[taal].label}</span>
+              </label>
+            ))}
+          </div>
+          <p style={hint}>
+            Nodig om in de gids te staan: kies er minstens één. Dit is wat jij zegt, wij
+            controleren het niet.
+          </p>
+        </fieldset>
 
         <div style={veld}>
           <label style={label} htmlFor="mail">E-mailadres waarop ondernemers je mogen benaderen</label>

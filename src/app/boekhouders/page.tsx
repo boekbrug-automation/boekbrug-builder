@@ -22,6 +22,7 @@ import PublicHeader from '@/components/public-header'
 import PublicFooter from '@/components/public-footer'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 import { EMPTY_LIST, normaliseEntry, sortForOwner, type DirectoryEntry } from '@/lib/accountant-directory'
+import { LOCALE_META, isLocale } from '@/lib/i18n/locale'
 
 export const dynamic = 'force-dynamic'
 
@@ -45,7 +46,10 @@ async function loadEntries(): Promise<{ entries: DirectoryEntry[]; unreadable: b
   const supabase = await createServerSupabaseClient()
   const { data, error } = await supabase
     .from('accountant_directory')
-    .select('accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website')
+    // Named columns, never select('*'): every column of this table is readable by anon under the
+    // published-only policy, so a wildcard here would publish each future column with no review.
+    // That is exactly how `languages` came to be anon-readable before any screen knew it existed.
+    .select('accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, languages')
     .eq('published', true)
     .limit(500)
 
@@ -60,6 +64,7 @@ async function loadEntries(): Promise<{ entries: DirectoryEntry[]; unreadable: b
       acceptingClients: row.accepting_clients,
       contactEmail: row.contact_email,
       website: row.website,
+      languages: row.languages ?? [],
     }),
   )
   return { entries: sortForOwner(entries), unreadable: false }
@@ -123,6 +128,19 @@ export default async function BoekhoudersPage() {
                     </span>
                   )}
                 </div>
+
+                {/*
+                  [KANTOORGIDS-TAAL] Wat het kantoor zegt te spreken, in de eigen naam van de taal.
+                  Alleen getoond, nergens op gesorteerd: sortForOwner kent deze kolom niet, en een
+                  lijst waarvan de volgorde met een veld te verzetten is, is een advertentie.
+                  Onbekende codes worden hier niet gerenderd — de database weigert ze, en een die
+                  er toch staat is geen taal die wij kunnen benoemen.
+                */}
+                {entry.languages.length > 0 && (
+                  <p style={{ ...body, marginTop: 8 }}>
+                    Spreekt: {entry.languages.filter(isLocale).map((l) => LOCALE_META[l].label).join(' · ')}
+                  </p>
+                )}
 
                 {entry.specialisms.length > 0 && (
                   <p style={{ ...body, marginTop: 8 }}>{entry.specialisms.join(' · ')}</p>

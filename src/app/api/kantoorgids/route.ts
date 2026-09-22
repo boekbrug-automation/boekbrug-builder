@@ -22,7 +22,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 import { createServerSupabaseClient } from '@/lib/supabase-server'
-import { entryProblems, normaliseEntry, type DirectoryEntry } from '@/lib/accountant-directory'
+import { draftProblems, entryProblems, normaliseEntry, type DirectoryEntry } from '@/lib/accountant-directory'
 
 export const dynamic = 'force-dynamic'
 
@@ -43,6 +43,7 @@ type Row = {
   contact_email: string
   website: string | null
   published: boolean
+  languages: string[] | null
 }
 
 function toEntry(row: Row): DirectoryEntry {
@@ -54,8 +55,13 @@ function toEntry(row: Row): DirectoryEntry {
     acceptingClients: row.accepting_clients,
     contactEmail: row.contact_email,
     website: row.website,
+    languages: row.languages ?? [],
   })
 }
+
+/** The one column list, so GET and the shape it promises can never drift apart. */
+const COLUMNS =
+  'accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, published, languages'
 
 /** Signed in, and an accountant. Returns the user id, or the response to send instead. */
 async function requireAccountant(): Promise<
@@ -78,7 +84,7 @@ export async function GET() {
 
   const { data, error } = await auth.supabase
     .from('accountant_directory')
-    .select('accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, published')
+    .select(COLUMNS)
     .eq('accountant_id', auth.id)
     .maybeSingle()
 
@@ -114,11 +120,19 @@ export async function PUT(request: NextRequest) {
     acceptingClients: (body as { acceptingClients?: unknown }).acceptingClients === true,
     contactEmail: (body as { contactEmail?: string }).contactEmail,
     website: (body as { website?: string }).website,
+    languages: Array.isArray((body as { languages?: unknown }).languages)
+      ? ((body as { languages: unknown[] }).languages.filter((l) => typeof l === 'string') as string[])
+      : [],
   })
 
   // A DRAFT may be as incomplete as it likes — that is what a draft is. Only publishing is gated,
   // and the same rule stands in the database, where a half listing cannot be published either.
-  const problems = wantsPublished ? entryProblems(entry) : []
+  //
+  // [KANTOORGIDS-TAAL] But "incomplete" is not "wrong", and the database draws that line in a
+  // different place for languages: accountant_directory_languages_known is NOT conditional on
+  // published, so an unknown code in a DRAFT is refused too — with a 23514 that arrives here as a
+  // bare 503. draftProblems is the same refusal in a sentence the office can act on.
+  const problems = wantsPublished ? entryProblems(entry) : draftProblems(entry)
   if (problems.length > 0) {
     return NextResponse.json({ ok: false, problems }, { status: 400 })
   }
@@ -133,6 +147,10 @@ export async function PUT(request: NextRequest) {
       contact_email: entry.contactEmail,
       website: entry.website,
       published: wantsPublished,
+      // [KANTOORGIDS-TAAL] Sent on EVERY write, including a draft. Leaving it out of the payload
+      // was the whole defect: the column then took its '{}' default on insert and
+      // accountant_directory_published_has_language refused every publish the product ever made.
+      languages: [...entry.languages],
       updated_at: new Date().toISOString(),
     },
     { onConflict: 'accountant_id' },

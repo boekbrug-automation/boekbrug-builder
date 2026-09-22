@@ -31,8 +31,8 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 164 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
---   DEEL 2  de 20 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
+--   DEEL 1  de 165 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 2  de 21 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
 -- Draai ze allebei. Deel 1 alleen is een schoon rapport met twee veiligheidsmigraties er
@@ -60,6 +60,9 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('accountant_directory.sql', 'index', 'accountant_directory_published_idx', null, 'public'),
   ('accountant_directory.sql', 'policy', 'accountant_directory_own_delete', 'accountant_directory', 'public'),
   ('accountant_directory.sql', 'policy', 'accountant_directory_own_read', 'accountant_directory', 'public'),
+  ('accountant_directory_talen.sql', 'column', 'languages', 'accountant_directory', 'public'),
+  ('accountant_directory_talen.sql', 'constraint', 'accountant_directory_languages_known', null, 'public'),
+  ('accountant_directory_talen.sql', 'constraint', 'accountant_directory_published_has_language', null, 'public'),
   ('accountant_discount_guard.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('accountant_invoice_mandate.sql', 'function_body', 'next_invoice_seq', 'has_active_invoice_mandate', 'public'),
   ('accountant_invoice_mandate.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
@@ -685,7 +688,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 20 van de 184
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 21 van de 186
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen
@@ -722,6 +725,21 @@ with controle(bestand, vraag, toegepast) as (
     not exists (select 1 from pg_policies
     where schemaname = 'public' and tablename = 'accountant_clients'
       and policyname = 'accountant_clients_update')
+  )
+  union all
+  select 'accountant_directory_requires_accountant_role.sql'::text, 'alleen een boekhouder kan een kantoorvermelding aanmaken of publiceren, en niemand zit vast in een vermelding die hij niet meer weg kan halen'::text, (
+    (select count(*) from pg_policy
+       where polrelid = 'public.accountant_directory'::regclass
+         and polcmd in ('a', 'w')
+         and pg_get_expr(polwithcheck, polrelid) like '%profiles%') = 2
+    and not exists (
+      select 1 from pg_policy
+       where polrelid = 'public.accountant_directory'::regclass and polcmd = 'd'
+         and pg_get_expr(polqual, polrelid) like '%profiles%')
+    and exists (
+      select 1 from pg_policy
+       where polrelid = 'public.accountant_directory'::regclass and polcmd = 'r'
+         and pg_get_expr(polqual, polrelid) = 'published')
   )
   union all
   select 'accountant_guard_fixed_search_path.sql'::text, 'de bedragbewaker draait met een vast zoekpad'::text, (
@@ -951,6 +969,10 @@ where direction = 'incoming'
 -- Ze staan in NIETS_BEWIJZEND in scripts/migration-inventory.ts. Een object dat gewoon
 -- ontbreekt hoort daar NIET in: dat hoort OPEN te heten.
 --
+--   accountant_directory_requires_accountant_role.sql → accountant_directory_own_write
+--       Deze policy BESTOND al — accountant_directory.sql maakt haar aan. Deze migratie VERVANGT haar body (er komt een rolcontrole bij) en houdt met opzet dezelfde naam: twee policies met dezelfde taak onder verschillende namen zou de DROP/CREATE-vorm zijn die elders in deze map juist de idempotente standaard is. Haar bestaan bewijst dus niets — het antwoord is 'ja, die staat er' ook op de dag VOORDAT deze migratie draaide. Wat wél alleen door deze migratie waar wordt is de INHOUD van de twee schrijfpolicies, en die staat in STAND_CONTROLE.
+--   accountant_directory_requires_accountant_role.sql → accountant_directory_own_update
+--       Zelfde verhaal als accountant_directory_own_write hierboven: bestond al, wordt vervangen, houdt zijn naam. De vraag die er wél toe doet staat in STAND_CONTROLE.
 --   bank_transactions_column_grant.sql → bank_transactions_update_own
 --       Deze policy BESTOND al — ze komt uit de oorspronkelijke dashboard-opzet en staat in geen enkele migratie, net als de basispolicies van invoices. De migratie maakt haar opnieuw aan omdat ze de hele vorm wil opschrijven die ze achterlaat, niet omdat ze nieuw is. Haar bestaan bewijst dus niets: op productie is het antwoord 'ja, die staat er' ook op de dag VOORDAT deze migratie ooit draaide. Wat wél alleen door deze migratie waar wordt, is de STAND eronder — het kolom-recht en de verdwenen delete-policy — en die staat in STAND_CONTROLE.
 --   documents_content_hash_unique.sql → document_is_referenced
