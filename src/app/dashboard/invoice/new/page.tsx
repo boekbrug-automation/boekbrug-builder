@@ -18,6 +18,16 @@ import {
   prefillSellerFields, classifySellerGate, classifySellerSave, saveAllowsSend, SELLER_FIELD_ORDER,
   type SellerField, type SellerPrefillSource,
 } from '@/lib/seller-completeness'
+// [NUMMER-EENMALIG] Wat de bevestiging over de nummering mag zeggen en mag aanbieden. Puur; het
+// PARSEN, het zaaien en het uitgeven blijven bij /api/invoice/numbering en de verzendroute.
+import {
+  classifyNumberingRead, classifyNumberingSave, firstSendNumbering,
+  numberingChangeRequested, saveAllowsSend as numberingSaveAllowsSend,
+  type NumberingState,
+} from '@/lib/numbering-first-send'
+// [NUMMER-EENMALIG] Dezelfde parser die de route AUTORITATIEF opnieuw draait — hier alleen voor de
+// vooruitblik terwijl de eigenaar typt, precies zoals het instellingenscherm hem gebruikt.
+import { previewInvoiceStart, reasonToDutch } from '@/lib/invoice-template'
 import { deliveryFailure } from '@/lib/invoice-delivery'
 import { createClient } from '@/lib/supabase'
 // [MIN-REGEL] Where the minus sign may live on a line, and when a document stops being a factuur
@@ -35,7 +45,9 @@ import { useParentPath } from '@/lib/navigation-hooks'
 import { useSubPageHeader } from '@/components/nav/SubPageHeaderContext'
 import type { Role } from '@/lib/navigation'
 // [FACTUUR-A] Single Dutch formatting source — June 2026
-import { amsterdamToday, formatDateNL } from '@/lib/format-nl'
+// [NUMMER-JAAR] amsterdamYear: het jaar van de EIGENAAR, hetzelfde als de nummeringroute gebruikt.
+// De vooruitblik hieronder moet hetzelfde jaartal tonen als de server straks in het nummer zet.
+import { amsterdamToday, amsterdamYear, formatDateNL } from '@/lib/format-nl'
 // [ICP] Same classifier the aangifte and the ICP-opgaaf use, so the invoice screen and the
 // quarter can never disagree about which customer counts as intra-EU.
 import { classifyVatNumber } from '@/lib/icp'
@@ -503,6 +515,17 @@ function NewInvoicePageContent() {
   // en zíjn factuur wordt genummerd uit de teller van de EIGENAAR — een getal uit zijn eigen lege
   // teller tonen zou een verkeerd nummer zijn, geen behulpzaam nummer.
   const [nextNumber, setNextNumber] = useState<string | null>(null)
+  // [NUMMER-EENMALIG] Dezelfde GET, maar nu ook GECLASSIFICEERD — en dat is een andere vraag dan
+  // die hierboven. `nextNumber` vraagt "welk nummer komt eraan?"; dit vraagt "mag de eigenaar de
+  // REEKS nog inrichten, en weet hij dat het bij deze verzending vastloopt?".
+  //
+  // 'unknown' is de startstand en de faalstand tegelijk. De browser mag nooit zelf concluderen dat
+  // het slot open staat: dan biedt hij een invulveld aan boven een reeks die al heeft uitgegeven.
+  const [numState, setNumState] = useState<NumberingState>({ kind: 'unknown' })
+  const [numOpen, setNumOpen] = useState(false)
+  const [numInput, setNumInput] = useState('')
+  const [numBusy, setNumBusy] = useState(false)
+  const [numError, setNumError] = useState('')
   // [BOEK-031] Navigation Strategy — parent + home via helper — May 2026
   const role: Role = (profile?.role === 'accountant' ? 'accountant' : 'zzper')
   const parentHref = useParentPath(role)
@@ -738,10 +761,13 @@ function NewInvoicePageContent() {
       if (invoiceType === 'factuur') {
         try {
           const nr = await fetch('/api/invoice/numbering')
-          if (nr.ok) {
-            const nj = await nr.json()
-            if (typeof nj?.next === 'string' && nj.next) setNextNumber(nj.next)
+          const nj = await nr.json().catch(() => null)
+          if (nr.ok && typeof (nj as { next?: unknown })?.next === 'string' && (nj as { next: string }).next) {
+            setNextNumber((nj as { next: string }).next)
           }
+          // [NUMMER-EENMALIG] Dezelfde ophaal, tweede vraag. Faalt of klopt de vorm niet, dan blijft
+          // de stand 'unknown' en biedt de bevestiging niets aan.
+          setNumState(classifyNumberingRead(nr.status, nj))
         } catch { /* een vooruitblik die niet laadt is geen fout op dit scherm */ }
       }
 
@@ -1268,6 +1294,80 @@ function NewInvoicePageContent() {
     setProfile((p) => (p ? { ...p, ...opgeslagen } as Profile : p))
     setVerkoperMissing(null)
     setVerkoperBezig(false)
+    await handleSubmit('sent')
+  }
+
+  // ─── [NUMMER-EENMALIG] De eenmalige nummerkeuze, op de bevestiging ─────────
+  //
+  // [EERSTE-DEUR] haalde de oude wizard weg bij een nieuw account — met opzet — en die wizard was
+  // één van de twee plekken die POST /api/invoice/numbering ooit aanriepen. De andere is het
+  // instellingenscherm. Sindsdien haalt een nieuwe eigenaar zijn eerste factuur zonder dat de
+  // keuze hem ooit is voorgelegd, en [VERKOPER-COMPLEET] maakte die eerste factuur een stuk
+  // makkelijker te bereiken. De standaard is geldig en vraagt geen instelling; wat ontbrak, is dat
+  // niemand hem vertelde dat deze eerste verzending de reeks vastzet (art. 35 Wet OB, geen gaten,
+  // geen terugdraaien).
+  //
+  // Dus geen wizard en geen extra stap: één zin en één invulveld op de bevestiging die er al
+  // stond, en "doorgaan met de standaard" blijft nul handelingen.
+
+  /** De stand bij het MOMENT van beslissen — niet die van toen het scherm openging. */
+  async function verversNummerstand() {
+    if (invoiceType !== 'factuur') return
+    try {
+      const res = await fetch('/api/invoice/numbering')
+      const json = await res.json().catch(() => null)
+      setNumState(classifyNumberingRead(res.status, json))
+    } catch {
+      // Onbekend is de enige eerlijke uitkomst, en 'unknown' biedt niets aan.
+      setNumState({ kind: 'unknown' })
+    }
+  }
+
+  function opendeBevestiging() {
+    setNumOpen(false); setNumInput(''); setNumError('')
+    setShowSendConfirm(true)
+    // Bewust NIET afgewacht: de dialoog moet direct open, en tot het antwoord binnen is staat de
+    // nummerstand op wat hij was. Een trage GET mag de bevestiging niet ophouden.
+    void verversNummerstand()
+  }
+
+  /**
+   * De bevestigingsknop. Getypt de eigenaar niets, dan gaat er GEEN nummeringverzoek uit en loopt
+   * hij precies de weg die hij vóór deze batch liep.
+   */
+  async function bevestigVerzenden() {
+    if (numberingChangeRequested(numOpen, numInput)) {
+      setNumBusy(true); setNumError('')
+      let res: Response
+      let json: unknown = null
+      try {
+        res = await fetch('/api/invoice/numbering', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ invoice_start: numInput.trim() }),
+        })
+        json = await res.json().catch(() => null)
+      } catch {
+        setNumError(t('nieuw.nummer.opslaanMislukt')); setNumBusy(false); return
+      }
+
+      const bewaard = classifyNumberingSave(res.status, json)
+      setNumBusy(false)
+      // Alleen 'saved' mag door. Een geweigerd of mislukt nummer mag nooit een uitgegeven factuur
+      // worden onder een nummering waarvan de eigenaar denkt dat hij hem wijzigde.
+      if (!numberingSaveAllowsSend(bewaard)) {
+        if (bewaard.outcome === 'invalid') setNumError(bewaard.message)
+        else if (bewaard.outcome === 'locked') { setNumState({ kind: 'locked' }); setNumError(t('nieuw.nummer.intussenVast')) }
+        else setNumError(failureText(res.status, json as Parameters<typeof failureText>[1], t('nieuw.nummer.opslaanMislukt')))
+        return
+      }
+      // Wat de AUTORITEIT zegt dat er staat, niet wat hier is ingetikt.
+      setNextNumber(bewaard.next)
+      setNumState({ kind: 'open', next: bewaard.next, isCustom: true })
+      setNumOpen(false); setNumInput('')
+    }
+
+    setShowSendConfirm(false)
     await handleSubmit('sent')
   }
 
@@ -2475,7 +2575,9 @@ function NewInvoicePageContent() {
                   // + e-mail with PDF delivered) → confirm first. Offerte and
                   // creditnota keep their existing direct flow.
                   if (invoiceType === 'factuur') {
-                    setShowSendConfirm(true)
+                    // [NUMMER-EENMALIG] Opent de bevestiging en ververst de nummerstand — de stand
+                    // die telt is die van het moment van beslissen, niet van toen het scherm openging.
+                    opendeBevestiging()
                   } else {
                     handleSubmit('sent')
                   }
@@ -2609,13 +2711,60 @@ function NewInvoicePageContent() {
                 </div>
               ))}
             </div>
+            {/* [NUMMER-EENMALIG] Alleen als de SERVER zegt dat de reeks nog open staat, en alleen
+                voor de eigenaar. Een medewerker (403), een al vastgezette reeks en een leesfout
+                geven hier alle drie null — dan is deze bevestiging exact de bevestiging die er
+                vóór deze batch stond. De uitleg-zin verschijnt alleen bij de ONAANGEROERDE
+                standaard: wie zijn nummering al zelf instelde, heeft deze keuze gemaakt en hoort
+                er niet bij elke verzending opnieuw aan herinnerd te worden. */}
+            {(() => {
+              const num = firstSendNumbering(numState)
+              if (!num) return null
+              const getypt = numInput.trim()
+              const voorbeeld = getypt.length > 0 ? previewInvoiceStart(getypt, amsterdamYear()) : null
+              return (
+                <div data-nummer-eenmalig style={{ backgroundColor: '#FEF7E0', borderInlineStart: '4px solid #FBBC04', borderRadius: '0 12px 12px 0', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {num.explainOnce && (
+                    <p style={{ fontSize: 13, color: '#EA8600', margin: 0, lineHeight: 1.6 }}>
+                      {t('nieuw.nummer.eenmalig', { nummer: num.next })}
+                    </p>
+                  )}
+                  {num.adjustable && !numOpen && (
+                    <button type="button" onClick={() => { setNumOpen(true); setNumError('') }}
+                      style={{ alignSelf: 'start', background: 'none', border: 'none', padding: 0, font: 'inherit', fontSize: 13, color: '#1967D2', textDecoration: 'underline', cursor: 'pointer' }}>
+                      {t('nieuw.nummer.aanpassen')}
+                    </button>
+                  )}
+                  {num.adjustable && numOpen && (
+                    <>
+                      <OutlinedInput value={numInput}
+                        onChange={(e) => { setNumInput(e.target.value); setNumError('') }}
+                        label={t('nieuw.nummer.startLabel')} placeholder="2026-001"
+                        focusColor={cfg.focusColor} maxLength={64} hasError={!!numError} />
+                      {/* Een vooruitblik, geen oordeel: de route draait deze parser straks
+                          autoritatief opnieuw en dát antwoord telt. */}
+                      {voorbeeld !== null && voorbeeld.ok && (
+                        <p style={{ fontSize: 12, color: '#5F6368', margin: 0 }}>
+                          {t('nieuw.nummer.voorbeeld', { eerste: voorbeeld.first, tweede: voorbeeld.next })}
+                        </p>
+                      )}
+                      {voorbeeld !== null && !voorbeeld.ok && !numError && (
+                        <p style={{ fontSize: 12, color: '#B3261E', margin: 0 }}>{reasonToDutch(voorbeeld.reason)}</p>
+                      )}
+                    </>
+                  )}
+                  {numError && <p style={{ fontSize: 12, color: '#B3261E', margin: 0 }}>{numError}</p>}
+                </div>
+              )
+            })()}
+
             <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => { setShowSendConfirm(false); handleSubmit('sent') }} disabled={loading}
-                style={{ flex: 1, minHeight: 48, borderRadius: 9999, border: 'none', backgroundColor: loading ? '#70757a' : '#1A73E8', color: 'white', fontSize: 16, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer' }}>
-                {loading ? t('nieuw.actie.versturenBezig') : `✉ ${t('nieuw.bevestig.ja')}`}
+              <button onClick={() => { void bevestigVerzenden() }} disabled={loading || numBusy}
+                style={{ flex: 1, minHeight: 48, borderRadius: 9999, border: 'none', backgroundColor: loading || numBusy ? '#70757a' : '#1A73E8', color: 'white', fontSize: 16, fontWeight: 600, cursor: loading || numBusy ? 'not-allowed' : 'pointer' }}>
+                {numBusy ? t('nieuw.nummer.bezig') : loading ? t('nieuw.actie.versturenBezig') : `✉ ${t('nieuw.bevestig.ja')}`}
               </button>
-              <button onClick={() => setShowSendConfirm(false)} disabled={loading}
-                style={{ flex: 1, minHeight: 48, borderRadius: 9999, border: 'none', backgroundColor: '#F1F3F4', color: '#5F6368', fontSize: 14, fontWeight: 500, cursor: loading ? 'not-allowed' : 'pointer' }}>
+              <button onClick={() => setShowSendConfirm(false)} disabled={loading || numBusy}
+                style={{ flex: 1, minHeight: 48, borderRadius: 9999, border: 'none', backgroundColor: '#F1F3F4', color: '#5F6368', fontSize: 14, fontWeight: 500, cursor: loading || numBusy ? 'not-allowed' : 'pointer' }}>
                 {t('nieuw.actie.annuleren')}
               </button>
             </div>

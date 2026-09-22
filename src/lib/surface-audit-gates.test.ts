@@ -27,6 +27,26 @@ function strip(src: string): string {
 }
 const code = (path: string): string => strip(readFileSync(path, "utf8"));
 
+/**
+ * The window between two markers, with BOTH bounds proven to exist.
+ *
+ * [NUMMER-EENMALIG] This exists because the thing AGENTS.md warns about had happened here. Two
+ * gates cut handleSubmit out with `page.indexOf("// ─── Derived ───")` as the end — a marker that
+ * lives in a COMMENT, which strip() removes. indexOf then answered -1, `slice(i, -1)` ran to the
+ * end of the file, and both gates had been measuring handleSubmit PLUS everything after it,
+ * including the render tree. They were green, for the wrong reason. A third copy in this batch is
+ * what surfaced it.
+ *
+ * So: cut on real code, and refuse a bound that was not found rather than quietly measuring more.
+ */
+function between(src: string, from: string, to: string, why: string): string {
+  const i = src.indexOf(from);
+  const j = src.indexOf(to);
+  assert.ok(i >= 0, `${JSON.stringify(from)} is gone — the window cannot start (${why})`);
+  assert.ok(j > i, `${JSON.stringify(to)} is gone or moved above the start — the window would run to the end of the file (${why})`);
+  return src.slice(i, j);
+}
+
 /** `a` must occur, `b` must occur, and `a` must come first. Names the file so a failure reads. */
 function inOrder(src: string, a: string, b: string, file: string, why: string): void {
   const ia = src.indexOf(a);
@@ -711,7 +731,20 @@ test("[VERKOPER-COMPLEET] the screen asks before it creates anything, and never 
   // And the completion continues through the EXISTING send path — no second implementation, and
   // above all no number of its own.
   assert.match(page, /await handleSubmit\('sent'\)/, "the completion no longer continues into the existing send");
-  assert.doesNotMatch(page, /\/api\/invoice\/numbering', \{\s*method/, "the screen started writing numbering configuration");
+
+  // [NUMMER-EENMALIG] This line used to read:
+  //
+  //     assert.doesNotMatch(page, /\/api\/invoice\/numbering', \{\s*method/, …)
+  //
+  // — a blanket refusal of any numbering WRITE from this screen, and it went red the moment 2C
+  // added one. It was right to, and it is answered rather than deleted: the screen may now write
+  // numbering, because the one-time choice [EERSTE-DEUR] took off the new-account path has to be
+  // put somewhere and the confirmation is the last place before it is fixed forever. What the
+  // blanket ban was really protecting is narrower and is asserted instead, in the [NUMMER-EENMALIG]
+  // gate below: the write goes to the EXISTING authority, only for an owner, only on an explicit
+  // typed value, and it still mints nothing here.
+  assert.match(page, /body: JSON\.stringify\(\{ invoice_start: numInput\.trim\(\) \}\)/,
+    "the numbering write no longer goes to the one endpoint that parses, locks and seeds");
 });
 
 test("[VERKOPER-COMPLEET] the completion route is the owner's, refuses on a failed read, and writes only what is missing", () => {
@@ -749,4 +782,123 @@ test("[VERKOPER-COMPLEET] the completion route is the owner's, refuses on a fail
   // It does not issue anything. The one authority stays the send door.
   assert.doesNotMatch(route, /invoice_number|next_invoice_seq|generateInvoiceNumber/,
     "the completion route grew an opinion about invoice numbering");
+});
+
+// ─── [NUMMER-EENMALIG] The wiring of the one-time numbering choice ────────────────────────────
+//
+// The DECISIONS live in numbering-first-send.ts and every branch of them is executed in
+// numbering-first-send.test.ts. What no unit test can see is that the screen never forms its own
+// opinion, and — the invariant this whole batch turns on — that nothing here mints, reserves or
+// brings forward a legal invoice number. art. 35 Wet OB gives one gapless, forward-only series;
+// a number drawn by a confirmation dialog is a gap nobody can close.
+
+test("[NUMMER-EENMALIG] the confirmation asks the authority, and never decides for itself", () => {
+  const page = code("src/app/dashboard/invoice/new/page.tsx");
+
+  // 1 — The state comes from the SERVER's answer, classified. A screen that reads `locked`
+  // itself is a screen that will one day read the string "false" as permission to edit.
+  assert.match(page, /classifyNumberingRead\(nr\.status, nj\)/, "the load no longer classifies the numbering read");
+  assert.match(page, /classifyNumberingRead\(res\.status, json\)/, "the confirmation no longer refreshes a classified state");
+  assert.match(page, /const num = firstSendNumbering\(numState\)/, "the notice is decided somewhere other than the module");
+  assert.match(page, /if \(!num\) return null/,
+    "a state with nothing to offer must render nothing — an employee, a locked series and an unreadable lock all land here");
+  // No second opinion about the lock anywhere on the screen.
+  assert.doesNotMatch(page, /\bnj\?\.locked|json\?\.locked|\.locked\s*===|!!\s*\w+\.locked/,
+    "the screen started reading the lock flag by itself instead of through the classifier");
+
+  // 2 — The refresh happens when the dialog OPENS, not only at page load. The state that decides
+  // whether a form is offered must be the state at the moment of deciding.
+  assert.match(page, /function opendeBevestiging\(\)/, "the confirmation opens without refreshing the numbering state");
+  inOrder(page, "setShowSendConfirm(true)", "void verversNummerstand()",
+    "invoice/new/page.tsx", "the dialog must open first and refresh after — a slow GET may not hold up the confirmation");
+  assert.match(page, /opendeBevestiging\(\)/, "the send button no longer goes through the refreshing opener");
+
+  // 3 — ZERO SETUP. Accepting the default must cost no request at all, and that is decided by the
+  // shared predicate rather than by an inline truthiness test that would fire on whitespace.
+  assert.match(page, /if \(numberingChangeRequested\(numOpen, numInput\)\)/,
+    "the screen decides by itself whether to write numbering — an untouched default may never POST");
+
+  // 4 — Only a saved change continues. The type predicate makes this the compiler's business too,
+  // but the call site still has to USE it.
+  //
+  // Cut the CONFIRM HANDLER out first and order inside it. Both markers below occur earlier in the
+  // file — `setShowSendConfirm(false)` in the back-button close, `handleSubmit('sent')` in 2B's
+  // completion helper — so an indexOf over the whole page compares the wrong pair and passes for
+  // the wrong reason. The window's own bounds are real code (a function signature), never a
+  // comment, because code() strips those and a -1 slice measures to the end of the file.
+  const iStart = page.indexOf("async function bevestigVerzenden()");
+  const iEnd = page.indexOf("async function handleSubmit(mode:");
+  assert.ok(iStart >= 0, "bevestigVerzenden is gone — the confirmation no longer has a handler of its own");
+  assert.ok(iEnd > iStart, "bevestigVerzenden must sit above handleSubmit, which it calls");
+  const bevestig = page.slice(iStart, iEnd);
+  assert.ok(bevestig.length > 400, "the bevestigVerzenden slice is real");
+
+  assert.match(bevestig, /if \(!numberingSaveAllowsSend\(bewaard\)\)/, "a refused or failed numbering save may reach the send");
+  inOrder(bevestig, "if (!numberingSaveAllowsSend(bewaard))", "setShowSendConfirm(false)",
+    "bevestigVerzenden", "the dialog closes and sends before the numbering outcome is judged");
+  inOrder(bevestig, "const bewaard = classifyNumberingSave(res.status, json)", "await handleSubmit('sent')",
+    "bevestigVerzenden", "the send runs before the numbering answer is read");
+  // Both refusal paths RETURN. A branch that only sets an error and falls through would show the
+  // message and send the invoice anyway — which is the one outcome that cannot be undone. Asserted
+  // by shape rather than by counting `return`s: a tally breaks on any harmless refactor and says
+  // nothing about which branch lost its exit.
+  assert.match(bevestig, /\} catch \{\s*\n\s*setNumError\(t\('nieuw\.nummer\.opslaanMislukt'\)\); setNumBusy\(false\); return\s*\n\s*\}/,
+    "a numbering request that never completed falls through into the send");
+  assert.match(bevestig, /else setNumError\(failureText\([\s\S]{0,160}?\n\s*return\s*\n\s*\}/,
+    "the refused-save branch does not return — the send would continue under numbering that was never stored");
+
+  // 5 — And the number shown afterwards is the authority's, not the typed input.
+  assert.match(page, /setNextNumber\(bewaard\.next\)/,
+    "the screen shows what it typed instead of what the route says landed (the seed is clamped forward-only)");
+
+  // 6 — THE INVARIANT. Nothing on this screen produces a number. next_invoice_seq() is the only
+  // writer of the counter and the send route is its only caller.
+  assert.doesNotMatch(page, /next_invoice_seq/, "the screen calls the allocator");
+  assert.doesNotMatch(page, /formatInvoiceNumber\(/,
+    "the screen formats a definitive number itself — previewInvoiceStart is a PREVIEW and says so");
+  assert.match(page, /previewInvoiceStart\(getypt, amsterdamYear\(\)\)/,
+    "the live preview no longer uses the authority's own parser, or no longer uses the owner's year");
+});
+
+test("[NUMMER-EENMALIG] the numbering step sits before the send and changes nothing after it", () => {
+  const page = code("src/app/dashboard/invoice/new/page.tsx");
+
+  // The whole sequence: the numbering step lives ABOVE the send path, so judging it happens first
+  // and the existing chain — [VERKOPER-COMPLEET]'s seller gate, then the draft, then the route's
+  // number — runs unchanged underneath it.
+  inOrder(page, "async function bevestigVerzenden()", "const poort = await verkoperPoort()",
+    "invoice/new/page.tsx", "the numbering step must come before the seller gate, which comes before the draft and the number");
+  inOrder(page, "invoice_start: numInput.trim()", "await fetch('/api/invoice/send'",
+    "invoice/new/page.tsx", "…and the numbering write must be settled before the door that mints the number is called at all");
+
+  // [VERKOPER-COMPLEET] is untouched by this batch: the seller gate still runs inside handleSubmit,
+  // still on the same narrow condition, and still before anything is created.
+  const body = between(page, "async function handleSubmit(mode:", "const cfg = TYPE_CONFIG[invoiceType]",
+    "the seller gate must be inside handleSubmit, not merely somewhere on the page");
+  assert.ok(body.length > 500, "the handleSubmit slice is real");
+  assert.match(body, /const poort = await verkoperPoort\(\)/, "2B's seller gate left handleSubmit");
+  assert.doesNotMatch(body, /numbering|numState|numInput/,
+    "numbering leaked into handleSubmit — the choice belongs on the confirmation, not on the send path");
+
+  // A creditnota and an offerte reach handleSubmit without passing the confirmation at all, so the
+  // numbering notice may never be their business either.
+  assert.match(page, /if \(invoiceType === 'factuur'\) \{[\s\S]{0,300}opendeBevestiging\(\)/,
+    "the confirmation — and with it the numbering notice — is no longer limited to a factuur");
+  assert.match(page, /if \(invoiceType !== 'factuur'\) return/,
+    "the refresh runs for a document that draws no number from this series");
+
+  // CONTAINMENT. The notice lives INSIDE the confirmation and nowhere else — the render suite
+  // cannot see this (a server render opens no dialog, so "absent" is true there whatever the code
+  // does), but source order can. A notice in the form body would put an irreversible-choice
+  // warning in front of an owner who has not asked to send anything.
+  // Bracketed by the confirmation's own opening and its own confirm button — both unique, both
+  // real code. `t('nieuw.actie.annuleren')` was tried as the closing bound and rejected by
+  // between(): that label is used elsewhere on the page and occurs BEFORE the dialog, so the
+  // window would have been inverted. That rejection is the helper doing its job.
+  assert.equal([...page.matchAll(/data-nummer-eenmalig/g)].length, 1,
+    "the numbering notice is rendered in more than one place");
+  inOrder(page, "{showSendConfirm && (", "data-nummer-eenmalig",
+    "invoice/new/page.tsx", "the notice is rendered above the confirmation it belongs to");
+  inOrder(page, "data-nummer-eenmalig", "void bevestigVerzenden()",
+    "invoice/new/page.tsx", "the notice sits below the confirmation's own send button — it has left the dialog");
 });

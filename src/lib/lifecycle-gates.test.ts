@@ -4268,7 +4268,17 @@ test("[OFFERTE-EEN-KNOP] the offerte's two buttons exist because they now genuin
   // mint), so the pair is legitimate again. What must now stay true is the DIFFERENCE:
   const page = code("src/app/dashboard/invoice/new/page.tsx");
 
-  const body = page.slice(page.indexOf("async function handleSubmit(mode:"), page.indexOf("// ─── Derived ───"));
+  // [NUMMER-EENMALIG] This cut ended at `page.indexOf("// ─── Derived ───")` — a marker in a
+  // COMMENT, which code() strips. indexOf answered -1, slice(i, -1) ran to the end of the file,
+  // and the `mode` count below was taken over handleSubmit PLUS the whole render tree. The number
+  // happened to be right (nothing after handleSubmit mentions `mode`), which is exactly how this
+  // class of defect stays green until the day it matters — the [UREN-EENMALIG] incident in
+  // AGENTS.md, in another file. Bound on real code now, and a missing bound fails loudly.
+  const einde = page.indexOf("const cfg = TYPE_CONFIG[invoiceType]");
+  const begin = page.indexOf("async function handleSubmit(mode:");
+  assert.ok(begin >= 0, "handleSubmit is gone");
+  assert.ok(einde > begin, "the window's end marker is gone or moved — the slice would run to the end of the file");
+  const body = page.slice(begin, einde);
   assert.ok(body.length > 500, "the handleSubmit slice is real");
   // `mode` branches exactly FOUR times: the signature, the seller gate, the minting-route
   // exclusion, and the offerte-send branch. A fifth is a new path nobody gated — reconsider,

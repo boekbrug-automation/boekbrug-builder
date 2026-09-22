@@ -265,6 +265,44 @@ export const MESSAGES = {
     ar: 'متوقّع — يُخصَّص الرقم نهائيًا عند الإرسال.',
     en: 'Expected — the number becomes final on sending.',
   },
+  // [NUMMER-EENMALIG] De eenmalige nummerkeuze op de bevestiging. Deze zinnen bestaan omdat
+  // [EERSTE-DEUR] de wizard weghaalde die de vraag ooit stelde: de standaard is geldig en vraagt
+  // geen instelling, maar niemand vertelde de eigenaar dat de eerste verzending de reeks vastzet.
+  'nieuw.nummer.eenmalig': {
+    nl: 'Deze factuur krijgt nummer {nummer}. Bij verzending staat je nummering vast — daarna is die niet meer te wijzigen.',
+    ar: 'ستحمل هذه الفاتورة الرقم {nummer}. عند الإرسال يثبت ترقيمك — ولا يمكن تغييره بعد ذلك.',
+    en: 'This invoice will carry number {nummer}. Sending fixes your numbering — it cannot be changed afterwards.',
+  },
+  'nieuw.nummer.aanpassen': {
+    nl: 'Nummering aanpassen',
+    ar: 'تعديل الترقيم',
+    en: 'Adjust numbering',
+  },
+  'nieuw.nummer.startLabel': {
+    nl: 'Nummer van je eerste factuur',
+    ar: 'رقم فاتورتك الأولى',
+    en: 'Number of your first invoice',
+  },
+  'nieuw.nummer.voorbeeld': {
+    nl: 'Dan wordt het {eerste}, daarna {tweede}.',
+    ar: 'فتصبح {eerste}، ثم {tweede}.',
+    en: 'Then it becomes {eerste}, then {tweede}.',
+  },
+  'nieuw.nummer.bezig': {
+    nl: 'Nummering opslaan…',
+    ar: 'جارٍ حفظ الترقيم…',
+    en: 'Saving numbering…',
+  },
+  'nieuw.nummer.opslaanMislukt': {
+    nl: 'Nummering opslaan is niet gelukt. Er is niets verstuurd.',
+    ar: 'فشل حفظ الترقيم. لم يُرسل شيء.',
+    en: 'Saving the numbering failed. Nothing was sent.',
+  },
+  'nieuw.nummer.intussenVast': {
+    nl: 'Er is intussen een factuur verstuurd. Je nummering staat nu vast.',
+    ar: 'أُرسلت فاتورة في هذه الأثناء. ترقيمك ثابت الآن.',
+    en: 'An invoice was sent in the meantime. Your numbering is now fixed.',
+  },
   'nieuw.pdf.knop': { nl: 'PDF', ar: 'PDF', en: 'PDF' },
   'nieuw.actie.pdfBekijken': { nl: 'Bekijk als PDF', ar: 'عرض كـ PDF', en: 'View as PDF' },
   'nieuw.actie.pdfBezig': { nl: 'PDF maken...', ar: 'جارٍ إنشاء PDF...', en: 'Building PDF...' },
