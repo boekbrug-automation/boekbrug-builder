@@ -55,6 +55,7 @@ INSERT INTO privilege_intent (sig, kind, status, definer, i_anon, i_authenticate
   ('public.vault_update_or_create_secret(uuid, text, text)', 'server_rpc', 'live', true, 'DENY', 'DENY', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
   ('public.work_done_counts(uuid, date, date)', 'server_rpc', 'live', true, 'DENY', 'DENY', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY['work_done_counts.sql']::text[]),
   ('public.cleanup_old_rate_limits()', 'internal', 'live', true, 'DENY', 'DENY', 'ALLOW', 'DENY', NULL, NULL, NULL, NULL, ARRAY[]::text[]),
+  ('public.accountant_directory_unpublish_on_last_unlink()', 'trigger', 'planned', true, 'DENY', 'DENY', 'DENY', 'DENY', NULL, NULL, NULL, NULL, ARRAY['accountant_directory_unpublish_on_last_unlink.sql']::text[]),
   ('public.assert_credit_within_original()', 'trigger', 'live', true, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY['rpc_anon_revoke.sql']::text[]),
   ('public.assert_credit_within_rate()', 'trigger', 'live', true, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY['revoke_execute_on_trigger_functions.sql']::text[]),
   ('public.handle_new_user()', 'trigger', 'live', true, 'DENY', 'DENY', 'UNKNOWN', 'DENY', NULL, NULL, NULL, NULL, ARRAY['rpc_anon_revoke.sql']::text[]),

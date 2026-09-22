@@ -360,6 +360,7 @@ WITH repo(name) AS (VALUES
   ('accountant_directory'),
   ('accountant_directory_publish_requires_client_link'),
   ('accountant_directory_talen'),
+  ('accountant_directory_unpublish_on_last_unlink'),
   ('accountant_discount_guard'),
   ('accountant_guard_fixed_search_path'),
   ('accountant_invoice_mandate'),

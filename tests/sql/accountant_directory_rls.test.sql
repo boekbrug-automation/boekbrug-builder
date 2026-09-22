@@ -1,4 +1,4 @@
--- migrations: accountant_directory.sql, accountant_directory_talen.sql, accountant_directory_publish_requires_client_link.sql
+-- migrations: accountant_directory.sql, accountant_directory_talen.sql, accountant_directory_publish_requires_client_link.sql, accountant_directory_unpublish_on_last_unlink.sql
 -- =====================================================================
 -- [KANTOORGIDS-BEWIJS] Who may make a directory listing PUBLIC, tried — not read.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)
@@ -219,50 +219,188 @@ EXCEPTION WHEN insufficient_privilege THEN
   RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] the guard refuses a real office — the control failed';
 END $$;
 
--- THE RACE. The route reads eligibility before it writes, and those are two statements: either
--- party may unlink in between. So the question is not whether the preflight was right when it ran,
--- but whether the DATABASE still refuses once the evidence is gone — because a listing that stays
--- public after its last client left is exactly what the preflight cannot prevent and this policy
--- must. A's link is removed here with A's own session (accountant_clients_delete permits it), which
--- is also the real way this happens.
+-- =============================================================================================
+-- THE EVIDENCE DISAPPEARS. `published` is a STORED fact, so the question is not whether a new
+-- write is refused — it is whether the listing that is ALREADY public stops being public.
+-- =============================================================================================
+--
+-- The previous version of this file tested the weaker thing: delete the link, then attempt another
+-- published write, and watch the policy refuse it. That proves you cannot re-publish. It says
+-- nothing about the row that is already out there, which survived indefinitely.
+--
+-- So every assertion below runs BEFORE any directory write. A single UPDATE on accountant_directory
+-- between the delete and the check would hide the defect exactly as it was hidden before.
+
+-- First, anon can see A right now. Without this the assertion after the delete proves nothing —
+-- "anon sees nobody" is also true of a directory that was never readable.
+RESET ROLE;
+SET ROLE anon;
+SELECT set_config('test.uid', '', false);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.accountant_directory
+                  WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a') THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] the control failed: anon cannot see A before the unlink';
+  END IF;
+  RAISE NOTICE '   ok · control: anon can see A while the relationship exists';
+END $$;
+
+-- TWO LINKS, ONE REMOVED. A second client is added, then one link goes. The listing must SURVIVE:
+-- the rule is about the LAST relationship, not about any relationship.
+RESET ROLE;
+INSERT INTO public.profiles (id, role) VALUES ('d0000000-0000-0000-0000-00000000000d', 'zzper');
+INSERT INTO public.accountant_clients (accountant_id, zzper_id)
+VALUES ('a0000000-0000-0000-0000-00000000000a', 'd0000000-0000-0000-0000-00000000000d');
+
+SET ROLE authenticated;
+SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
+DELETE FROM public.accountant_clients
+ WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a'
+   AND zzper_id = 'd0000000-0000-0000-0000-00000000000d';
+
+RESET ROLE;
+SET ROLE anon;
+SELECT set_config('test.uid', '', false);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.accountant_directory
+                  WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a') THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] losing ONE of two clients took the listing down — the rule is about the LAST link';
+  END IF;
+  RAISE NOTICE '   ok · losing one of two clients leaves the listing public';
+END $$;
+
+-- THE LAST LINK. Deleted by the OFFICE's own session here; the client-side delete is exercised
+-- further down, because who removes it must not change the outcome.
+RESET ROLE;
+SET ROLE authenticated;
+SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
 DO $$
 DECLARE n int;
 BEGIN
   DELETE FROM public.accountant_clients
    WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
   GET DIAGNOSTICS n = ROW_COUNT;
-  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] could not remove the link to set up the race (% rows)', n; END IF;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] expected exactly the last link to go (% rows)', n; END IF;
 END $$;
 
+-- …and NOTHING writes accountant_directory between that delete and this read. This is the
+-- assertion the whole correction turns on.
+RESET ROLE;
+SET ROLE anon;
+SELECT set_config('test.uid', '', false);
 DO $$ BEGIN
-  UPDATE public.accountant_directory SET city = 'Amersfoort', published = true
-   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
-  RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] RACE: publication survived the evidence disappearing';
-EXCEPTION WHEN insufficient_privilege THEN
-  RAISE NOTICE '   ok · the database still refuses once the link is gone (42501) — the preflight is advisory, this is not';
+  IF EXISTS (SELECT 1 FROM public.accountant_directory
+              WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a') THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] THE LISTING OUTLIVED ITS EVIDENCE: anon still sees A after the last client unlinked';
+  END IF;
+  RAISE NOTICE '   ok · the last unlink takes the listing out of the gids, with no action by the office';
 END $$;
 
--- …and the office is still not trapped by that refusal: it can take the listing down.
+-- The stored flag agrees with what anon sees. A row still marked published but invisible would
+-- leave the office''s own panel saying "Je staat in de gids" over an empty gids.
+RESET ROLE;
 DO $$
-DECLARE n int;
+DECLARE p boolean;
 BEGIN
-  UPDATE public.accountant_directory SET published = false
+  SELECT published INTO p FROM public.accountant_directory
    WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
-  GET DIAGNOSTICS n = ROW_COUNT;
-  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] an office that lost its last client is trapped (% rows)', n; END IF;
-  RAISE NOTICE '   ok · …and can still take its own listing down afterwards';
+  IF p IS DISTINCT FROM false THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] published is still % — the flag disagrees with the gids', p;
+  END IF;
+  RAISE NOTICE '   ok · published = false, so the office and the public read the same answer';
 END $$;
 
--- Put A's evidence back so the rest of the file reads against the world it describes.
+-- WHAT THE OFFICE KEEPS. The row itself survives: everything typed is still there, so getting a
+-- client back does not mean typing the listing again.
+DO $$
+DECLARE naam text;
+BEGIN
+  SELECT office_name INTO naam FROM public.accountant_directory
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  IF naam IS DISTINCT FROM 'Kantoor A' THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] the unlink destroyed the listing itself (office_name = %)', naam;
+  END IF;
+  RAISE NOTICE '   ok · the listing survives as a draft — nothing the office typed is lost';
+END $$;
+
+-- NO AUTOMATIC REPUBLISH. A new client arriving must not put the old listing back in the gids by
+-- itself: being listed is an act by the office, and a relationship is not consent to be published.
 RESET ROLE;
 INSERT INTO public.accountant_clients (accountant_id, zzper_id)
 VALUES ('a0000000-0000-0000-0000-00000000000a', 'c0000000-0000-0000-0000-00000000000c');
-UPDATE public.accountant_directory SET published = true
+SET ROLE anon;
+SELECT set_config('test.uid', '', false);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM public.accountant_directory
+              WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a') THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] a new client link republished an old listing by itself';
+  END IF;
+  RAISE NOTICE '   ok · a new link does not republish — the office decides that, not the relationship';
+END $$;
+
+-- …and with the evidence back, the office can publish again itself.
+RESET ROLE;
+SET ROLE authenticated;
+SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
+DO $$
+DECLARE n int;
+BEGIN
+  UPDATE public.accountant_directory SET published = true
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] the office cannot re-publish with evidence back (% rows)', n; END IF;
+  RAISE NOTICE '   ok · with a client again, the office can put itself back in the gids';
+END $$;
+
+-- WHO REMOVES IT MUST NOT MATTER. The same unlink, this time by the CLIENT — the case an
+-- application-level fix in /api/accountant/unlink would miss entirely, because
+-- accountant_clients_delete lets either party delete straight through the Data API.
+SELECT set_config('test.uid', 'c0000000-0000-0000-0000-00000000000c', false);
+DO $$
+DECLARE n int;
+BEGIN
+  DELETE FROM public.accountant_clients
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a'
+     AND zzper_id = 'c0000000-0000-0000-0000-00000000000c';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] the client could not unlink (% rows)', n; END IF;
+END $$;
+
+RESET ROLE;
+SET ROLE anon;
+SELECT set_config('test.uid', '', false);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM public.accountant_directory
+              WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a') THEN
+    RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] a CLIENT-side unlink left the listing public';
+  END IF;
+  RAISE NOTICE '   ok · a client-side unlink takes the listing down too — the route is not the boundary';
+END $$;
+
+-- …and the office is still not trapped: it can edit and remove its own row afterwards.
+RESET ROLE;
+SET ROLE authenticated;
+SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
+DO $$
+DECLARE n int;
+BEGIN
+  UPDATE public.accountant_directory SET city = 'Amersfoort'
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] an office without clients cannot edit its own draft (% rows)', n; END IF;
+  RAISE NOTICE '   ok · …and can still edit and remove its own listing afterwards';
+END $$;
+
+-- Put A back the way the rest of the file expects it.
+RESET ROLE;
+INSERT INTO public.accountant_clients (accountant_id, zzper_id)
+VALUES ('a0000000-0000-0000-0000-00000000000a', 'c0000000-0000-0000-0000-00000000000c');
+UPDATE public.accountant_directory
+   SET published = true, city = 'Utrecht'
  WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
 SET ROLE authenticated;
 SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
 
--- A cannot write B's row. USING pins the row to its owner, so the update matches NOTHING rather
+-- A cannot write B's row. USING pins the row to its owner-- A cannot write B's row. USING pins the row to its owner, so the update matches NOTHING rather
 -- than raising: a refusal by invisibility, which is the right shape for a row that is not yours.
 RESET ROLE;
 INSERT INTO public.accountant_directory (accountant_id, office_name, city, contact_email, languages, published)

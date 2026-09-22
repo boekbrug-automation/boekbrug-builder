@@ -31,7 +31,7 @@
 --
 -- ── TWEE QUERY'S, WANT ER ZIJN TWEE SOORTEN MIGRATIES ──
 --
---   DEEL 1  de 165 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
+--   DEEL 1  de 166 migraties die iets AANMAKEN. Bestaat het object, dan is ze gedraaid.
 --   DEEL 2  de 21 die niets aanmaken — alleen rechten intrekken, iets weggooien of een
 --           stand goed zetten. Daar wordt de STAND gemeten in plaats van het bestaan.
 --
@@ -63,6 +63,7 @@ with probe(bestand, soort, object, tabel, schema) as (values
   ('accountant_directory_talen.sql', 'column', 'languages', 'accountant_directory', 'public'),
   ('accountant_directory_talen.sql', 'constraint', 'accountant_directory_languages_known', null, 'public'),
   ('accountant_directory_talen.sql', 'constraint', 'accountant_directory_published_has_language', null, 'public'),
+  ('accountant_directory_unpublish_on_last_unlink.sql', 'function', 'accountant_directory_unpublish_on_last_unlink', null, 'public'),
   ('accountant_discount_guard.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
   ('accountant_invoice_mandate.sql', 'function_body', 'next_invoice_seq', 'has_active_invoice_mandate', 'public'),
   ('accountant_invoice_mandate.sql', 'function_body', 'prevent_accountant_amount_changes', '.amount_paid,.btw_amount,.direction,.discount_type,.discount_value,.document_id,.due_date,.id,.invoice_date,.invoice_number,.invoice_type,.marked_paid_at,.pay_token,.payment_date,.payment_method,.payment_prepared_at,.payment_reference,.receiver_id,.sender_id,.status,.total_ex_btw,.total_inc_btw,.vat_deduction,.vendor_iban', 'public'),
@@ -688,7 +689,7 @@ order by case when bool_and(aanwezig) then 3 when bool_or(aanwezig) then 1 else 
 --
 
 -- =====================================================================
--- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 21 van de 186
+-- DEEL 2 — NIET VAST TE STELLEN MET EEN OBJECT: 21 van de 187
 -- =====================================================================
 --
 -- Deze trekken alleen rechten in, gooien iets weg, zetten een stand goed of verplaatsen

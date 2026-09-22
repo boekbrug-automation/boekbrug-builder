@@ -351,7 +351,25 @@ export const REGISTRY: readonly FunctionEntry[] = [
     callers: ["none found in this repository"], provenance: DASHBOARD_ERA, verified: VERIFIED,
   },
 
-  // ── trigger, SECURITY DEFINER (6) ──────────────────────────────────────────────────────────
+  // ── trigger, SECURITY DEFINER (7) ──────────────────────────────────────────────────────────
+  // [KANTOORGIDS-BEWIJS] The one entry here that is NOT live: its migration exists in this
+  // repository and has not been applied to production, so `current` is null rather than a measured
+  // shape someone invented. It is SECURITY DEFINER out of necessity — the party deleting the last
+  // client link is usually the CLIENT, who has no rights on the accountant's directory row — and
+  // its migration decides all four default grant paths in one REVOKE, because nobody needs EXECUTE
+  // for a trigger to fire (measured in revoke_execute_on_trigger_functions.sql).
+  {
+    signature: "public.accountant_directory_unpublish_on_last_unlink()",
+    kind: "trigger", managedBy: "boekbrug", owner: "postgres", definer: true, status: "planned",
+    intent: intent(D, D, D, D),
+    current: null,
+    evidence: [
+      "accountant_directory_unpublish_on_last_unlink.sql revokes ALL from PUBLIC, anon, authenticated and service_role",
+      "not applied to production; nothing measured, so `current` stays null rather than assumed",
+    ],
+    callers: ["trigger on accountant_clients"],
+    provenance: REPO, verified: null,
+  },
   triggerFn("public.assert_credit_within_original()", true, ["invoices"], CLOSED_TO_ALL_BUT_SERVICE,
     ["rpc_anon_revoke.sql revokes PUBLIC, anon, authenticated; grants service_role"]),
   triggerFn("public.assert_credit_within_rate()", true, ["invoice_lines"], CLOSED_TO_ALL_BUT_SERVICE,

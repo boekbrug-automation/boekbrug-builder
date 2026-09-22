@@ -34059,6 +34059,78 @@ test("[KANTOORGIDS-BEWIJS] an office that may not publish yet is told so, and no
 });
 
 
+// ─── [KANTOORGIDS-BEWIJS] The listing does not outlive the relationship it rests on ───────────
+//
+// `accountant_directory_publish_requires_client_link` gates WRITES. `published` is then a stored
+// fact that nothing re-reads, so the batch shipped a rule it did not actually keep:
+//
+//     A publishes with a link  →  the client unlinks  →  nothing writes the directory
+//     →  published stays true  →  anon still sees A, indefinitely
+//
+// The write-time rule is not wrong, it is blind to the direction where nothing is written. The
+// reaction that covers it is a trigger on the DELETE, and this gate holds its shape.
+//
+// The obvious alternative — teach the public read policy to check the evidence — was MEASURED and
+// rejected, and the measurement is worth keeping here because the next reader will propose it
+// again: a policy's subquery runs with the CALLER's privileges, so anon reading a table whose
+// policy subqueries accountant_clients gets `permission denied`. Making it work needs either anon
+// SELECT on the most private table in the domain, or an anon-callable helper that answers "does
+// this uuid have accountant clients" — the enumeration oracle anon_mandate_oracle_revoke.sql
+// already closed once.
+test("[KANTOORGIDS-BEWIJS] the last unlink takes the listing down, at the database", () => {
+  const migratie = readFileSync(
+    "supabase/migrations/accountant_directory_unpublish_on_last_unlink.sql", "utf8");
+  const ddl = migratie.split("\n").map((r) => r.replace(/--.*$/, "")).join("\n");
+
+  // It reacts to the DELETE, on the table the relationship lives in. Not to a route: the route is
+  // not the boundary, because accountant_clients_delete lets EITHER party delete straight through
+  // the Data API, which an application-level fix would never see.
+  assert.match(ddl, /AFTER DELETE ON public\.accountant_clients\s+FOR EACH ROW/,
+    "the reaction no longer fires on the delete of a relationship");
+
+  // It fires on the LAST link only — losing one of two clients must leave the listing standing.
+  assert.match(ddl, /NOT EXISTS \(\s*SELECT 1 FROM public\.accountant_clients ac\s+WHERE ac\.accountant_id = OLD\.accountant_id\s*\)/,
+    "the trigger no longer checks whether any link is LEFT — it now fires on any unlink");
+
+  // The mutation is one column on one row, and it can only ever un-publish. A reaction that could
+  // publish, delete or rewrite the office's own text would be a far larger thing than the hole it
+  // closes, and it runs as SECURITY DEFINER.
+  const body = ddl.slice(ddl.indexOf("UPDATE public.accountant_directory"));
+  const statement = body.slice(0, body.indexOf(";") + 1);
+  assert.match(statement, /SET published = false/, "the reaction no longer un-publishes");
+  assert.doesNotMatch(statement, /published = true/, "the reaction can publish — it must only ever take down");
+  assert.doesNotMatch(statement, /office_name|city|contact_email|website|specialisms|languages/,
+    "the reaction writes fields the office typed — its scope must stay the published flag alone");
+  assert.doesNotMatch(ddl, /DELETE FROM public\.accountant_directory/,
+    "the reaction deletes the listing — losing a client must not destroy what the office typed");
+
+  // SECURITY DEFINER is necessary here (the unlinking party is often the client, who has no rights
+  // on the office's row), so the whole checklist that comes with one is asserted rather than
+  // trusted: a pinned search_path, no dynamic SQL, and all four default grant paths revoked in one
+  // statement — PUBLIC alone is the gap the privilege registry exists because of.
+  assert.match(ddl, /SECURITY DEFINER/, "the reaction lost SECURITY DEFINER — a client-side unlink will silently update nothing");
+  assert.match(ddl, /SET search_path = public/, "the SECURITY DEFINER function has a mutable search_path");
+  assert.doesNotMatch(ddl, /EXECUTE format|EXECUTE '|EXECUTE "/, "the SECURITY DEFINER function gained dynamic SQL");
+  assert.match(ddl, /REVOKE ALL ON FUNCTION public\.accountant_directory_unpublish_on_last_unlink\(\)\s*\n?\s*FROM PUBLIC, anon, authenticated, service_role/,
+    "the trigger function no longer revokes all four default grant paths");
+
+  // And the proof by attempt asserts VISIBILITY, before any directory write. The previous version
+  // of that file proved only that a NEW published write is refused after the link is gone, which
+  // says nothing about the row already out there — that is exactly how this defect survived.
+  const seam = readFileSync("tests/sql/accountant_directory_rls.test.sql", "utf8");
+  assert.match(seam, /^-- migrations:.*accountant_directory_unpublish_on_last_unlink\.sql/m,
+    "the SQL contract test no longer loads the unpublish reaction");
+  assert.match(seam, /THE LISTING OUTLIVED ITS EVIDENCE/,
+    "the contract test no longer asserts that anon stops seeing the listing after the last unlink");
+  assert.match(seam, /losing one of two clients leaves the listing public/,
+    "the contract test no longer separates the last link from any link");
+  assert.match(seam, /a new link does not republish/,
+    "the contract test no longer proves that a new relationship does not republish by itself");
+  assert.match(seam, /a CLIENT-side unlink left the listing public/,
+    "the contract test no longer exercises the client-side unlink — the case a route fix would miss");
+});
+
+
 // ─── [KANTOORGIDS-BEWIJS] A listing goes public on evidence, never on a self-declaration ──────
 //
 // /boekhouders is headed "Boekhouders die met BoekBrug werken". Its write policies asked only
