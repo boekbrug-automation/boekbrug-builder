@@ -219,6 +219,49 @@ EXCEPTION WHEN insufficient_privilege THEN
   RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] the guard refuses a real office — the control failed';
 END $$;
 
+-- THE RACE. The route reads eligibility before it writes, and those are two statements: either
+-- party may unlink in between. So the question is not whether the preflight was right when it ran,
+-- but whether the DATABASE still refuses once the evidence is gone — because a listing that stays
+-- public after its last client left is exactly what the preflight cannot prevent and this policy
+-- must. A's link is removed here with A's own session (accountant_clients_delete permits it), which
+-- is also the real way this happens.
+DO $$
+DECLARE n int;
+BEGIN
+  DELETE FROM public.accountant_clients
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] could not remove the link to set up the race (% rows)', n; END IF;
+END $$;
+
+DO $$ BEGIN
+  UPDATE public.accountant_directory SET city = 'Amersfoort', published = true
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] RACE: publication survived the evidence disappearing';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE '   ok · the database still refuses once the link is gone (42501) — the preflight is advisory, this is not';
+END $$;
+
+-- …and the office is still not trapped by that refusal: it can take the listing down.
+DO $$
+DECLARE n int;
+BEGIN
+  UPDATE public.accountant_directory SET published = false
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] an office that lost its last client is trapped (% rows)', n; END IF;
+  RAISE NOTICE '   ok · …and can still take its own listing down afterwards';
+END $$;
+
+-- Put A's evidence back so the rest of the file reads against the world it describes.
+RESET ROLE;
+INSERT INTO public.accountant_clients (accountant_id, zzper_id)
+VALUES ('a0000000-0000-0000-0000-00000000000a', 'c0000000-0000-0000-0000-00000000000c');
+UPDATE public.accountant_directory SET published = true
+ WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+SET ROLE authenticated;
+SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
+
 -- A cannot write B's row. USING pins the row to its owner, so the update matches NOTHING rather
 -- than raising: a refusal by invisibility, which is the right shape for a row that is not yours.
 RESET ROLE;

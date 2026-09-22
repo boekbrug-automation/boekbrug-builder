@@ -220,6 +220,42 @@ export function sortForOwner(entries: readonly DirectoryEntry[]): DirectoryEntry
 }
 
 /**
+ * [KANTOORGIDS-BEWIJS] What an office is told when it may not publish YET, and when we could not
+ * find out. Dutch, because both sentences are rendered verbatim.
+ *
+ * Publishing requires a consented client link — accountant_directory_publish_requires_client_link
+ * makes the database the final authority on that. The route reads the same fact first, for one
+ * reason only: so this sentence arrives instead of the 42501 the database would otherwise send,
+ * which reaches the office as "Opslaan is niet gelukt." and explains nothing. That unexplained
+ * refusal is the defect this whole batch began with; re-introducing it one layer up would be the
+ * same mistake wearing a different hat.
+ *
+ * Two sentences and not one, for the same reason `EMPTY_LIST` is not the unreadable copy below:
+ * "you have no client linked" and "we could not read your links" are opposite facts, and telling
+ * an office the first when the second is true sends it looking for a client it already has.
+ *
+ * Neither sentence claims anything about qualifications. A client link is evidence of a
+ * RELATIONSHIP — somebody agreed to be this office's client — and never proof of certification.
+ * The copy says what is true and nothing more.
+ *
+ * Both sentences end by saying that nothing was written, because nothing was: a refused publish
+ * makes no attempt at all, so claiming the listing was saved would be the one untruth this copy
+ * cannot afford. They point at saving a draft without naming the button that does it — [KNOP-IN-ZIN]:
+ * which button is on screen depends on whether the office is currently listed, so a sentence that
+ * named one would be wrong half the time.
+ */
+export const PUBLISH_ELIGIBILITY = {
+  /** No consented client link yet. A refusal, and a fixable one. */
+  needsClient:
+    "Je kunt je kantoor pas in de gids zetten als er minstens één klant met je gekoppeld is in " +
+    "BoekBrug. Er is nu niets opgeslagen — je vermelding als concept bewaren kan wel.",
+  /** The link read itself failed. Unknown, and never rendered as "you have none". */
+  unknown:
+    "We konden je koppelingen nu niet lezen, dus we weten niet of er al een klant aan je " +
+    "gekoppeld is. Er is nu niets opgeslagen — probeer het zo nog eens.",
+} as const;
+
+/**
  * What the public page says when the list is empty — which it is on the day this ships, and that
  * is not a failure to hide. An empty list dressed up as "binnenkort meer kantoren" is a claim
  * about offices that never agreed to be counted.

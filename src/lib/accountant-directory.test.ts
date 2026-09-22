@@ -8,6 +8,7 @@ import {
   DIRECTORY_LANGUAGES,
   EMPTY_LIST,
   LIMITS,
+  PUBLISH_ELIGIBILITY,
   draftProblems,
   entryProblems,
   isDirectoryLanguage,
@@ -248,4 +249,58 @@ test("[KANTOORGIDS-TAAL] a list longer than the set still reports its unknown", 
     languages: Array.from({ length: 5000 }, () => "nl"),
   });
   assert.deepStrictEqual(veel.languages, ["nl"], "de-duplication stopped bounding the list");
+});
+
+// ─── [KANTOORGIDS-BEWIJS] What an office is told when it may not publish yet ───────────────────
+//
+// The database refuses publication without a consented client link. That refusal is correct and
+// authoritative, and on its own it reaches the screen as "Opslaan is niet gelukt." — which is the
+// exact unexplained failure this batch was opened to remove. These two sentences are what arrives
+// instead, and these tests hold the properties that make them worth having.
+
+test("[KANTOORGIDS-BEWIJS] the two eligibility sentences do not mean the same thing", () => {
+  // "you have no client yet" and "we could not read your links" are opposite facts. Saying the
+  // first when the second is true sends an office looking for a link it already has — the same
+  // failure the empty/unreadable split on the public gids exists to prevent.
+  assert.notStrictEqual(PUBLISH_ELIGIBILITY.needsClient, PUBLISH_ELIGIBILITY.unknown);
+  assert.match(PUBLISH_ELIGIBILITY.unknown, /niet lezen|weten niet/,
+    "the unknown sentence does not say that we could not find out");
+  assert.doesNotMatch(PUBLISH_ELIGIBILITY.unknown, /geen klant (gekoppeld|met je)/,
+    "a failed read is worded as 'you have no client' — unknown is not zero");
+});
+
+test("[KANTOORGIDS-BEWIJS] the refusal says what to do, and is not a failure", () => {
+  // A fixable state, not a breakage: it names the one condition and it is Dutch prose, not a code.
+  assert.match(PUBLISH_ELIGIBILITY.needsClient, /minstens één klant/);
+  assert.match(PUBLISH_ELIGIBILITY.needsClient, /gekoppeld/);
+  for (const zin of [PUBLISH_ELIGIBILITY.needsClient, PUBLISH_ELIGIBILITY.unknown]) {
+    assert.ok(zin.length > 40 && zin.length < 240, "a sentence this long is not read");
+    assert.doesNotMatch(zin, /\b(error|failed|42501|23514|null|undefined)\b/i,
+      "a machine word reached the sentence an office reads");
+  }
+});
+
+test("[KANTOORGIDS-BEWIJS] neither sentence claims we verified anything", () => {
+  // A client link is evidence of a RELATIONSHIP — somebody agreed to be this office's client. It
+  // is not proof of certification, and the copy must never imply BoekBrug checked a qualification
+  // it has never looked at.
+  for (const zin of [PUBLISH_ELIGIBILITY.needsClient, PUBLISH_ELIGIBILITY.unknown]) {
+    assert.doesNotMatch(zin, /geverifieerd|verifica|gecontroleerd|erkend|keurmerk|gecertificeerd|bevoegd/i,
+      "the eligibility copy claims a verification that never happened");
+  }
+});
+
+test("[KANTOORGIDS-BEWIJS] neither sentence claims the listing was saved", () => {
+  // A refused publish makes NO write attempt, so "je vermelding is bewaard" would be false. The
+  // office is told plainly that nothing was written, and that a draft is still possible.
+  for (const zin of [PUBLISH_ELIGIBILITY.needsClient, PUBLISH_ELIGIBILITY.unknown]) {
+    assert.match(zin, /niets opgeslagen/,
+      "the sentence does not say that nothing was written — but nothing was");
+  }
+  // …and it does not name a button. [KNOP-IN-ZIN]: which save button is on screen depends on
+  // whether the office is currently listed, so naming one would be wrong half the time.
+  for (const zin of [PUBLISH_ELIGIBILITY.needsClient, PUBLISH_ELIGIBILITY.unknown]) {
+    assert.doesNotMatch(zin, /Alleen opslaan|Zet mij in de gids|Haal mij uit de gids|Bijwerken/,
+      "the sentence names a button that is not always on the screen");
+  }
 });

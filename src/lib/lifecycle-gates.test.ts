@@ -34004,6 +34004,61 @@ test("[KANTOORGIDS-TAAL] the repo carries the language contract the database alr
 });
 
 
+// ─── [KANTOORGIDS-BEWIJS] The refusal reaches the office as a sentence, not as a 503 ──────────
+//
+// The database is the authority on who may publish, and its refusal is a 42501. On its own that
+// arrives at the panel as "Opslaan is niet gelukt." — which is, to the letter, the unexplained
+// publication failure this whole batch was opened to remove. Fixing the cause and leaving the
+// wording would have replaced one silent refusal with another.
+//
+// So the route asks the same question first, purely to get the sentence right, and this gate holds
+// the three properties that make that worth having. It reads the route's SOURCE: a route has no
+// pure part to test, and the behaviour it guards is a shape (which branch, in which order, before
+// which write) rather than a value.
+test("[KANTOORGIDS-BEWIJS] an office that may not publish yet is told so, and nothing is written", () => {
+  const route = code("src/app/api/kantoorgids/route.ts");
+
+  // 1 — THREE answers, never two. A failed read is not "you have no clients": an office told that
+  //     while holding a link goes looking for something it already has.
+  assert.match(route, /Promise<'linked' \| 'none' \| 'unknown'>/,
+    "the eligibility read lost its unknown state — a failed read now reads as 'no link'");
+  assert.match(route, /if \(error\) return 'unknown'/,
+    "a failed link read no longer answers 'unknown'");
+
+  // 2 — the three branches are wired to three different answers, and the two refusals do not share
+  //     a status. 'none' is a state the office can change, so it is not a 5xx.
+  assert.match(route, /eligibility === 'unknown'[\s\S]{0,200}?PUBLISH_ELIGIBILITY\.unknown[\s\S]{0,80}?status: 503/,
+    "an unreadable link state no longer answers with its own sentence and a 503");
+  assert.match(route, /eligibility === 'none'[\s\S]{0,240}?PUBLISH_ELIGIBILITY\.needsClient[\s\S]{0,120}?status: 409/,
+    "a missing client link no longer answers with a sentence and a non-5xx status");
+
+  // 3 — it runs ONLY when publishing, and BEFORE the write. A draft is not going public, so
+  //     eligibility is not its business — and a refused publish must leave nothing behind.
+  const preflight = route.indexOf("const eligibility = await publishEligibility");
+  const upsert = route.indexOf(".upsert(");
+  assert.ok(preflight > 0 && upsert > preflight,
+    "the eligibility read no longer runs before the write — a refused publish now writes first");
+  const gate = route.lastIndexOf("if (wantsPublished)", preflight);
+  assert.ok(gate > 0 && preflight - gate < 200,
+    "the eligibility read is no longer gated on publishing — a draft save now needs a client link");
+
+  // 4 — THE RACE. The read and the write are two statements, so the link can vanish between them.
+  //     The database refuses, correctly, and that refusal must carry the SAME sentence — otherwise
+  //     the generic 503 returns through the one path nobody tests, in the exact window where the
+  //     office has just lost a client and is least able to guess why.
+  assert.match(route, /wantsPublished && \(error as \{ code\?: string \}\)\.code === '42501'[\s\S]{0,240}?PUBLISH_ELIGIBILITY\.needsClient/,
+    "a publish refused by the policy after the preflight falls back to the generic failure again");
+
+  // 5 — and the preflight never becomes the authority. It is a session read under the same RLS the
+  //     write will face; it decides nothing the policy does not also decide.
+  assert.match(route, /from\('accountant_clients'\)/,
+    "the eligibility read no longer asks about the client link at all");
+  assert.doesNotMatch(route, /createPipelineClient/,
+    "the kantoorgids route reached for service_role — the eligibility read must run under the " +
+    "caller's own RLS, and no write here may bypass the policy that is the actual boundary");
+});
+
+
 // ─── [KANTOORGIDS-BEWIJS] A listing goes public on evidence, never on a self-declaration ──────
 //
 // /boekhouders is headed "Boekhouders die met BoekBrug werken". Its write policies asked only

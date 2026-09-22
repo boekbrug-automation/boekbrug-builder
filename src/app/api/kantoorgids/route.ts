@@ -22,7 +22,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 import { createServerSupabaseClient } from '@/lib/supabase-server'
-import { draftProblems, entryProblems, normaliseEntry, type DirectoryEntry } from '@/lib/accountant-directory'
+import {
+  PUBLISH_ELIGIBILITY,
+  draftProblems,
+  entryProblems,
+  normaliseEntry,
+  type DirectoryEntry,
+} from '@/lib/accountant-directory'
 
 export const dynamic = 'force-dynamic'
 
@@ -62,6 +68,36 @@ function toEntry(row: Row): DirectoryEntry {
 /** The one column list, so GET and the shape it promises can never drift apart. */
 const COLUMNS =
   'accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, published, languages'
+
+/**
+ * [KANTOORGIDS-BEWIJS] May this office go into the gids at all?
+ *
+ * Three answers, never two. `accountant_directory_publish_requires_client_link` lets a listing
+ * become public only while its owner holds a consented row in accountant_clients, and the DATABASE
+ * is the authority on that — this read decides nothing. It exists so the office is told WHY in a
+ * sentence, instead of receiving the 42501 that reaches the screen as "Opslaan is niet gelukt."
+ *
+ * 'unknown' is a state of its own and not a pessimistic 'none'. A failed read means we do not
+ * know, and telling an office it has no clients because a query timed out sends it looking for a
+ * link it already has. Same rule the public gids follows for its own failed read.
+ *
+ * The session client on purpose: accountant_clients_select admits exactly the rows that name the
+ * caller, so this asks the question under the same RLS the write will face. A service-role read
+ * here would answer a question the writer is not actually allowed to ask.
+ */
+async function publishEligibility(
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  accountantId: string,
+): Promise<'linked' | 'none' | 'unknown'> {
+  const { data, error } = await supabase
+    .from('accountant_clients')
+    .select('accountant_id')
+    .eq('accountant_id', accountantId)
+    .limit(1)
+
+  if (error) return 'unknown'
+  return (data ?? []).length > 0 ? 'linked' : 'none'
+}
 
 /** Signed in, and an accountant. Returns the user id, or the response to send instead. */
 async function requireAccountant(): Promise<
@@ -137,6 +173,27 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ ok: false, problems }, { status: 400 })
   }
 
+  // [KANTOORGIDS-BEWIJS] Only when PUBLISHING, and only to get the sentence right. The database
+  // decides; this asks the same question first so a refusal arrives as Dutch instead of as a
+  // 42501 dressed up as "Opslaan is niet gelukt." A draft never reaches here — it is not going
+  // public, so eligibility is not its business.
+  //
+  // 409 and not 5xx: nothing is broken. The request is well formed and the answer is "not yet",
+  // which is a state the office can change. It travels in `problems` because that is the field
+  // the panel already renders next to the form, where a fixable refusal belongs.
+  if (wantsPublished) {
+    const eligibility = await publishEligibility(auth.supabase, auth.id)
+    if (eligibility === 'unknown') {
+      return NextResponse.json({ error: PUBLISH_ELIGIBILITY.unknown }, { status: 503 })
+    }
+    if (eligibility === 'none') {
+      return NextResponse.json(
+        { ok: false, problems: [PUBLISH_ELIGIBILITY.needsClient] },
+        { status: 409 },
+      )
+    }
+  }
+
   const { error } = await auth.supabase.from('accountant_directory').upsert(
     {
       accountant_id: auth.id,
@@ -159,6 +216,23 @@ export async function PUT(request: NextRequest) {
   if (error) {
     if (isMissingTable((error as { code?: string }).code, error.message)) {
       return NextResponse.json({ error: GEEN_TABEL }, { status: 503 })
+    }
+    // [KANTOORGIDS-BEWIJS] The race, answered in the same words as the preflight.
+    //
+    // The eligibility read above and this write are two statements, so the link can be deleted
+    // between them — either party may unlink at any moment. When that happens the policy refuses
+    // with 42501, and the DATABASE is right: publication must not survive the evidence
+    // disappearing. That is the whole reason the preflight is advisory and this rule is not.
+    //
+    // What must not survive is the WORDING. Falling through to "Opslaan is niet gelukt." here
+    // would reintroduce the unexplained refusal one code path over from where it was just fixed —
+    // and it would be worse, because it appears only in the narrow window where the office also
+    // just lost a client and has every reason to be confused already.
+    if (wantsPublished && (error as { code?: string }).code === '42501') {
+      return NextResponse.json(
+        { ok: false, problems: [PUBLISH_ELIGIBILITY.needsClient] },
+        { status: 409 },
+      )
     }
     console.error('[KANTOORGIDS] opslaan mislukt', { error: error.message })
     return NextResponse.json({ error: 'Opslaan is niet gelukt.' }, { status: 503 })
