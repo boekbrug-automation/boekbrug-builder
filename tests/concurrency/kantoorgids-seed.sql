@@ -1,4 +1,4 @@
--- [KANTOORGIDS-BEWIJS] The world both directory concurrency scenarios contend over.
+-- [KANTOORGIDS-BEWIJS] The world every directory concurrency scenario contends over.
 --
 -- Deliberately the smallest shape that makes a lost race visible as a WRONG PUBLIC STATE rather
 -- than as a wrong count: one office, two clients, one published listing. Either delete alone
@@ -49,3 +49,40 @@ BEGIN
     tries := tries + 1;
   END LOOP;
 END $$;
+
+-- A NAMED barrier: two different connections must each be held at a different
+-- point, and one 'go' cannot release them separately. Same bounded shape as conc_wait_for_go().
+CREATE OR REPLACE FUNCTION public.conc_wait_for(p text) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE tries int := 0;
+BEGIN
+  WHILE tries < 600 LOOP
+    IF EXISTS (SELECT 1 FROM public.conc_signal WHERE name = p) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.05);
+    tries := tries + 1;
+  END LOOP;
+END $$;
+
+-- A HOLD POINT INSIDE ONE STATEMENT, for the scenarios whose deadlock window lies between two
+-- locks taken by the SAME statement — after a BEFORE trigger has run, before PostgreSQL goes on to
+-- find the upsert's conflict. No barrier between statements can reach that point.
+--
+-- Test-only, and inert unless a connection opts in: it pauses only when that connection has set
+-- conc.hold to this trigger's position. Trigger names fire in alphabetical order, so aaa_ runs
+-- BEFORE accountant_directory_publication_evidence and zzz_ runs AFTER it. When released, a
+-- second firing (the BEFORE UPDATE leg of an upsert) passes straight through.
+CREATE OR REPLACE FUNCTION public.conc_hold() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('conc.hold', true) = TG_ARGV[0] THEN
+    PERFORM public.conc_wait_for('hold-go');
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE OR REPLACE TRIGGER aaa_conc_hold
+  BEFORE INSERT OR UPDATE ON public.accountant_directory
+  FOR EACH ROW EXECUTE FUNCTION public.conc_hold('before-evidence');
+CREATE OR REPLACE TRIGGER zzz_conc_hold
+  BEFORE INSERT OR UPDATE ON public.accountant_directory
+  FOR EACH ROW EXECUTE FUNCTION public.conc_hold('after-evidence');

@@ -27,43 +27,73 @@
 -- better predicate, it is SERIALIZATION. The same shape closes the publish-versus-unlink race,
 -- where a publish validates against a link another transaction is in the middle of deleting.
 --
--- ── THE MECHANISM: ONE LOCK PER ACCOUNTANT, TAKEN LAST ──────────────────────
--- Every path that can change either side of the invariant takes the SAME transaction-scoped
--- advisory lock, keyed on the accountant, and then re-reads. Because each statement in READ
--- COMMITTED takes a fresh snapshot, the re-read after the lock sees everything the previous holder
--- committed — which is exactly what the first read could not.
+-- ── THE MECHANISM: ONE LOCK PER ACCOUNTANT, TAKEN FIRST ─────────────────────
+-- Every path that can change either side of the invariant is serialized per accountant, and then
+-- re-reads. Because each statement in READ COMMITTED takes a fresh snapshot, the re-read after the
+-- lock sees everything the previous holder committed — which is exactly what the first read could
+-- not.
 --
--- An advisory lock rather than a row lock, for one reason that is not stylistic: the publish path
--- may be an INSERT, and there is no row to lock before it exists. A brand-new office whose first
--- save IS a publish is an ordinary case (the route upserts), and a mechanism that only works once
--- the row exists would leave that case open.
+-- The serializer is a transaction-scoped advisory lock rather than a row lock, for one reason that
+-- is not stylistic: the publish path may be an INSERT, and there is no row to lock before it
+-- exists. A brand-new office whose first save IS a publish is an ordinary case (the route
+-- upserts), and a mechanism that only works once the row exists would leave that case open.
 --
 -- The key is hashtextextended(accountant_id::text, 0) — 64 bits. Two different accountants could
 -- in principle collide and serialize against each other for the length of one statement. That
 -- costs a little contention and can never cost correctness, which is the right way round.
 --
 -- ── LOCK ORDER, AND WHY THERE IS NO DEADLOCK ────────────────────────────────
--- The rule is: the advisory lock is acquired LAST on every path, after whatever row locks that
--- path naturally takes. A single common resource, always acquired last, cannot be part of a
--- waits-for cycle.
+-- Two lock objects per accountant: the advisory lock, and the accountant_directory tuple once it
+-- exists. ONE order for both, on every path: ADVISORY LOCK → DIRECTORY TUPLE. No path holds the
+-- tuple and then waits for the advisory lock, so no two paths can wait on each other in a cycle.
 --
---     publish by UPDATE   : accountant_directory tuple → advisory
---     publish by INSERT   : advisory                     (no pre-existing tuple to lock)
---     unlink              : accountant_clients tuple → accountant_directory tuple → advisory
+--     publish by plain UPDATE          : directory tuple                  (takes no advisory lock)
+--     publish by plain INSERT          : advisory → its own new tuple
+--     UPSERT that inserts              : advisory → its own new tuple
+--     UPSERT → ON CONFLICT DO UPDATE   : advisory → the existing directory tuple
+--     unlink                           : accountant_clients tuple → advisory → directory tuple
 --
--- The explicit `FOR UPDATE` in the unlink trigger is what makes that true, and it is not
--- decoration. Without it the unlink path would take the advisory lock BEFORE its UPDATE of
--- accountant_directory, i.e. advisory → directory tuple, which is the reverse of the publish
--- path's order — and a publisher holding the directory tuple while waiting for the advisory lock,
--- against an unlinker holding the advisory lock while waiting for that tuple, is a textbook
--- deadlock. PostgreSQL would detect and abort one of them, so it is not a correctness bug; it is
--- an avoidable failure, and avoiding it is one line.
+-- The upsert rows are the ones that decide the order, and they are the application's real writer:
+-- /api/kantoorgids publishes with supabase-js .upsert(), i.e. INSERT … ON CONFLICT DO UPDATE.
+-- PostgreSQL fires the BEFORE INSERT trigger on the PROPOSED row before it discovers the conflict
+-- and locks the existing tuple, so an upsert that takes the advisory lock at all takes it FIRST.
+-- The order has to be built around that, because nothing inside a trigger can change it.
 --
--- Two unlinks of different clients take different accountant_clients tuples, then the same
--- directory tuple, then the same advisory lock — same order, no cycle. Two publishes contend on
--- the directory tuple first. A publish and an unlink share only the directory tuple and the
--- advisory lock, in that order on both sides.
+-- WHY A PLAIN UPDATE TAKES NO ADVISORY LOCK. PostgreSQL locks the tuple before any BEFORE UPDATE
+-- trigger runs, so a lock taken there would be tuple → advisory — the reverse of every other path.
+-- It does not need one. The unlink trigger locks this same tuple BEFORE it reads the evidence, so
+-- a publishing UPDATE and an unlink are serialized on the tuple itself: whichever holds it first
+-- finishes, and the other decides on a snapshot taken after that commit.
 --
+-- WHY EVERY INSERT TAKES IT, PUBLISHED OR NOT. An uncommitted row is invisible, so the unlink
+-- trigger's FOR UPDATE cannot wait on a row that is still being inserted. A draft inserted and
+-- published inside one transaction would otherwise reach COMMIT with nothing having serialized it
+-- against an unlink. The same holds for an UPDATE that moves a row to another accountant_id, which
+-- is an arrival at that accountant just like an insert. No session can do either — PostgREST runs
+-- one statement per request, and accountant_directory_own_update pins accountant_id on both sides
+-- — but the invariant is kept here for every writer, not only for the ones the route produces.
+--
+-- HOW THIS ORDER WAS ARRIVED AT, because the obvious alternatives were both tried and measured:
+--   · e8ea973 took the advisory lock LAST ("after whatever row locks the path takes"). A plain
+--     UPDATE fits that rule; the upsert cannot. Two connections on a real PostgreSQL — an upsert
+--     publishing an existing draft, the last client unlinking — gave `deadlock detected`. Which
+--     side dies depends on which waited longer, and both were measured: the office's save aborted
+--     ("Opslaan is niet gelukt."), or the client's unlink aborted and the link stayed.
+--   · Taking the tuple FIRST inside the publish trigger (FOR UPDATE, then advisory) closed that
+--     two-party case and left a three-party one, found under stress: two first saves and an
+--     unlink. The second first save finds no row to lock, waits for the lock, and meanwhile the
+--     FIRST save commits the row; it then holds the advisory lock and needs that tuple, while the
+--     unlink holds the tuple and needs the advisory lock. A row that did not exist when the lock
+--     was requested cannot be locked before it.
+-- The reverse order has no such case, because the only path that touches the tuple without the
+-- advisory lock — the plain UPDATE — never asks for the advisory lock afterwards.
+--
+-- Outside this order, and said rather than discovered: a cascade from deleting a profile removes
+-- links, and possibly the listing, in whatever order the foreign keys fire, and one statement may
+-- touch several accountants in scan order. Those statements are not held to the table above. The
+-- worst they can meet is a detected deadlock — one statement aborted and retried — and never a
+-- published listing without evidence, because a deadlock victim commits nothing.
+
 -- ── WHY NOT A SMARTER READ POLICY ───────────────────────────────────────────
 -- `USING (published AND EXISTS (… accountant_clients …))` would be a continuously evaluated
 -- invariant and would need no locking at all. It was MEASURED on a real PostgreSQL and rejected,
@@ -102,11 +132,19 @@ LANGUAGE plpgsql
 SET search_path = public
 AS $$
 BEGIN
-  -- Serialize against every other writer for THIS accountant, then look again. Taken after the
-  -- row lock an UPDATE has already acquired, so the order is directory tuple → advisory.
-  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.accountant_id::text, 0));
+  -- A row ARRIVING at an accountant takes that accountant's lock: every INSERT, including the
+  -- INSERT leg of the route's upsert, and an UPDATE that re-keys the row. It is the first lock
+  -- this statement asks for, which is the order the whole file depends on — see LOCK ORDER above.
+  -- On an INSERT the first test decides; OLD is NULL there, which makes the second test true as
+  -- well, never an error.
+  --
+  -- A plain UPDATE of the office's own row takes NO advisory lock here: PostgreSQL already holds
+  -- the tuple, and asking for the advisory lock now would reverse the order.
+  IF TG_OP = 'INSERT' OR NEW.accountant_id IS DISTINCT FROM OLD.accountant_id THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.accountant_id::text, 0));
+  END IF;
 
-  IF NOT EXISTS (
+  IF NEW.published AND NOT EXISTS (
     SELECT 1 FROM public.accountant_clients ac
      WHERE ac.accountant_id = NEW.accountant_id
   ) THEN
@@ -121,17 +159,19 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.accountant_directory_publication_needs_evidence() IS
-  '[KANTOORGIDS-BEWIJS] Weigert een publicatie waarvoor op het moment van COMMIT geen bevestigde klantkoppeling (meer) bestaat. Neemt per boekhouder een advisory lock zodat een gelijktijdige ontkoppeling niet langs de controle glipt. SECURITY INVOKER: leest alleen wat de aanroeper zelf al mag zien.';
+  '[KANTOORGIDS-BEWIJS] Weigert een publicatie waarvoor op het moment van COMMIT geen bevestigde klantkoppeling (meer) bestaat. Een rij die bij een boekhouder AANKOMT (INSERT, ook via upsert, of een UPDATE die accountant_id wijzigt) neemt eerst de advisory lock van die boekhouder; een gewone UPDATE niet, want die houdt de rij al vast. SECURITY INVOKER: leest alleen wat de aanroeper zelf al mag zien.';
 
 REVOKE ALL ON FUNCTION public.accountant_directory_publication_needs_evidence()
   FROM PUBLIC, anon, authenticated, service_role;
 
--- WHEN (NEW.published): the lock is taken only by a write that actually leaves the row public.
--- A draft save takes no lock at all and contends with nothing.
+-- No WHEN clause, on purpose. A draft INSERT must take the lock too (see LOCK ORDER), and a WHEN
+-- on an INSERT OR UPDATE trigger cannot read OLD to spot a re-keying UPDATE. The function returns
+-- at once for an UPDATE that neither publishes nor re-keys — the unlink trigger's own
+-- `SET published = false` among them.
 DROP TRIGGER IF EXISTS accountant_directory_publication_evidence ON public.accountant_directory;
 CREATE TRIGGER accountant_directory_publication_evidence
   BEFORE INSERT OR UPDATE ON public.accountant_directory
-  FOR EACH ROW WHEN (NEW.published)
+  FOR EACH ROW
   EXECUTE FUNCTION public.accountant_directory_publication_needs_evidence();
 
 -- ── 2. The unlink side ───────────────────────────────────────────────────────
@@ -154,16 +194,19 @@ BEGIN
     RETURN OLD;
   END IF;
 
-  -- LOCK ORDER, FIRST HALF. The directory row before the advisory lock, so this path and the
-  -- publish path acquire in the same order and cannot form a waits-for cycle. A no-op when the
-  -- row does not exist or is not yet visible — harmless, and the advisory lock below is what
-  -- covers that case.
+  -- LOCK ORDER, FIRST: the per-accountant serializer. This orders the unlink after any insert or
+  -- upsert already in flight for this accountant, and every one that starts later waits for it.
+  PERFORM pg_advisory_xact_lock(hashtextextended(OLD.accountant_id::text, 0));
+
+  -- LOCK ORDER, SECOND: the directory row, and BEFORE the evidence is read. This is what
+  -- serializes the unlink against a publishing plain UPDATE, which holds this tuple and takes no
+  -- advisory lock: whichever of the two holds the row first finishes, and the other decides on a
+  -- snapshot taken after that. Without it, an unlink that finds a draft would skip its UPDATE,
+  -- hold nothing, and a publish validated against its still-uncommitted delete would commit.
+  -- A no-op when no row exists; after the advisory lock, none can be in the middle of arriving.
   PERFORM 1 FROM public.accountant_directory
    WHERE accountant_id = OLD.accountant_id
      FOR UPDATE;
-
-  -- LOCK ORDER, SECOND HALF. The per-accountant serializer, acquired last on every path.
-  PERFORM pg_advisory_xact_lock(hashtextextended(OLD.accountant_id::text, 0));
 
   -- A NEW statement, therefore a NEW snapshot: this sees every delete committed by whoever held
   -- the lock before us. That is the whole correction — the same predicate read one snapshot later.
@@ -188,7 +231,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.accountant_directory_unpublish_on_last_unlink() IS
-  '[KANTOORGIDS-BEWIJS] Zet een kantoorvermelding op published = false zodra de laatste bevestigde klantkoppeling verdwijnt. Neemt eerst de directory-rij en dan de advisory lock per boekhouder, zodat twee gelijktijdige ontkoppelingen elkaar niet allebei voor "niet de laatste" aanzien. SECURITY DEFINER omdat de klant die ontkoppelt geen rechten heeft op de rij van het kantoor. Raakt één kolom op één rij aan, publiceert nooit, verwijdert nooit.';
+  '[KANTOORGIDS-BEWIJS] Zet een kantoorvermelding op published = false zodra de laatste bevestigde klantkoppeling verdwijnt. Neemt eerst de advisory lock per boekhouder en dan de directory-rij, zodat twee gelijktijdige ontkoppelingen elkaar niet allebei voor "niet de laatste" aanzien. SECURITY DEFINER omdat de klant die ontkoppelt geen rechten heeft op de rij van het kantoor. Raakt één kolom op één rij aan, publiceert nooit, verwijdert nooit.';
 
 -- Nobody needs EXECUTE on either function. Supabase attaches a NAMED grant to anon, authenticated
 -- and service_role on every new function, and REVOKE … FROM PUBLIC does not touch a named grantee
@@ -235,5 +278,6 @@ CREATE TRIGGER accountant_clients_unpublish_directory
 --    Expected: zero rows, at any moment.
 --
 -- 4) Behaviour under one connection: tests/sql/accountant_directory_rls.test.sql.
---    Behaviour under two real connections: scripts/sql-concurrency-test.sh scenarios 3 and 4.
+--    Behaviour under two and three real connections: scripts/sql-concurrency-test.sh scenarios
+--    3 to 8, including the route's own upsert (6) and two first saves racing an unlink (7).
 -- =====================================================================

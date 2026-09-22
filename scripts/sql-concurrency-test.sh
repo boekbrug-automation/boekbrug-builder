@@ -335,7 +335,8 @@ scenario_2() {
 # still on the public page.
 #
 # The correction is not a better predicate, it is serialization: one advisory lock per accountant,
-# taken last on every path, and the predicate re-read afterwards on a fresh snapshot.
+# taken FIRST by every path that takes it, and the predicate re-read afterwards on a fresh snapshot.
+# Scenarios 3–5 show each lock is necessary; 4b and 6–8 show the order they are taken in is safe.
 KG_MIGS="accountant_directory.sql accountant_directory_talen.sql accountant_directory_publish_requires_client_link.sql accountant_directory_publication_follows_evidence.sql"
 KG_FILE="accountant_directory_publication_follows_evidence.sql"
 KG_A=0a000000-0000-4000-8000-00000000000a
@@ -671,15 +672,507 @@ scenario_5() {
   expect "  no published listing without evidence" "$(kg_violations)" "0"
 }
 
+# =====================================================================
+# SCENARIOS 6–8 — the lock ORDER, not only the locks
+# =====================================================================
+# Scenarios 3–5 prove that each lock is necessary. These prove that the order they are taken in
+# cannot deadlock — under the statement the application really sends, and under the shapes that
+# decide the order.
+#
+# The rule (see LOCK ORDER in the migration): ADVISORY LOCK → DIRECTORY TUPLE on every path, and a
+# plain UPDATE, which PostgreSQL has already given the tuple, takes no advisory lock at all.
+#
+# Several windows below lie INSIDE one statement — after a BEFORE trigger has run, before
+# PostgreSQL finds the upsert's conflict — where no barrier between statements can reach. The
+# seed's test-only hold triggers pause a connection exactly there, and only a connection that
+# asked for it (conc.hold). Each connection is named (application_name), so the driver reads THAT
+# connection's locks in pg_locks rather than any lock anywhere.
+
+# /api/kantoorgids never publishes with a bare UPDATE or a bare INSERT. It calls supabase-js
+# .upsert(payload, { onConflict: 'accountant_id' }), which PostgREST sends as this statement, with
+# the route's payload: every column the route writes, in the route's order.
+KG_UPSERT="INSERT INTO public.accountant_directory
+  (accountant_id, office_name, city, specialisms, accepting_clients, contact_email, website, published, languages, updated_at)
+VALUES ('$KG_A', 'Kantoor A', 'Utrecht', '{}', false, 'a@a.nl', NULL, true, ARRAY['nl'], now())
+ON CONFLICT (accountant_id) DO UPDATE SET
+  office_name = EXCLUDED.office_name, city = EXCLUDED.city, specialisms = EXCLUDED.specialisms,
+  accepting_clients = EXCLUDED.accepting_clients, contact_email = EXCLUDED.contact_email,
+  website = EXCLUDED.website, published = EXCLUDED.published, languages = EXCLUDED.languages,
+  updated_at = EXCLUDED.updated_at;"
+KG_UNLINK_C="DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_C';"
+
+# THIS accountant's advisory lock, as pg_locks shows a bigint key: high word in classid, low in objid.
+KG_LOCK="l.locktype = 'advisory' AND l.objsubid = 1
+  AND l.classid = ((hashtextextended('$KG_A', 0) >> 32) & 4294967295)::oid
+  AND l.objid   = (hashtextextended('$KG_A', 0) & 4294967295)::oid"
+
+kg_lock_of()  { # $1 application_name  $2 granted (true|false) → rows of this accountant's advisory lock
+  q "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+      WHERE a.application_name = '$1' AND l.granted = $2 AND $KG_LOCK"; }
+kg_waits()    { q "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                    WHERE a.application_name = '$1' AND NOT l.granted"; }
+kg_held()     { q "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$1' AND wait_event = 'PgSleep'"; }
+kg_barrier()  { q "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND objid = 777
+                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"; }
+kg_signal()   { q "INSERT INTO public.conc_signal(name) VALUES ('$1') ON CONFLICT DO NOTHING" > /dev/null 2>&1; }
+
+# Is the directory tuple locked by anyone right now? A NOWAIT probe, rolled back at once. Only
+# called while every other connection is parked (asleep at a hold point, or queued for the
+# advisory lock), so the probe's instant of holding it disturbs nothing.
+kg_tuple() {
+  if "${PSQL[@]}" -v ON_ERROR_STOP=1 > /dev/null 2>&1 <<SQL
+BEGIN;
+SELECT 1 FROM public.accountant_directory WHERE accountant_id = '$KG_A' FOR UPDATE NOWAIT;
+ROLLBACK;
+SQL
+  then echo free; else echo locked; fi
+}
+
+# Poll until "$1" prints "$2", or until pid $3 has gone. Prints yes/no. A missed step is a failure.
+kg_until() {
+  local t=0
+  while [ $t -lt 600 ]; do
+    [ "$(eval "$1")" = "$2" ] && { echo yes; return; }
+    kill -0 "$3" 2>/dev/null || { echo no; return; }
+    t=$((t + 1))
+  done
+  echo no
+}
+
+# Every connection's output, classified: deadlocks, the contracted 42501 refusal, anything else.
+kg_classify() {
+  KG_DEADLOCK=$(cat "$tmp"/k_*.out | grep -ci 'deadlock detected')
+  KG_REFUSED=$(cat "$tmp"/k_*.out | grep -c 'needs at least one consented client link')
+  KG_UNEXPECTED=$(cat "$tmp"/k_*.out | grep 'ERROR' | grep -v 'needs at least one consented client link' | grep -vci 'deadlock detected')
+}
+
+kg_settled() { # the outcomes the review requires, whichever interleaving ran
+  expect "  no deadlock" "$KG_DEADLOCK" "0"
+  expect "  no unexpected transaction abort" "$KG_UNEXPECTED" "0"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  the listing is not published" "$(kg_published)" "false"
+  expect "  anon cannot see the office" "$(kg_anon_sees)" "0"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+}
+
+# A connection, named, in the background. $1 name  $2 SQL. Its pid lands in KG_PID.
+kg_conn() {
+  rm -f "$tmp/k_$1.out"
+  PGAPPNAME="$1" "${PSQL[@]}" -v ON_ERROR_STOP=0 > "$tmp/k_$1.out" 2>&1 <<SQL &
+$2
+SQL
+  KG_PID=$!
+}
+
+kg_draft_one_link() { # an office with a draft and exactly one client — just before it publishes
+  kg_seed
+  run -c "DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_D';
+          UPDATE public.accountant_directory SET published = false WHERE accountant_id = '$KG_A';" > /dev/null 2>&1
+  rm -f "$tmp"/k_*.out; q "TRUNCATE public.conc_signal" > /dev/null 2>&1
+}
+kg_no_row_one_link() { # a new office: one client, and no directory row yet
+  kg_seed
+  run -c "DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_D';
+          DELETE FROM public.accountant_directory WHERE accountant_id = '$KG_A';" > /dev/null 2>&1
+  rm -f "$tmp"/k_*.out; q "TRUNCATE public.conc_signal" > /dev/null 2>&1
+}
+
+# ── what the LIVE function bodies say, read from pg_proc and never from the file ──
+kg_unlink_order() { q "SELECT CASE WHEN strpos(prosrc, 'pg_advisory_xact_lock') < strpos(prosrc, 'FOR UPDATE')
+                                   THEN 'advisory-first' ELSE 'tuple-first' END
+                         FROM pg_proc WHERE proname = 'accountant_directory_unpublish_on_last_unlink'"; }
+kg_publish_lock_when() { q "SELECT substring(prosrc FROM '\n\s*IF ([^\n]*) THEN\s*\n\s*PERFORM pg_advisory_xact_lock')
+                              FROM pg_proc WHERE proname = 'accountant_directory_publication_needs_evidence'"; }
+KG_ARRIVAL="TG_OP = 'INSERT' OR NEW.accountant_id IS DISTINCT FROM OLD.accountant_id"
+
+# ── mutations, each into a disposable copy, each refusing to run unless it landed exactly once ──
+# The unlink trigger with its two locks in the e8ea973 order: the tuple, then the advisory lock.
+kg_mutate_unlink_order() { # $1 src  $2 dst
+  awk '
+    index($0, "CREATE OR REPLACE FUNCTION public.accountant_directory_unpublish_on_last_unlink") { infn = 1 }
+    infn && held == "" && /pg_advisory_xact_lock/ { held = $0; next }
+    infn && held != "" && !moved && /FOR UPDATE;/ { print; print held; moved = 1; next }
+    { print }
+    END { if (!moved) exit 3 }
+  ' "$1" > "$2"
+}
+# The publish trigger's lock condition, replaced by $3. Exactly one line, or exit 3.
+kg_mutate_arrival() { # $1 src  $2 dst  $3 new condition
+  awk -v old="IF $KG_ARRIVAL THEN" -v new="IF $3 THEN" '
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    line == old { print "  " new; n++; next }
+    { print }
+    END { if (n != 1) exit 3 }
+  ' "$1" > "$2"
+}
+
+# =====================================================================
+# SCENARIO 6 — the REAL writer: the route's UPSERT versus the last unlink
+# =====================================================================
+# An existing draft, one client, and the office publishes through the route while that client
+# unlinks. The upsert publishes an existing row through ON CONFLICT DO UPDATE, and PostgreSQL fires
+# the BEFORE INSERT trigger on the PROPOSED row before it finds that conflict — so the upsert takes
+# the advisory lock BEFORE it touches the tuple. Scenario 4's plain UPDATE could not show this.
+#
+# At e8ea973 the unlink trigger took tuple → advisory, the reverse, and this is the pair that
+# deadlocked on a real PostgreSQL: the office's save or the client's unlink aborted, whichever
+# had waited longer.
+#
+#   6a  the upsert holds the advisory lock first and is parked right after its BEFORE INSERT
+#       trigger — the e8ea973 deadlock window. The unlink must queue for the advisory lock holding
+#       NO directory tuple. Released, the upsert publishes (valid: the delete is uncommitted), and
+#       the unlink then takes the listing down.
+#   6b  the unlink commits first. The upsert queues for the advisory lock, re-reads on a fresh
+#       snapshot and is REFUSED with the contracted 42501 — which /api/kantoorgids answers with the
+#       eligibility sentence, not with "Opslaan is niet gelukt."
+#
+# The mutation puts the unlink trigger back in the e8ea973 order, verified in pg_proc, and 6a must
+# go RED with a deadlock.
+s6a_run() {
+  kg_draft_one_link
+  kg_conn kg_upsert "SET conc.hold = 'after-evidence';
+BEGIN;
+$KG_UPSERT
+COMMIT;"
+  local apid=$KG_PID
+  S6_A_PARKED=$(kg_until "kg_held kg_upsert" 1 $apid)
+  S6_A_LOCK=$(kg_lock_of kg_upsert true)
+
+  kg_conn kg_unlink "BEGIN;
+$KG_UNLINK_C
+COMMIT;"
+  local bpid=$KG_PID
+  S6_B_QUEUED=$(kg_until "kg_lock_of kg_unlink false" 1 $bpid)
+  S6_TUPLE=$(kg_tuple)
+
+  kg_signal hold-go
+  wait $apid; wait $bpid
+  kg_classify
+}
+
+s6b_run() {
+  kg_draft_one_link
+  kg_conn kg_unlink "BEGIN;
+$KG_UNLINK_C
+SELECT pg_advisory_lock(777);
+SELECT public.conc_wait_for_go();
+COMMIT;
+SELECT pg_advisory_unlock(777);"
+  local bpid=$KG_PID
+  S6_B_FIRST=$(kg_until kg_barrier 1 $bpid)
+
+  kg_conn kg_upsert "BEGIN;
+$KG_UPSERT
+COMMIT;"
+  local apid=$KG_PID
+  S6_A_QUEUED=$(kg_until "kg_lock_of kg_upsert false" 1 $apid)
+
+  kg_signal go
+  wait $apid; wait $bpid
+  kg_classify
+}
+
+scenario_6() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 6 · the route's real UPSERT (ON CONFLICT DO UPDATE) versus the last unlink ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  expect "the shipped unlink trigger takes the advisory lock before the tuple" "$(kg_unlink_order)" "advisory-first"
+
+  s6a_run
+  echo "  — 6a · the upsert holds the advisory lock first (the e8ea973 deadlock window):"
+  expect "  the upsert is parked after its BEFORE INSERT trigger" "$S6_A_PARKED" "yes"
+  expect "  …holding this accountant's advisory lock" "$S6_A_LOCK" "1"
+  expect "  the unlink really queues for that lock" "$S6_B_QUEUED" "yes"
+  expect "  …holding NO directory tuple the upsert will need" "$S6_TUPLE" "free"
+  kg_settled
+  expect "  nothing was refused — the publish was valid when made" "$KG_REFUSED" "0"
+
+  s6b_run
+  echo "  — 6b · the unlink commits first:"
+  expect "  the unlink reached its delete first" "$S6_B_FIRST" "yes"
+  expect "  the upsert really queues for the advisory lock" "$S6_A_QUEUED" "yes"
+  kg_settled
+  expect "  the upsert is refused with the contracted 42501" "$KG_REFUSED" "1"
+
+  kg_mutate_unlink_order "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" \
+    || { fail "the mutation did not reorder the unlink trigger's locks — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation, verified in the live function body before its result is believed:"
+  expect "  the unlink trigger takes the tuple first again (the e8ea973 order)" "$(kg_unlink_order)" "tuple-first"
+  s6a_run
+  echo "  — in that order, 6a must go RED with the measured shape:"
+  expect "  the unlink now HOLDS the tuple while it queues" "$S6_TUPLE" "locked"
+  expect "  deadlock detected" "$KG_DEADLOCK" "1"
+  expect "  …and the invariant still holds — a deadlock victim commits nothing" "$(kg_violations)" "0"
+
+  build_schema "$KG_MIGS" "" "" || return
+  expect "the shipped order is back" "$(kg_unlink_order)" "advisory-first"
+  s6a_run
+  echo "  — with the shipped order restored:"
+  expect "  …holding NO directory tuple the upsert will need" "$S6_TUPLE" "free"
+  kg_settled
+}
+
+# =====================================================================
+# SCENARIO 7 — two first saves and an unlink: three connections
+# =====================================================================
+# A new office double-submits its first publish (two tabs, a retried request) while its client
+# unlinks. Both upserts start as INSERTs. The second queues for the advisory lock behind the first;
+# the first commits the row; the second then finds that row as a conflict and needs its tuple.
+#
+# This is the case that rules out the other obvious order. Taking the tuple FIRST inside the publish
+# trigger cannot help the second save: when it asked for the lock there was no row to take. Found
+# under stress with that order in place — one `deadlock detected` in 1 200 rounds — and pinned here
+# deterministically: the second save is parked, holding the advisory lock, just before it finds the
+# conflict, while the unlink arrives.
+s7_run() {
+  kg_no_row_one_link
+  kg_conn kg_first "BEGIN;
+$KG_UPSERT
+SELECT pg_advisory_lock(777);
+SELECT public.conc_wait_for_go();
+COMMIT;
+SELECT pg_advisory_unlock(777);"
+  local xpid=$KG_PID
+  S7_X_FIRST=$(kg_until kg_barrier 1 $xpid)
+
+  kg_conn kg_second "SET conc.hold = 'after-evidence';
+BEGIN;
+$KG_UPSERT
+COMMIT;"
+  local ypid=$KG_PID
+  S7_Y_QUEUED=$(kg_until "kg_lock_of kg_second false" 1 $ypid)
+
+  kg_signal go
+  wait $xpid
+  S7_Y_PARKED=$(kg_until "kg_held kg_second" 1 $ypid)
+  S7_Y_LOCK=$(kg_lock_of kg_second true)
+  S7_ROW=$(q "SELECT count(*) FROM public.accountant_directory WHERE accountant_id = '$KG_A'")
+
+  kg_conn kg_unlink "BEGIN;
+$KG_UNLINK_C
+COMMIT;"
+  local upid=$KG_PID
+  S7_U_QUEUED=$(kg_until "kg_lock_of kg_unlink false" 1 $upid)
+  S7_TUPLE=$(kg_tuple)
+
+  kg_signal hold-go
+  wait $ypid; wait $upid
+  kg_classify
+}
+
+scenario_7() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 7 · two first-save UPSERTs and the last unlink, three connections ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s7_run
+  echo "  — with the shipped order:"
+  expect "  the first save inserted and holds its transaction open" "$S7_X_FIRST" "yes"
+  expect "  the second save queues behind it for the advisory lock" "$S7_Y_QUEUED" "yes"
+  expect "  the first save's row is committed before the second goes on" "$S7_ROW" "1"
+  expect "  the second save is parked, holding the advisory lock" "$S7_Y_PARKED/$S7_Y_LOCK" "yes/1"
+  expect "  the unlink really queues for that lock" "$S7_U_QUEUED" "yes"
+  expect "  …holding NO directory tuple the second save will need" "$S7_TUPLE" "free"
+  kg_settled
+  expect "  nothing was refused — both publishes were valid when made" "$KG_REFUSED" "0"
+
+  kg_mutate_unlink_order "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" \
+    || { fail "the mutation did not reorder the unlink trigger's locks — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation, verified in the live function body before its result is believed:"
+  expect "  the unlink trigger takes the tuple first again" "$(kg_unlink_order)" "tuple-first"
+  s7_run
+  echo "  — in that order, the three-party case must go RED:"
+  expect "  the unlink HOLDS the first save's tuple while it queues" "$S7_TUPLE" "locked"
+  expect "  deadlock detected" "$KG_DEADLOCK" "1"
+  expect "  …and the invariant still holds" "$(kg_violations)" "0"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s7_run
+  echo "  — with the shipped order restored:"
+  expect "  …holding NO directory tuple the second save will need" "$S7_TUPLE" "free"
+  kg_settled
+}
+
+# =====================================================================
+# SCENARIO 4b — why the plain UPDATE takes NO advisory lock
+# =====================================================================
+# PostgreSQL locks the tuple before any BEFORE UPDATE trigger runs. A publish trigger that asked for
+# the advisory lock on an UPDATE would therefore hold tuple → want advisory: the reverse of the
+# unlink. The UPDATE is parked with the tuple in hand, before the evidence trigger, and the unlink
+# arrives: it takes the advisory lock and queues for the tuple. Shipped, the UPDATE never asks for
+# the advisory lock and both finish. Mutated so the UPDATE asks for it, they deadlock.
+#
+# This is the Data API's own publish shape too: the office may PATCH its row directly, and PostgREST
+# sends that as a plain UPDATE.
+s4b_run() {
+  kg_draft_one_link
+  kg_conn kg_update "SET conc.hold = 'before-evidence';
+BEGIN;
+UPDATE public.accountant_directory SET published = true WHERE accountant_id = '$KG_A';
+COMMIT;"
+  local apid=$KG_PID
+  S4B_A_PARKED=$(kg_until "kg_held kg_update" 1 $apid)
+
+  kg_conn kg_unlink "BEGIN;
+$KG_UNLINK_C
+COMMIT;"
+  local bpid=$KG_PID
+  S4B_B_LOCK=$(kg_until "kg_lock_of kg_unlink true" 1 $bpid)
+  S4B_B_WAITS=$(kg_until "kg_waits kg_unlink" 1 $bpid)
+
+  kg_signal hold-go
+  wait $apid; wait $bpid
+  kg_classify
+}
+
+scenario_4b() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 4b · a plain UPDATE publish holds the tuple; the unlink holds the lock ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  expect "the shipped publish trigger locks only on arrival" "$(kg_publish_lock_when)" "$KG_ARRIVAL"
+  s4b_run
+  echo "  — shipped:"
+  expect "  the UPDATE is parked holding the tuple, before the evidence trigger" "$S4B_A_PARKED" "yes"
+  expect "  the unlink holds this accountant's advisory lock" "$S4B_B_LOCK" "yes"
+  expect "  …and queues for the tuple" "$S4B_B_WAITS" "yes"
+  kg_settled
+  expect "  nothing was refused — the publish was valid when made" "$KG_REFUSED" "0"
+
+  kg_mutate_arrival "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" "true" \
+    || { fail "the mutation did not replace the publish trigger's lock condition — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation, verified in the live function body before its result is believed:"
+  expect "  the publish trigger now locks on every write, UPDATE included" "$(kg_publish_lock_when)" "true"
+  s4b_run
+  echo "  — then a plain UPDATE holds tuple → wants advisory, and must go RED:"
+  expect "  deadlock detected" "$KG_DEADLOCK" "1"
+  expect "  …and the invariant still holds" "$(kg_violations)" "0"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s4b_run
+  echo "  — shipped, restored:"
+  expect "  the unlink holds this accountant's advisory lock" "$S4B_B_LOCK" "yes"
+  kg_settled
+}
+
+# =====================================================================
+# SCENARIO 8 — a row that ARRIVES without a publishing INSERT
+# =====================================================================
+# An uncommitted row is invisible, so the unlink trigger's FOR UPDATE cannot wait on a row that is
+# still arriving; only the advisory lock can order the two. That is why the publish trigger takes
+# it on EVERY arrival, published or not:
+#
+#   8a  a draft INSERT, then a publishing UPDATE, in ONE transaction;
+#   8b  an UPDATE that moves another office's draft to this accountant_id, and publishes it.
+#
+# Neither is reachable from a session — PostgREST runs one statement per request, and the UPDATE
+# policy pins accountant_id — but the invariant is the database's, for every writer. Each case has
+# its own mutation, removing exactly the half of the condition that covers it.
+s8_run() { # $1 = the arriving transaction's statements
+  kg_no_row_one_link
+  if [ "${2:-}" = "rekey" ]; then
+    run -c "INSERT INTO public.accountant_directory (accountant_id, office_name, city, contact_email, languages, published)
+            VALUES ('$KG_D', 'Kantoor D', 'Utrecht', 'd@d.nl', ARRAY['nl'], false);" > /dev/null 2>&1
+  fi
+  kg_conn kg_arrive "BEGIN;
+$1
+SELECT pg_advisory_lock(777);
+SELECT public.conc_wait_for_go();
+COMMIT;
+SELECT pg_advisory_unlock(777);"
+  local xpid=$KG_PID
+  S8_X_FIRST=$(kg_until kg_barrier 1 $xpid)
+
+  kg_conn kg_unlink "BEGIN;
+$KG_UNLINK_C
+COMMIT;"
+  local upid=$KG_PID
+  # Shipped, the unlink queues for the lock. Mutated, it never does — it finishes on its own. So
+  # wait for EITHER, and record which one it was.
+  local t=0; S8_U_QUEUED=no
+  while [ $t -lt 600 ]; do
+    [ "$(kg_lock_of kg_unlink false)" = "1" ] && { S8_U_QUEUED=yes; break; }
+    kill -0 $upid 2>/dev/null || break
+    t=$((t + 1))
+  done
+
+  kg_signal go
+  wait $xpid; wait $upid
+  kg_classify
+}
+S8A="INSERT INTO public.accountant_directory (accountant_id, office_name, city, contact_email, languages, published)
+VALUES ('$KG_A', 'Kantoor A', 'Utrecht', 'a@a.nl', ARRAY['nl'], false);
+UPDATE public.accountant_directory SET published = true WHERE accountant_id = '$KG_A';"
+S8B="UPDATE public.accountant_directory SET accountant_id = '$KG_A', published = true WHERE accountant_id = '$KG_D';"
+
+scenario_8() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 8 · a row that arrives without a publishing INSERT ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s8_run "$S8A"
+  echo "  — 8a · draft INSERT + publishing UPDATE in one transaction:"
+  expect "  the arriving transaction holds its row open" "$S8_X_FIRST" "yes"
+  expect "  the unlink queues for this accountant's lock" "$S8_U_QUEUED" "yes"
+  kg_settled
+  s8_run "$S8B" rekey
+  echo "  — 8b · an UPDATE that re-keys a draft to this accountant and publishes it:"
+  expect "  the arriving transaction holds its row open" "$S8_X_FIRST" "yes"
+  expect "  the unlink queues for this accountant's lock" "$S8_U_QUEUED" "yes"
+  kg_settled
+
+  # Both halves are qualified by TG_OP: OLD is NULL on an INSERT, so an unqualified re-key test is
+  # TRUE there and would quietly keep the lock this mutation means to remove. The first version of
+  # this mutation made exactly that mistake and stayed green.
+  kg_mutate_arrival "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" \
+      "(TG_OP = 'INSERT' AND NEW.published) OR (TG_OP = 'UPDATE' AND NEW.accountant_id IS DISTINCT FROM OLD.accountant_id)" \
+    || { fail "the mutation did not replace the publish trigger's lock condition — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation 1, verified live: a DRAFT insert takes no lock (the old WHEN (NEW.published)):"
+  expect "  the live condition" "$(kg_publish_lock_when)" "(TG_OP = 'INSERT' AND NEW.published) OR (TG_OP = 'UPDATE' AND NEW.accountant_id IS DISTINCT FROM OLD.accountant_id)"
+  s8_run "$S8A"
+  expect "  8a · the unlink does not wait for the arriving row" "$S8_U_QUEUED" "no"
+  expect "  8a · the listing is published with no client left" "$(kg_published)/$(kg_links)" "true/0"
+  expect "  8a · the invariant is violated" "$(kg_violations)" "1"
+
+  kg_mutate_arrival "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" "TG_OP = 'INSERT'" \
+    || { fail "the mutation did not replace the publish trigger's lock condition — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation 2, verified live: a re-keying UPDATE takes no lock:"
+  expect "  the live condition" "$(kg_publish_lock_when)" "TG_OP = 'INSERT'"
+  s8_run "$S8B" rekey
+  expect "  8b · the unlink does not wait for the arriving row" "$S8_U_QUEUED" "no"
+  expect "  8b · the listing is published with no client left" "$(kg_published)/$(kg_links)" "true/0"
+  expect "  8b · the invariant is violated" "$(kg_violations)" "1"
+
+  build_schema "$KG_MIGS" "" "" || return
+  expect "the shipped condition is back" "$(kg_publish_lock_when)" "$KG_ARRIVAL"
+  s8_run "$S8A"
+  echo "  — shipped, restored:"
+  expect "  8a · the unlink queues for this accountant's lock" "$S8_U_QUEUED" "yes"
+  kg_settled
+  s8_run "$S8B" rekey
+  expect "  8b · the unlink queues for this accountant's lock" "$S8_U_QUEUED" "yes"
+  kg_settled
+}
+
 scenario_1
 scenario_2
 scenario_3
 scenario_4
+scenario_4b
 scenario_5
+scenario_6
+scenario_7
+scenario_8
 
 echo ""
 if [ "$failed" -ne 0 ]; then
   echo "✗ [GELIJKTIJDIG-VAST] a concurrency contract did not hold." >&2
   exit 1
 fi
-echo "✅ [GELIJKTIJDIG-VAST] both races held under two real connections, and both gates proved they can see the failure."
+echo "✅ [GELIJKTIJDIG-VAST] every race held under real concurrent connections, and every gate proved it can see its failure."

@@ -34140,28 +34140,81 @@ test("[KANTOORGIDS-BEWIJS] the last unlink takes the listing down, at the databa
     "the publish guard lost its serializer — a publish can validate against a link another " +
     "transaction is in the middle of deleting");
 
-  // ── LOCK ORDER. The advisory lock is acquired LAST on every path, after whatever row locks that
-  //    path takes. The explicit FOR UPDATE in the unlink trigger is what makes that true: without
-  //    it the unlink path would take advisory → directory tuple, the reverse of the publish path,
-  //    and a publisher holding the tuple while waiting for the advisory lock against an unlinker
-  //    holding the advisory lock while waiting for the tuple is a textbook deadlock.
+  // ── LOCK ORDER. ONE order on every path: advisory lock → directory tuple. It is dictated by the
+  //    application's real writer: supabase-js .upsert() is INSERT … ON CONFLICT DO UPDATE, and
+  //    PostgreSQL fires the BEFORE INSERT trigger before it finds the conflict and locks the
+  //    existing tuple — so an upsert that takes the advisory lock takes it FIRST, whatever the
+  //    trigger does. e8ea973 had the reverse rule ("advisory LAST") and deadlocked against the
+  //    unlink on a real PostgreSQL; a tuple-first repair inside the publish trigger still
+  //    deadlocked when two first saves met an unlink, because a row that did not exist when the
+  //    lock was requested cannot be locked before it.
   const unlinkBody = ddl.slice(ddl.indexOf("FUNCTION public.accountant_directory_unpublish_on_last_unlink"));
-  const rowLockAt = unlinkBody.indexOf("FOR UPDATE");
   const advisoryAt = unlinkBody.indexOf("pg_advisory_xact_lock");
-  assert.ok(rowLockAt > 0 && advisoryAt > 0 && rowLockAt < advisoryAt,
-    "the unlink reaction takes the advisory lock BEFORE the directory row lock — that reverses " +
-    "the publish path's order and makes a deadlock reachable");
+  const rowLockAt = unlinkBody.indexOf("FOR UPDATE");
+  const evidenceAt = unlinkBody.indexOf("IF NOT EXISTS");
+  assert.ok(advisoryAt > 0 && rowLockAt > 0 && evidenceAt > 0,
+    "the unlink reaction lost its advisory lock, its row lock or its evidence read");
+  assert.ok(advisoryAt < rowLockAt,
+    "the unlink reaction takes the directory row BEFORE the advisory lock — the e8ea973 order, " +
+    "which deadlocks against the route's upsert (scenario 6) and two first saves (scenario 7)");
+  assert.ok(rowLockAt < evidenceAt,
+    "the unlink reaction reads the evidence before it holds the directory row — a publishing " +
+    "UPDATE, which takes no advisory lock, is then no longer serialized against it");
 
-  // ── And the two-connection proof exists, with each lock's necessity shown separately: the row
-  //    lock alone closes unlink-vs-unlink, so a mutation that removed only the advisory lock would
-  //    leave that scenario green and prove nothing. That mistake was made once and is pinned here.
+  // The publish side takes the advisory lock only when a row ARRIVES at an accountant — an INSERT
+  // (every one, draft or published, including the upsert's INSERT leg) or a re-keying UPDATE. A
+  // plain UPDATE already holds the tuple before its BEFORE trigger runs, so asking for the advisory
+  // lock there would be tuple → advisory, the reverse (scenario 4b). And it takes no row lock of
+  // its own: that was the tuple-first repair, and it cannot cover a row that is still arriving.
+  const publishStart = ddl.indexOf("FUNCTION public.accountant_directory_publication_needs_evidence()");
+  const publishEnd = ddl.indexOf("$$;", publishStart);
+  assert.ok(publishStart > 0 && publishEnd > publishStart, "the publish guard's function body is not where the gate cuts it");
+  const publishBody = ddl.slice(publishStart, publishEnd);
+  assert.match(publishBody,
+    /IF TG_OP = 'INSERT' OR NEW\.accountant_id IS DISTINCT FROM OLD\.accountant_id THEN\s+PERFORM pg_advisory_xact_lock\(hashtextextended\(NEW\.accountant_id::text, 0\)\);\s+END IF;/,
+    "the publish guard no longer takes the advisory lock exactly on arrival — on every INSERT and " +
+    "on a re-keying UPDATE, and on nothing else");
+  assert.doesNotMatch(publishBody, /FOR UPDATE/,
+    "the publish guard takes a row lock — a tuple taken before the advisory lock reverses the order");
+  // No WHEN clause: a draft INSERT must take the lock too, and a WHEN on INSERT OR UPDATE cannot
+  // read OLD to see a re-key. `WHEN (NEW.published)` is the exact clause that left 8a open.
+  assert.match(ddl,
+    /CREATE TRIGGER accountant_directory_publication_evidence\s+BEFORE INSERT OR UPDATE ON public\.accountant_directory\s+FOR EACH ROW\s+EXECUTE FUNCTION public\.accountant_directory_publication_needs_evidence\(\);/,
+    "the publish guard's trigger changed shape — it must fire on every INSERT and UPDATE, with no WHEN");
+
+  // ── And the concurrent proof exists, with each lock's necessity AND the order shown separately:
+  //    the row lock alone closes unlink-vs-unlink, so a mutation that removed only the advisory lock
+  //    would leave that scenario green and prove nothing. That mistake was made once and is pinned.
   const conc = readFileSync("scripts/sql-concurrency-test.sh", "utf8");
-  for (const scenario of ["scenario_3", "scenario_4", "scenario_5"]) {
+  for (const scenario of ["scenario_3", "scenario_4", "scenario_4b", "scenario_5", "scenario_6", "scenario_7", "scenario_8"]) {
     assert.match(conc, new RegExp(`^${scenario}$`, "m"),
       `${scenario} is no longer run — a concurrency contract with no driver proves nothing`);
   }
   assert.match(conc, /kg_mutate_lock .*advisory/,
     "the advisory-only mutation is gone, so nothing shows the advisory lock earns its place");
+  assert.match(conc, /kg_mutate_unlink_order "\$here/,
+    "the lock-order mutation is gone, so nothing shows the e8ea973 order deadlocks");
+  assert.match(conc, /kg_mutate_arrival "\$here\/supabase\/migrations\/\$KG_FILE" "\$tmp\/\$KG_FILE" "true"/,
+    "the mutation that makes a plain UPDATE take the advisory lock is gone (scenario 4b)");
+  assert.match(conc, /expect "  deadlock detected" "\$KG_DEADLOCK" "1"/,
+    "the order scenarios no longer assert the measured deadlock under their mutation");
+
+  // The scenario's upsert IS the route's upsert: the same columns, in the same order, on the same
+  // conflict target. A scenario that raced a hand-written statement the route never sends would
+  // re-open exactly the gap scenario 4 left — a green proof of the wrong shape.
+  const route = readFileSync("src/app/api/kantoorgids/route.ts", "utf8")
+    .split("\n").filter((r) => !r.trim().startsWith("//")).join("\n");
+  const upsertAt = route.indexOf(".from('accountant_directory').upsert(");
+  const conflictAt = route.indexOf("{ onConflict: 'accountant_id' }", upsertAt);
+  assert.ok(upsertAt > 0 && conflictAt > upsertAt, "/api/kantoorgids no longer upserts on accountant_id");
+  const routeColumns = [...route.slice(upsertAt, conflictAt).matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+  const kgUpsert = conc.slice(conc.indexOf('KG_UPSERT="INSERT INTO public.accountant_directory'));
+  const kgColumns = (kgUpsert.match(/^KG_UPSERT="INSERT INTO public\.accountant_directory\s*\n\s*\(([^)]*)\)/) ?? [])[1];
+  assert.ok(kgColumns, "the concurrency driver's KG_UPSERT is not where the gate reads it");
+  assert.deepEqual(kgColumns.split(",").map((c) => c.trim()), routeColumns,
+    "the concurrency scenarios race a different upsert than /api/kantoorgids sends");
+  assert.match(kgUpsert, /^KG_UPSERT="[^"]*ON CONFLICT \(accountant_id\) DO UPDATE SET/,
+    "the concurrency scenarios' upsert no longer resolves the conflict the way PostgREST does");
   assert.match(conc, /the invariant is violated/,
     "the concurrency scenarios no longer assert the measured failure shape");
 });
