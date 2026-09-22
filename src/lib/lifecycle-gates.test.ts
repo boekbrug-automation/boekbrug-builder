@@ -34079,7 +34079,7 @@ test("[KANTOORGIDS-BEWIJS] an office that may not publish yet is told so, and no
 // already closed once.
 test("[KANTOORGIDS-BEWIJS] the last unlink takes the listing down, at the database", () => {
   const migratie = readFileSync(
-    "supabase/migrations/accountant_directory_unpublish_on_last_unlink.sql", "utf8");
+    "supabase/migrations/accountant_directory_publication_follows_evidence.sql", "utf8");
   const ddl = migratie.split("\n").map((r) => r.replace(/--.*$/, "")).join("\n");
 
   // It reacts to the DELETE, on the table the relationship lives in. Not to a route: the route is
@@ -34118,7 +34118,7 @@ test("[KANTOORGIDS-BEWIJS] the last unlink takes the listing down, at the databa
   // of that file proved only that a NEW published write is refused after the link is gone, which
   // says nothing about the row already out there — that is exactly how this defect survived.
   const seam = readFileSync("tests/sql/accountant_directory_rls.test.sql", "utf8");
-  assert.match(seam, /^-- migrations:.*accountant_directory_unpublish_on_last_unlink\.sql/m,
+  assert.match(seam, /^-- migrations:.*accountant_directory_publication_follows_evidence\.sql/m,
     "the SQL contract test no longer loads the unpublish reaction");
   assert.match(seam, /THE LISTING OUTLIVED ITS EVIDENCE/,
     "the contract test no longer asserts that anon stops seeing the listing after the last unlink");
@@ -34128,6 +34128,42 @@ test("[KANTOORGIDS-BEWIJS] the last unlink takes the listing down, at the databa
     "the contract test no longer proves that a new relationship does not republish by itself");
   assert.match(seam, /a CLIENT-side unlink left the listing public/,
     "the contract test no longer exercises the client-side unlink — the case a route fix would miss");
+
+  // ── SERIALIZATION. A plain NOT EXISTS is wrong by construction the moment two people act at
+  //    once: under READ COMMITTED each transaction's trigger reads its OWN snapshot, in which the
+  //    other's uncommitted delete does not exist, so BOTH can conclude "not the last one" and both
+  //    be right about what they saw. Committed result: zero links, still published.
+  assert.match(ddl, /pg_advisory_xact_lock\(hashtextextended\(OLD\.accountant_id::text, 0\)\)/,
+    "the unlink reaction lost its per-accountant serializer — two concurrent unlinks will each " +
+    "see the other's link and neither will take the listing down");
+  assert.match(ddl, /pg_advisory_xact_lock\(hashtextextended\(NEW\.accountant_id::text, 0\)\)/,
+    "the publish guard lost its serializer — a publish can validate against a link another " +
+    "transaction is in the middle of deleting");
+
+  // ── LOCK ORDER. The advisory lock is acquired LAST on every path, after whatever row locks that
+  //    path takes. The explicit FOR UPDATE in the unlink trigger is what makes that true: without
+  //    it the unlink path would take advisory → directory tuple, the reverse of the publish path,
+  //    and a publisher holding the tuple while waiting for the advisory lock against an unlinker
+  //    holding the advisory lock while waiting for the tuple is a textbook deadlock.
+  const unlinkBody = ddl.slice(ddl.indexOf("FUNCTION public.accountant_directory_unpublish_on_last_unlink"));
+  const rowLockAt = unlinkBody.indexOf("FOR UPDATE");
+  const advisoryAt = unlinkBody.indexOf("pg_advisory_xact_lock");
+  assert.ok(rowLockAt > 0 && advisoryAt > 0 && rowLockAt < advisoryAt,
+    "the unlink reaction takes the advisory lock BEFORE the directory row lock — that reverses " +
+    "the publish path's order and makes a deadlock reachable");
+
+  // ── And the two-connection proof exists, with each lock's necessity shown separately: the row
+  //    lock alone closes unlink-vs-unlink, so a mutation that removed only the advisory lock would
+  //    leave that scenario green and prove nothing. That mistake was made once and is pinned here.
+  const conc = readFileSync("scripts/sql-concurrency-test.sh", "utf8");
+  for (const scenario of ["scenario_3", "scenario_4", "scenario_5"]) {
+    assert.match(conc, new RegExp(`^${scenario}$`, "m"),
+      `${scenario} is no longer run — a concurrency contract with no driver proves nothing`);
+  }
+  assert.match(conc, /kg_mutate_lock .*advisory/,
+    "the advisory-only mutation is gone, so nothing shows the advisory lock earns its place");
+  assert.match(conc, /the invariant is violated/,
+    "the concurrency scenarios no longer assert the measured failure shape");
 });
 
 

@@ -1,4 +1,4 @@
--- migrations: accountant_directory.sql, accountant_directory_talen.sql, accountant_directory_publish_requires_client_link.sql, accountant_directory_unpublish_on_last_unlink.sql
+-- migrations: accountant_directory.sql, accountant_directory_talen.sql, accountant_directory_publish_requires_client_link.sql, accountant_directory_publication_follows_evidence.sql
 -- =====================================================================
 -- [KANTOORGIDS-BEWIJS] Who may make a directory listing PUBLIC, tried — not read.
 -- Run: npm run test:sql   (see scripts/sql-seam-test.sh)
@@ -168,23 +168,21 @@ SET ROLE authenticated;
 -- =============================================================================================
 -- Nobody is trapped: a row stays correctable and removable by its owner
 -- =============================================================================================
+-- Seeded as a DRAFT, and that is not a convenience — it is the only way this state can still be
+-- reached. accountant_directory_publication_evidence is an INTEGRITY rule, not an authorization
+-- one, so it fires for the table owner too: even this seed cannot create a published row for an
+-- owner with no links. A good property, and worth stating rather than working around, because it
+-- means no service-role route can produce that state either.
+--
+-- The published-then-abandoned case is exercised where it genuinely arises: further down, where A
+-- publishes with evidence and then loses its last client.
 RESET ROLE;
 INSERT INTO public.accountant_directory (accountant_id, office_name, city, contact_email, languages, published)
-VALUES ('20000000-0000-0000-0000-000000000002', 'Ooit Een Kantoor', 'Utrecht', 'z@z.nl', ARRAY['nl'], true);
+VALUES ('20000000-0000-0000-0000-000000000002', 'Ooit Een Kantoor', 'Utrecht', 'z@z.nl', ARRAY['nl'], false);
 SET ROLE authenticated;
 SELECT set_config('test.uid', '20000000-0000-0000-0000-000000000002', false);
 
--- An office that has lost its last client (or never had one) keeps every way OUT.
-DO $$
-DECLARE n int;
-BEGIN
-  UPDATE public.accountant_directory SET published = false
-   WHERE accountant_id = '20000000-0000-0000-0000-000000000002';
-  GET DIAGNOSTICS n = ROW_COUNT;
-  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] TRAPPED — cannot unpublish without evidence (% rows)', n; END IF;
-  RAISE NOTICE '   ok · unpublishing is never blocked, evidence or not';
-END $$;
-
+-- An owner with no evidence keeps every way OUT of its own draft.
 DO $$
 DECLARE n int;
 BEGIN
@@ -399,6 +397,22 @@ UPDATE public.accountant_directory
  WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
 SET ROLE authenticated;
 SELECT set_config('test.uid', 'a0000000-0000-0000-0000-00000000000a', false);
+
+-- Unpublishing by CHOICE is never gated on evidence: the WITH CHECK reads `NOT published OR …`,
+-- so taking your own listing down is always allowed. Asserted on A, who HAS evidence, because
+-- that is the branch a guard written as a flat AND would break.
+DO $$
+DECLARE n int;
+BEGIN
+  UPDATE public.accountant_directory SET published = false
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION '[KANTOORGIDS-BEWIJS] an office cannot take its own listing down (% rows)', n; END IF;
+  RAISE NOTICE '   ok · an office can always take its own listing down, evidence or not';
+  -- …and put it back, since it still holds a link. The rest of the file expects it published.
+  UPDATE public.accountant_directory SET published = true
+   WHERE accountant_id = 'a0000000-0000-0000-0000-00000000000a';
+END $$;
 
 -- A cannot write B's row. USING pins the row to its owner-- A cannot write B's row. USING pins the row to its owner, so the update matches NOTHING rather
 -- than raising: a refusal by invisibility, which is the right shape for a row that is not yours.

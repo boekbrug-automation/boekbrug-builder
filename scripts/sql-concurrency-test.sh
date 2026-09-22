@@ -325,8 +325,357 @@ scenario_2() {
   expect "  amount_paid agrees with the links it is derived from" "$(inv_paid)" "$(inv_applied)"
 }
 
+# =====================================================================
+# SCENARIO 3 — two client links deleted CONCURRENTLY: does the listing come down?
+# =====================================================================
+# The sequential case has been green since the trigger was written, and it proved nothing about
+# this one. Under READ COMMITTED each delete's trigger takes its OWN snapshot, in which the other
+# transaction's uncommitted delete does not exist — so both can conclude "I am not the last one"
+# and both can be right about what they saw. The committed result is zero links and a listing
+# still on the public page.
+#
+# The correction is not a better predicate, it is serialization: one advisory lock per accountant,
+# taken last on every path, and the predicate re-read afterwards on a fresh snapshot.
+KG_MIGS="accountant_directory.sql accountant_directory_talen.sql accountant_directory_publish_requires_client_link.sql accountant_directory_publication_follows_evidence.sql"
+KG_FILE="accountant_directory_publication_follows_evidence.sql"
+KG_A=0a000000-0000-4000-8000-00000000000a
+KG_C=0c000000-0000-4000-8000-00000000000c
+KG_D=0d000000-0000-4000-8000-00000000000d
+
+kg_seed()      { run -f "$here/tests/concurrency/kantoorgids-seed.sql" > /dev/null 2>&1; }
+kg_links()     { q "SELECT count(*) FROM public.accountant_clients WHERE accountant_id = '$KG_A'"; }
+kg_published() { q "SELECT coalesce((SELECT published FROM public.accountant_directory WHERE accountant_id = '$KG_A'), false)::text"; }
+kg_anon_sees() { q "SELECT count(*) FROM public.accountant_directory d WHERE d.published AND d.accountant_id = '$KG_A'"; }
+# The invariant itself, as one number: published listings with no current evidence behind them.
+kg_violations(){ q "SELECT count(*) FROM public.accountant_directory d WHERE d.published
+                     AND NOT EXISTS (SELECT 1 FROM public.accountant_clients ac WHERE ac.accountant_id = d.accountant_id)"; }
+
+# Does the LIVE function body carry the serializer? Read from pg_proc, never from the file.
+kg_serialiser_in() { q "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                         WHERE n.nspname='public' AND p.proname='$1' AND p.prosrc ~ 'pg_advisory_xact_lock')"; }
+
+# Strip serialization out of the unlink trigger in a disposable copy. Two modes, because the two
+# locks close DIFFERENT races and a mutation that removes the wrong one reports a false green — as
+# the first version of this scenario did:
+#
+#   all      both lines. This reproduces the function body exactly as it stood at 367242823, i.e.
+#            the state the reviewer asked to see fail. The row lock alone already closes the
+#            unlink-versus-unlink race, so removing only the advisory lock leaves scenario 3 green
+#            and proves nothing.
+#   advisory the advisory lock only, keeping the row lock. That isolates the one race the row lock
+#            cannot close — a publish by INSERT, where there is no row to lock yet — and is how the
+#            advisory lock earns its place rather than being decoration.
+#
+# Exits non-zero unless exactly the expected number of lines went, so a reshaped migration cannot
+# quietly turn this into a no-op mutation.
+kg_mutate_lock() { # $1 src  $2 dst  $3 function marker  $4 mode (all|advisory)
+  awk -v fn="$3" -v mode="$4" '
+    index($0, fn)                            { infn = 1 }
+    # The row lock is THREE lines (PERFORM / WHERE / FOR UPDATE;), so it is skipped as a block.
+    # A rule matching the bare "FOR UPDATE;" line first would cut the terminator off its own
+    # statement and leave a dangling PERFORM — a file that fails to load, which reads as a RED for
+    # entirely the wrong reason.
+    infn && mode == "all" && !rowdone && /PERFORM 1 FROM public\.accountant_directory/ { skipping = 1; next }
+    skipping && /FOR UPDATE;/                { skipping = 0; rowdone = 1; removed++; next }
+    skipping                                 { next }
+    infn && !advdone && /pg_advisory_xact_lock/ { advdone = 1; removed++; next }
+    { print }
+    END {
+      want = (mode == "all") ? 2 : 1
+      if (removed != want) exit 3
+    }
+  ' "$1" > "$2"
+}
+
+# Is the row lock still in the LIVE unlink body? Read from pg_proc, never from the file.
+kg_rowlock_in() { q "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                      WHERE n.nspname='public' AND p.proname='accountant_directory_unpublish_on_last_unlink'
+                        AND p.prosrc ~ 'FOR UPDATE')"; }
+
+kg_run_pair() { # $1 = A's statement, $2 = B's statement
+  kg_seed
+  "${PSQL[@]}" > "$tmp/a.out" 2>&1 <<SQL &
+BEGIN;
+$1
+SELECT pg_advisory_lock(777);
+SELECT public.conc_wait_for_go();
+COMMIT;
+SELECT pg_advisory_unlock(777);
+SQL
+  local apid=$!
+
+  A_READY=no
+  local t=0
+  while [ $t -lt 600 ]; do
+    if [ "$(q "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND objid = 777
+                AND database = (SELECT oid FROM pg_database WHERE datname = current_database())" 2>/dev/null)" != "0" ]; then
+      A_READY=yes; break
+    fi
+    kill -0 $apid 2>/dev/null || break
+    t=$((t + 1))
+  done
+
+  "${PSQL[@]}" > "$tmp/b.out" 2>&1 <<SQL &
+BEGIN;
+$2
+COMMIT;
+SQL
+  local bpid=$!
+
+  CONTENDED=no
+  local tries=0
+  while [ $tries -lt 600 ]; do
+    if [ "$(q "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE NOT l.granted AND a.datname = current_database()" 2>/dev/null)" != "0" ]; then
+      CONTENDED=yes; break
+    fi
+    kill -0 $bpid 2>/dev/null || break
+    tries=$((tries + 1))
+  done
+
+  q "INSERT INTO public.conc_signal(name) VALUES ('go') ON CONFLICT DO NOTHING" > /dev/null 2>&1
+  wait $apid; wait $bpid
+}
+
+s3_run() {
+  kg_run_pair "DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_C';" \
+              "DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_D';"
+}
+
+scenario_3() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 3 · two clients unlink at the same time, two connections ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  expect "the shipped unlink trigger carries the serializer" "$(kg_serialiser_in accountant_directory_unpublish_on_last_unlink)" "t"
+  s3_run
+  echo "  — with the serializer:"
+  expect "  connection A reached the delete first" "$A_READY" "yes"
+  expect "  the two connections really contended" "$CONTENDED" "yes"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  the listing is no longer published" "$(kg_published)" "false"
+  expect "  anon cannot see the office" "$(kg_anon_sees)" "0"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+
+  # ── the same race, with the serializer removed from a disposable copy ──
+  kg_mutate_lock "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" "FUNCTION public.accountant_directory_unpublish_on_last_unlink" all \
+    || { fail "the mutation did not strip exactly the two serialization lines — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation, verified in the live function body before its result is believed:"
+  expect "  the advisory lock is gone from pg_proc" "$(kg_serialiser_in accountant_directory_unpublish_on_last_unlink)" "f"
+  expect "  …and so is the row lock — this is the 367242823 body" "$(kg_rowlock_in)" "f"
+  s3_run
+  echo "  — without it, the race must go RED with the measured shape:"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  …and the listing is STILL published" "$(kg_published)" "true"
+  expect "  …so anon still sees an office with no clients" "$(kg_anon_sees)" "1"
+  expect "  the invariant is violated" "$(kg_violations)" "1"
+
+  build_schema "$KG_MIGS" "" "" || return
+  expect "the serializer is back" "$(kg_serialiser_in accountant_directory_unpublish_on_last_unlink)" "t"
+  s3_run
+  echo "  — with the serializer restored:"
+  expect "  connection A reached the delete first" "$A_READY" "yes"
+  expect "  the two connections really contended" "$CONTENDED" "yes"
+  expect "  the listing is no longer published" "$(kg_published)" "false"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+}
+
+# =====================================================================
+# SCENARIO 4 — publish versus the last unlink
+# =====================================================================
+# One link, a draft listing. One connection publishes; the other removes the last client. Whatever
+# order they settle in, the committed state must not be "published with no evidence".
+#
+# A publishes first here (the rendezvous pins that), so the publish is VALID when it is made and
+# only becomes wrong while it is still uncommitted. That is the harder half: the write-time policy
+# cannot refuse it, because at the moment it ran the evidence was there.
+s4_run() {
+  kg_seed
+  # One link and a draft: the starting state this scenario is about.
+  run -c "DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_D';
+          UPDATE public.accountant_directory SET published = false WHERE accountant_id = '$KG_A';" > /dev/null 2>&1
+  q "TRUNCATE public.conc_signal" > /dev/null 2>&1
+
+  "${PSQL[@]}" > "$tmp/a.out" 2>&1 <<SQL &
+BEGIN;
+UPDATE public.accountant_directory SET published = true WHERE accountant_id = '$KG_A';
+SELECT pg_advisory_lock(777);
+SELECT public.conc_wait_for_go();
+COMMIT;
+SELECT pg_advisory_unlock(777);
+SQL
+  local apid=$!
+  A_READY=no
+  local t=0
+  while [ $t -lt 600 ]; do
+    if [ "$(q "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND objid = 777
+                AND database = (SELECT oid FROM pg_database WHERE datname = current_database())" 2>/dev/null)" != "0" ]; then
+      A_READY=yes; break
+    fi
+    kill -0 $apid 2>/dev/null || break
+    t=$((t + 1))
+  done
+
+  "${PSQL[@]}" > "$tmp/b.out" 2>&1 <<SQL &
+BEGIN;
+DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_C';
+COMMIT;
+SQL
+  local bpid=$!
+  CONTENDED=no
+  local tries=0
+  while [ $tries -lt 600 ]; do
+    if [ "$(q "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE NOT l.granted AND a.datname = current_database()" 2>/dev/null)" != "0" ]; then
+      CONTENDED=yes; break
+    fi
+    kill -0 $bpid 2>/dev/null || break
+    tries=$((tries + 1))
+  done
+
+  q "INSERT INTO public.conc_signal(name) VALUES ('go') ON CONFLICT DO NOTHING" > /dev/null 2>&1
+  wait $apid; wait $bpid
+}
+
+scenario_4() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 4 · one publishes while the other removes the last client ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s4_run
+  echo "  — with the serializer:"
+  expect "  connection A published first" "$A_READY" "yes"
+  expect "  the two connections really contended" "$CONTENDED" "yes"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  the listing is not published" "$(kg_published)" "false"
+  expect "  anon cannot see the office" "$(kg_anon_sees)" "0"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+
+  kg_mutate_lock "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" "FUNCTION public.accountant_directory_unpublish_on_last_unlink" all \
+    || { fail "the mutation did not strip exactly the two serialization lines — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation, verified in the live function body before its result is believed:"
+  expect "  the advisory lock is gone from pg_proc" "$(kg_serialiser_in accountant_directory_unpublish_on_last_unlink)" "f"
+  expect "  …and so is the row lock — this is the 367242823 body" "$(kg_rowlock_in)" "f"
+  s4_run
+  echo "  — without it, the race must go RED with the measured shape:"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  …and the listing is STILL published" "$(kg_published)" "true"
+  expect "  the invariant is violated" "$(kg_violations)" "1"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s4_run
+  echo "  — with the serializer restored:"
+  expect "  connection A published first" "$A_READY" "yes"
+  expect "  the two connections really contended" "$CONTENDED" "yes"
+  expect "  the listing is not published" "$(kg_published)" "false"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+}
+
+# =====================================================================
+# SCENARIO 5 — publish by INSERT versus the last unlink
+# =====================================================================
+# This is the race the ROW lock cannot close, and therefore the one that shows why the advisory
+# lock is there at all. A brand-new office whose first save IS a publish inserts the directory row;
+# there is no pre-existing tuple, so the unlink trigger's `FOR UPDATE` finds nothing to wait on and
+# sails straight past. Its UPDATE then matches zero rows, because the inserting transaction has not
+# committed and its row is invisible — and a moment later it commits, published, with no evidence.
+#
+# The mutation here removes ONLY the advisory lock and keeps the row lock, so the RED below is
+# attributable to that one line and nothing else.
+s5_run() {
+  kg_seed
+  # One link, and NO directory row: the state a new office is in before its first save.
+  run -c "DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_D';
+          DELETE FROM public.accountant_directory WHERE accountant_id = '$KG_A';" > /dev/null 2>&1
+  q "TRUNCATE public.conc_signal" > /dev/null 2>&1
+
+  "${PSQL[@]}" > "$tmp/a.out" 2>&1 <<SQL &
+BEGIN;
+INSERT INTO public.accountant_directory
+  (accountant_id, office_name, city, contact_email, languages, published)
+VALUES ('$KG_A', 'Kantoor A', 'Utrecht', 'a@a.nl', ARRAY['nl'], true);
+SELECT pg_advisory_lock(777);
+SELECT public.conc_wait_for_go();
+COMMIT;
+SELECT pg_advisory_unlock(777);
+SQL
+  local apid=$!
+  A_READY=no
+  local t=0
+  while [ $t -lt 600 ]; do
+    if [ "$(q "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND objid = 777
+                AND database = (SELECT oid FROM pg_database WHERE datname = current_database())" 2>/dev/null)" != "0" ]; then
+      A_READY=yes; break
+    fi
+    kill -0 $apid 2>/dev/null || break
+    t=$((t + 1))
+  done
+
+  "${PSQL[@]}" > "$tmp/b.out" 2>&1 <<SQL &
+BEGIN;
+DELETE FROM public.accountant_clients WHERE accountant_id = '$KG_A' AND zzper_id = '$KG_C';
+COMMIT;
+SQL
+  local bpid=$!
+  CONTENDED=no
+  local tries=0
+  while [ $tries -lt 600 ]; do
+    if [ "$(q "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE NOT l.granted AND a.datname = current_database()" 2>/dev/null)" != "0" ]; then
+      CONTENDED=yes; break
+    fi
+    kill -0 $bpid 2>/dev/null || break
+    tries=$((tries + 1))
+  done
+
+  q "INSERT INTO public.conc_signal(name) VALUES ('go') ON CONFLICT DO NOTHING" > /dev/null 2>&1
+  wait $apid; wait $bpid
+}
+
+scenario_5() {
+  echo ""
+  echo "══ [KANTOORGIDS-BEWIJS] 5 · a first-save publish (INSERT) while the last client unlinks ══"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s5_run
+  echo "  — with the advisory lock:"
+  expect "  connection A inserted first" "$A_READY" "yes"
+  expect "  the two connections really contended" "$CONTENDED" "yes"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  the listing is not published" "$(kg_published)" "false"
+  expect "  anon cannot see the office" "$(kg_anon_sees)" "0"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+
+  # ONLY the advisory lock, so the RED is attributable to that one line. The row lock stays, and
+  # is asserted to have stayed — otherwise this scenario would be re-proving scenario 3.
+  kg_mutate_lock "$here/supabase/migrations/$KG_FILE" "$tmp/$KG_FILE" "FUNCTION public.accountant_directory_unpublish_on_last_unlink" advisory \
+    || { fail "the mutation did not remove exactly one advisory lock — the migration has been reshaped"; return; }
+  build_schema "$KG_MIGS" "$KG_FILE" "$tmp/$KG_FILE" || return
+  echo "  — mutation, verified in the live function body before its result is believed:"
+  expect "  the advisory lock is gone from pg_proc" "$(kg_serialiser_in accountant_directory_unpublish_on_last_unlink)" "f"
+  expect "  …while the ROW lock is still there — only one line moved" "$(kg_rowlock_in)" "t"
+  s5_run
+  echo "  — without it, the row lock alone cannot see an uncommitted INSERT:"
+  expect "  no client link is left" "$(kg_links)" "0"
+  expect "  …and the listing is STILL published" "$(kg_published)" "true"
+  expect "  the invariant is violated" "$(kg_violations)" "1"
+
+  build_schema "$KG_MIGS" "" "" || return
+  s5_run
+  echo "  — with the advisory lock restored:"
+  expect "  connection A inserted first" "$A_READY" "yes"
+  expect "  the two connections really contended" "$CONTENDED" "yes"
+  expect "  the listing is not published" "$(kg_published)" "false"
+  expect "  no published listing without evidence" "$(kg_violations)" "0"
+}
+
 scenario_1
 scenario_2
+scenario_3
+scenario_4
+scenario_5
 
 echo ""
 if [ "$failed" -ne 0 ]; then

@@ -351,20 +351,39 @@ export const REGISTRY: readonly FunctionEntry[] = [
     callers: ["none found in this repository"], provenance: DASHBOARD_ERA, verified: VERIFIED,
   },
 
+  // ── trigger, SECURITY INVOKER (1) ──────────────────────────────────────────────────────────
+  // [KANTOORGIDS-BEWIJS] The publish half of the directory invariant. INVOKER deliberately: it
+  // only READS accountant_clients, and the office publishing its own listing may already see the
+  // rows that name it, so a DEFINER surface would be privilege for nothing. Fail direction is
+  // safe — a caller who cannot read its links reads as "no evidence" and is refused.
+  {
+    signature: "public.accountant_directory_publication_needs_evidence()",
+    kind: "trigger", managedBy: "boekbrug", owner: "postgres", definer: false, status: "planned",
+    intent: intent(D, D, D, D),
+    current: null,
+    evidence: [
+      "accountant_directory_publication_follows_evidence.sql revokes ALL from PUBLIC, anon, authenticated and service_role",
+      "not applied to production; nothing measured, so `current` stays null rather than assumed",
+    ],
+    callers: ["trigger on accountant_directory"],
+    provenance: REPO, verified: null,
+  },
+
   // ── trigger, SECURITY DEFINER (7) ──────────────────────────────────────────────────────────
-  // [KANTOORGIDS-BEWIJS] The one entry here that is NOT live: its migration exists in this
-  // repository and has not been applied to production, so `current` is null rather than a measured
-  // shape someone invented. It is SECURITY DEFINER out of necessity — the party deleting the last
-  // client link is usually the CLIENT, who has no rights on the accountant's directory row — and
-  // its migration decides all four default grant paths in one REVOKE, because nobody needs EXECUTE
-  // for a trigger to fire (measured in revoke_execute_on_trigger_functions.sql).
+  // [KANTOORGIDS-BEWIJS] The unlink half, and the one DEFINER entry here that is NOT live: its
+  // migration exists in this repository and has not been applied to production, so `current` is
+  // null rather than a measured shape someone invented. SECURITY DEFINER out of necessity — the
+  // party deleting the last client link is usually the CLIENT, who has no rights on the
+  // accountant's directory row — and its migration decides all four default grant paths in one
+  // REVOKE, because nobody needs EXECUTE for a trigger to fire (measured in
+  // revoke_execute_on_trigger_functions.sql).
   {
     signature: "public.accountant_directory_unpublish_on_last_unlink()",
     kind: "trigger", managedBy: "boekbrug", owner: "postgres", definer: true, status: "planned",
     intent: intent(D, D, D, D),
     current: null,
     evidence: [
-      "accountant_directory_unpublish_on_last_unlink.sql revokes ALL from PUBLIC, anon, authenticated and service_role",
+      "accountant_directory_publication_follows_evidence.sql revokes ALL from PUBLIC, anon, authenticated and service_role",
       "not applied to production; nothing measured, so `current` stays null rather than assumed",
     ],
     callers: ["trigger on accountant_clients"],
