@@ -4270,16 +4270,31 @@ test("[OFFERTE-EEN-KNOP] the offerte's two buttons exist because they now genuin
 
   const body = page.slice(page.indexOf("async function handleSubmit(mode:"), page.indexOf("// ─── Derived ───"));
   assert.ok(body.length > 500, "the handleSubmit slice is real");
-  // `mode` branches exactly three times: the signature, the minting-route exclusion, and the
-  // offerte-send branch. A fourth use is a new path nobody gated — reconsider, never ignore.
+  // `mode` branches exactly FOUR times: the signature, the seller gate, the minting-route
+  // exclusion, and the offerte-send branch. A fifth is a new path nobody gated — reconsider,
+  // never ignore.
+  //
+  // The fourth arrived with [VERKOPER-COMPLEET] and was looked at rather than counted away: it
+  // carries the SAME condition as the minting exclusion (`'sent'` and not an offerte), placed
+  // before the draft is written, so the owner is asked for the art. 35a seller data on exactly
+  // the paths that mint a number and on no others. It changes nothing about which document goes
+  // through which door — the two asserts below still hold — and it must stay narrow: running the
+  // gate on a DRAFT would demand a complete profile to save a concept, and running it on an
+  // OFFERTE would demand it for a document that carries no number and no legal obligation.
   assert.equal(
-    [...body.matchAll(/\bmode\b/g)].length, 3,
-    "`mode` appears in the signature, the minting exclusion, and the offerte-send branch. " +
-      "Another use means a new path this gate has never seen",
+    [...body.matchAll(/\bmode\b/g)].length, 4,
+    "`mode` appears in the signature, the seller gate, the minting exclusion, and the " +
+      "offerte-send branch. Another use means a new path this gate has never seen",
   );
   assert.match(
     body, /if \(mode === 'sent' && invoiceType !== 'offerte'\)/,
     "an offerte still never goes through /api/invoice/send — that route mints a factuur number",
+  );
+  // [VERKOPER-COMPLEET] And the seller gate is one of the two, with that same narrow condition.
+  assert.equal(
+    [...body.matchAll(/if \(mode === 'sent' && invoiceType !== 'offerte'\)/g)].length, 2,
+    "the seller gate and the send call must carry the SAME condition — a gate that is wider " +
+      "than the door it guards asks for legal data on a document that needs none",
   );
   assert.match(
     body, /if \(mode === 'sent' && invoiceType === 'offerte'\)/,

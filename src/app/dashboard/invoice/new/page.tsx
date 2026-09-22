@@ -8,9 +8,16 @@
 import React, { useState, useEffect, useRef, Suspense } from 'react'
 // [FUNNEL-OVERDRACHT] De factuur die op /factuur-maken is gemaakt vóór er een account was.
 import {
-  readHandoff, clearHandoff, hasInvoiceContent, isMeaningfulLine, describeHandoff,
-  type FactuurHandoff,
+  readHandoff, clearHandoff, hasInvoiceContent, hasSenderContent, isMeaningfulLine, describeHandoff,
+  toOnboardingCompany, type FactuurHandoff,
 } from '@/lib/factuur-handoff'
+// [VERKOPER-COMPLEET] Wat een verkoper op orde moet hebben vóór een factuur uitgegeven mag worden
+// — dezelfde module die /api/invoice/send leest, zodat dit scherm nooit iets anders vraagt dan de
+// deur eist. De precedentie (profiel > overdracht > leeg) staat daar, niet hier.
+import {
+  prefillSellerFields, classifySellerGate, classifySellerSave, saveAllowsSend, SELLER_FIELD_ORDER,
+  type SellerField, type SellerPrefillSource,
+} from '@/lib/seller-completeness'
 import { deliveryFailure } from '@/lib/invoice-delivery'
 import { createClient } from '@/lib/supabase'
 // [MIN-REGEL] Where the minus sign may live on a line, and when a document stops being a factuur
@@ -109,6 +116,25 @@ function isValidDutchBtw(v: string): boolean {
 
 // [BOEK-031] fix type — creditnota replaces credit — May 2026
 type InvoiceType = 'factuur' | 'offerte' | 'creditnota'
+
+/**
+ * [VERKOPER-COMPLEET] Hoe elk van de vier velden op het aanvulpaneel heet.
+ *
+ * Dit zijn de inst.*-sleutels van het INSTELLINGENSCHERM, en dat is geen luiheid: het gaat om
+ * precies dezelfde vier profielvelden, dus het hoort precies dezelfde vier woorden te zijn. Een
+ * eigen set labels voor hetzelfde veld is hoe twee schermen over één ding verschillend gaan
+ * praten — en «Bedrijfsnaam» hier naast «Handelsnaam» daar is een ondernemer die denkt dat het
+ * twee dingen zijn.
+ *
+ * Uitgeschreven als letterlijke sleutels, niet opgebouwd uit `veld`: de [TAAL]-poort scant op
+ * string-literals, en een sleutel die hij niet ziet telt als nooit gebruikt.
+ */
+const VERKOPER_LABEL: Record<SellerField, MessageKey> = {
+  btw_number: 'inst.btwNummer',
+  kvk_number: 'inst.kvkNummer',
+  address: 'inst.adres',
+  company_name: 'inst.bedrijfsnaam',
+}
 
 type Profile = {
   id: string
@@ -612,16 +638,40 @@ function NewInvoicePageContent() {
   // gewone nieuwe factuur: komt de gebruiker hier via een offerte, een vervanging of een scan,
   // dan is hij met iets anders bezig en zou dit aanbod alleen in de weg zitten.
   const [handoff, setHandoff] = useState<FactuurHandoff | null>(null)
+  // [VERKOPER-COMPLEET] Het AFZENDERblok van diezelfde overdracht, apart bewaard en om twee redenen.
+  //
+  //   · Het hangt niet aan hasInvoiceContent(). Iemand kan op /factuur-maken zijn eigen bedrijf
+  //     hebben ingetikt en daarna afgehaakt vóór de klant — dan is er geen factuur over te nemen
+  //     maar wél precies de gegevens die het aanvulpaneel straks vraagt.
+  //   · Het overleeft clearHandoff(). De banner hieronder gooit de overdracht weg zodra de
+  //     gebruiker hem overneemt of wegklikt; dat gaat over de FACTUUR. Wat hij over zijn eigen
+  //     bedrijf tikte, mag daar niet mee verdwijnen — hij zit nog op hetzelfde scherm.
+  const [handoffSender, setHandoffSender] = useState<SellerPrefillSource | null>(null)
   useEffect(() => {
     if (replacesNumberParam || offerteParam || aiClientName || aiDescription) return
     try {
       const h = readHandoff(localStorage)
       // eslint-disable-next-line react-hooks/set-state-in-effect
       if (hasInvoiceContent(h)) setHandoff(h)
+      // toOnboardingCompany() kent als enige hoe de twee adresregels van de generator één
+      // `address` worden — die kennis hoort niet nog een keer op dit scherm te staan.
+      if (h && hasSenderContent(h)) setHandoffSender(toOnboardingCompany(h))
     } catch {
       /* geblokkeerde opslag — dan is er gewoon niets aan te bieden */
     }
   }, [replacesNumberParam, offerteParam, aiClientName, aiDescription])
+
+  // [VERKOPER-COMPLEET] Het aanvulpaneel bij de verstuurknop.
+  //
+  // null = dicht. Een lijst = de velden die de SERVER als ontbrekend heeft aangewezen, en alleen
+  // die. Het scherm bedenkt die lijst niet zelf: zou het dat doen, dan kan het een veld vragen dat
+  // de deur niet eist, of er een vergeten dat ze wél eist — en dat tweede is een factuur die na het
+  // invullen alsnog wordt geweigerd.
+  const [verkoperMissing, setVerkoperMissing] = useState<SellerField[] | null>(null)
+  const [verkoperWaarden, setVerkoperWaarden] = useState<Record<string, string>>({})
+  const [verkoperProblemen, setVerkoperProblemen] = useState<Record<string, string>>({})
+  const [verkoperBezig, setVerkoperBezig] = useState(false)
+  const [verkoperFout, setVerkoperFout] = useState('')
 
   // [COHERENCE-CREDITNOTA] Credit-flow state removed — see the note further down, above the submit.
   // Creditnotas are created from the original invoice's detail dialog, not here.
@@ -1107,6 +1157,120 @@ function NewInvoicePageContent() {
   // control on this page (dead code), and the ?type=creditnota redirect above now sends
   // the owner to the correct place, so the whole standalone path is retired.
 
+  // ─── [VERKOPER-COMPLEET] De poort vóór de onomkeerbare knop ────────────────
+  //
+  // Alles hierboven op dit scherm is een formulier dat de ondernemer nog kan veranderen. Wat
+  // hieronder gebeurt niet: er wordt een concept aangemaakt en daarna vraagt de verzendroute een
+  // wettelijk factuurnummer aan, en een uitgegeven nummer gaat niet terug (art. 35 Wet OB).
+  //
+  // Dít is dus de plek om naar de eigen bedrijfsgegevens te vragen — niet bij binnenkomst. Wie net
+  // een account heeft, mag een klant intikken, regels toevoegen, bedragen wijzigen en alles
+  // bekijken zonder eerst een bedrijfsformulier af te maken. Pas als hij het document echt de deur
+  // uit doet, is de wet erbij.
+  //
+  // De poort STELT DE VRAAG NIET ZELF. Ze vraagt het de server, die de eigenaar oplost, het profiel
+  // classificeert en dezelfde module leest als de verzenddeur. Drie antwoorden en geen vierde:
+  // doorlopen, aanvullen, of stoppen omdat we het niet weten.
+  function openVerkoperPaneel(missing: SellerField[]) {
+    // Altijd in de vaste volgorde van de module, niet in die waarin het antwoord binnenkwam: een
+    // formulier waarvan de velden per keer van plaats wisselen leest als een ander formulier.
+    const geordend = SELLER_FIELD_ORDER.filter((f) => missing.includes(f))
+    // De server heeft gezegd WELKE velden leeg zijn; de precedentie in prefillSellerFields kiest
+    // WAT erin staat. Het profiel dat dit scherm zelf inlas mag daarbij gerust null zijn — de POST
+    // weigert hoe dan ook elk veld te overschrijven dat niet ontbreekt, dus de overdracht kan nooit
+    // over een bewaarde waarde heen.
+    const prefill = prefillSellerFields(geordend, profile, handoffSender)
+    const waarden: Record<string, string> = {}
+    for (const f of geordend) waarden[f] = prefill[f].value
+    setVerkoperWaarden(waarden)
+    setVerkoperProblemen({})
+    setVerkoperFout('')
+    setVerkoperMissing(geordend)
+    // Dezelfde handgreep als bij een rood veld hierboven: de ondernemer drukte op versturen —
+    // mogelijk net nog in de bevestigingsdialoog — en staat onder aan een lang formulier. Een
+    // paneel dat buiten beeld opengaat is voor hem een knop die niets deed. De vertraging is er
+    // omdat React het paneel pas na deze render in de DOM zet.
+    setTimeout(() => {
+      document.querySelector('[data-verkoper-aanvullen]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 50)
+  }
+
+  async function verkoperPoort(): Promise<'door' | 'stop'> {
+    let res: Response
+    let json: unknown = null
+    try {
+      res = await fetch('/api/invoice/verkoper')
+      json = await res.json().catch(() => null)
+    } catch {
+      // Een mislukt verzoek is geen groen licht. [NO-SILENT-EMPTY]
+      setError(t('nieuw.verkoper.onleesbaar'))
+      return 'stop'
+    }
+
+    // De beslissing zelf staat in classifySellerGate, niet hier: elk van de takken hieronder moet
+    // kloppen op de enige onomkeerbare knop van deze app, en een beslissing die in een component
+    // van 2400 regels is ingebakken kan geen enkele test bereiken.
+    const poort = classifySellerGate(res.status, json)
+    if (poort.action === 'proceed') return 'door'
+    if (poort.action === 'ask') { openVerkoperPaneel(poort.fields); return 'stop' }
+
+    // Onder andere de 503 bij een onleesbaar profiel: geen concept, geen verzending, geen nummer,
+    // en vooral geen invulformulier voor gegevens die er misschien gewoon staan.
+    setError(failureText(res.status, json as Parameters<typeof failureText>[1], t('nieuw.verkoper.onleesbaar')))
+    return 'stop'
+  }
+
+  /** Opslaan en dóór — langs de bestaande verzendweg, nooit langs een tweede. */
+  async function bewaarVerkoperEnVerstuur() {
+    if (!verkoperMissing) return
+    setVerkoperBezig(true)
+    setVerkoperProblemen({})
+    setVerkoperFout('')
+
+    const body: Record<string, string> = {}
+    for (const f of verkoperMissing) body[f] = verkoperWaarden[f] ?? ''
+
+    let res: Response
+    let json: unknown = null
+    try {
+      res = await fetch('/api/invoice/verkoper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      json = await res.json().catch(() => null)
+    } catch {
+      // Wat hij intikte blijft staan, en er wordt niets verstuurd.
+      setVerkoperFout(t('nieuw.verkoper.opslaanMislukt'))
+      setVerkoperBezig(false)
+      return
+    }
+
+    const uitkomst = classifySellerSave(res.status, json)
+    // saveAllowsSend() is de hele regel in één regel: alleen 'complete' mag door. Een opgeslagen
+    // maar nog onvolledig profiel, een veldfout en een storing antwoorden alle drie nee — en het
+    // formulier houdt vast wat de ondernemer intikte.
+    if (!saveAllowsSend(uitkomst)) {
+      setVerkoperBezig(false)
+      if (uitkomst.outcome === 'problems') setVerkoperProblemen(uitkomst.problems)
+      else if (uitkomst.outcome === 'ask') openVerkoperPaneel(uitkomst.fields)
+      else setVerkoperFout(failureText(res.status, json as Parameters<typeof failureText>[1], t('nieuw.verkoper.opslaanMislukt')))
+      return
+    }
+
+    // Gelukt. Het profiel op dit scherm bijwerken zodat de Van-kaart klopt, en dan de BESTAANDE
+    // verzendweg opnieuw aanroepen — geen tweede implementatie, geen eigen nummeraanvraag.
+    //
+    // Met wat de server OPSLOEG, niet met wat hier is ingetikt: hij normaliseert een btw-nummer
+    // (hoofdletters, spaties eruit), en de Van-kaart hoort te tonen wat straks op de factuur komt.
+    // Valt `saved` weg, dan liever de ingetikte waarde dan een kaart die leeg blijft.
+    const opgeslagen = (json as { saved?: Record<string, string> } | null)?.saved ?? body
+    setProfile((p) => (p ? { ...p, ...opgeslagen } as Profile : p))
+    setVerkoperMissing(null)
+    setVerkoperBezig(false)
+    await handleSubmit('sent')
+  }
+
   // ─── Main submit ───────────────────────────────────────────────────────────
 
   async function handleSubmit(mode: 'draft' | 'sent') {
@@ -1203,6 +1367,21 @@ function NewInvoicePageContent() {
 
     setFieldErrors({})
     setError('')
+
+    // [VERKOPER-COMPLEET] De laatste vraag vóór de onomkeerbare handeling — zie verkoperPoort().
+    //
+    // Alleen op de verstuurknop van een factuur/creditnota: een CONCEPT bewaren mag met een leeg
+    // profiel (er gaat niets de deur uit), en een OFFERTE loopt langs send-offerte, die geen
+    // nummer kan slaan en waarvoor art. 35a dus niets voorschrijft.
+    //
+    // Stopt de poort, dan is er geen concept aangemaakt, geen verzending gedaan en geen nummer
+    // aangevraagd. Dat is de hele reden dat ze hier staat en niet na de 400 van de verzenddeur.
+    if (mode === 'sent' && invoiceType !== 'offerte') {
+      setLoading(true)
+      const poort = await verkoperPoort()
+      setLoading(false)
+      if (poort === 'stop') return
+    }
 
     setLoading(true); setError('')
     const { data: { user } } = await supabase.auth.getUser()
@@ -1639,7 +1818,19 @@ function NewInvoicePageContent() {
                       <div style={{ marginTop: 10, backgroundColor: '#FEF7E0', borderInlineStart: '3px solid #FBBC04', borderRadius: '0 8px 8px 0', padding: '8px 12px' }}>
                         <p style={{ fontSize: 12, color: '#EA8600', margin: 0, lineHeight: 1.5 }}>
                           {t('nieuw.gegevens.missen', { list: missing.join(', ') })}{' '}
-                          <Link href="/dashboard/settings" style={{ color: '#1967D2', textDecoration: 'underline' }}>{t('nieuw.catalogus.aanvullen')}</Link>
+                          {/* [VERKOPER-COMPLEET] Was een <Link href="/dashboard/settings">. Dat stuurde
+                              de ondernemer midden in een factuur naar het instellingenscherm van 1238
+                              regels, waar hij zijn factuur kwijt was — en terug moest lopen om hem
+                              opnieuw in te tikken. Het paneel hieronder vraagt dezelfde velden op dit
+                              scherm, en de factuur blijft staan. De vraag WELKE velden ontbreken
+                              stelt de server (verkoperPoort), nooit deze knop: dit gele blok is een
+                              waarschuwing die ook over een ongeldig BTW-nummer gaat, en dat is iets
+                              anders dan wat de verzenddeur verplicht stelt. */}
+                          <button type="button"
+                            onClick={() => { void verkoperPoort() }}
+                            style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: '#1967D2', textDecoration: 'underline', cursor: 'pointer' }}>
+                            {t('nieuw.verkoper.aanvullen')}
+                          </button>
                         </p>
                       </div>
                     )
@@ -2202,6 +2393,67 @@ function NewInvoicePageContent() {
                       <span style={{ fontSize: label === 'IBAN' ? 13 : 14, fontWeight: 500, color: '#202124', fontFamily: label === 'IBAN' ? 'Roboto Mono, monospace' : 'inherit', maxWidth: '55%', textAlign: 'end' }}>{value}</span>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* [VERKOPER-COMPLEET] Het aanvulpaneel. Staat hier, onderaan het formulier en vlak boven
+                de verstuurknop, omdat dat de plek is waar de ondernemer net heeft gedrukt — en het
+                is bewust GEEN aparte pagina en geen dialoog over de factuur heen: de factuur blijft
+                zichtbaar, want die is waar hij mee bezig is.
+
+                Alleen de velden uit `verkoperMissing`, en die lijst komt van de server. Dit scherm
+                vraagt dus nooit om een IBAN, een Gmail-koppeling, een boekhouder of een vak: de
+                verzenddeur eist die niet, en elk veld meer is eerste-factuurwerk dat niemand vroeg. */}
+            {verkoperMissing && (
+              <div data-verkoper-aanvullen style={{ backgroundColor: 'white', borderRadius: 16, padding: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', borderInlineStart: `4px solid ${cfg.primaryBtn}`, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div>
+                  <p style={{ fontSize: 15, fontWeight: 600, color: '#202124', margin: 0 }}>{t('nieuw.verkoper.titel')}</p>
+                  <p style={{ fontSize: 13, color: '#5F6368', margin: '4px 0 0', lineHeight: 1.5 }}>{t('nieuw.verkoper.uitleg')}</p>
+                </div>
+
+                {verkoperMissing.map((veld) => {
+                  const label = VERKOPER_LABEL[veld]
+                  const prefilledFromHandoff =
+                    handoffSender !== null && (verkoperWaarden[veld] ?? '') !== '' &&
+                    prefillSellerFields([veld], profile, handoffSender)[veld].origin === 'handoff'
+                  return (
+                    <div key={veld}>
+                      <OutlinedInput
+                        value={verkoperWaarden[veld] ?? ''}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          setVerkoperWaarden((w) => ({ ...w, [veld]: v }))
+                          setVerkoperProblemen((p) => { const n = { ...p }; delete n[veld]; return n })
+                        }}
+                        label={t(label)}
+                        focusColor={cfg.focusColor}
+                        required
+                        hasError={!!verkoperProblemen[veld]}
+                      />
+                      {verkoperProblemen[veld] && (
+                        <p style={{ fontSize: 12, color: '#B3261E', margin: '4px 0 0' }}>{verkoperProblemen[veld]}</p>
+                      )}
+                      {!verkoperProblemen[veld] && prefilledFromHandoff && (
+                        <p style={{ fontSize: 12, color: '#5F6368', margin: '4px 0 0' }}>{t('nieuw.verkoper.overgenomen')}</p>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {verkoperFout && (
+                  <p style={{ fontSize: 13, color: '#B3261E', margin: 0 }}>{verkoperFout}</p>
+                )}
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  <button type="button" onClick={() => { void bewaarVerkoperEnVerstuur() }} disabled={verkoperBezig}
+                    style={{ flex: 1, minHeight: 48, borderRadius: 9999, border: 'none', backgroundColor: verkoperBezig ? '#9AA0A6' : cfg.primaryBtn, color: 'white', fontSize: 15, fontWeight: 600, cursor: verkoperBezig ? 'not-allowed' : 'pointer' }}>
+                    {verkoperBezig ? t('nieuw.verkoper.bezig') : t('nieuw.verkoper.opslaanEnVerstuur')}
+                  </button>
+                  <button type="button" onClick={() => { setVerkoperMissing(null); setVerkoperFout('') }} disabled={verkoperBezig}
+                    style={{ minHeight: 48, padding: '0 20px', borderRadius: 9999, border: 'none', backgroundColor: cfg.activeBg, color: cfg.activeColor, fontSize: 14, fontWeight: 500, cursor: verkoperBezig ? 'not-allowed' : 'pointer' }}>
+                    {t('nieuw.verkoper.terug')}
+                  </button>
                 </div>
               </div>
             )}

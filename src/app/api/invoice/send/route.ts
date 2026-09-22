@@ -63,6 +63,11 @@ import { gateFairUse, type FairUseGate } from '@/lib/fair-use-gate'
 import { logAuditAction, getClientIP } from '@/lib/audit'
 import { getActingFor, getActingForClient } from '@/lib/acting-for-server'
 import { invoiceOwnerId, isActingForOther, canSendInvoice } from '@/lib/acting-for'
+// [VERKOPER-COMPLEET] The four seller facts art. 35a demands, defined once — the screen that asks
+// for them reads the SAME module, so it can never ask for a different set than this door requires.
+import { missingSellerFields, sellerFieldLabels, type SellerFacts } from '@/lib/seller-completeness'
+// [PROFILE-READ] A read that FAILED is not a profile with nothing in it — see the refusal below.
+import { classifyProfileRead } from '@/lib/profile-read'
 import { runBankAutoConfirm } from '@/lib/bank-auto-confirm'
 // [BETAALBLOK] De betaalgegevens die in de mail horen — zie stap 13c en src/lib/pay-block.ts.
 import { payBlockForInvoice } from '@/lib/pay-link'
@@ -407,18 +412,45 @@ export async function POST(request: NextRequest) {
       // die profielrij via RLS onleesbaar, dus dan langs service_role. Zou dat niet gebeuren,
       // dan kwam deze controle terug met "geen profiel" en zou de factuur worden geweigerd met
       // een melding over ontbrekende bedrijfsgegevens die wél gewoon ingevuld zijn.
-      const { data: sellerProfile } = await (isActingForOther(acting) ? createPipelineClient() : supabase)
-        .from('profiles')
-        // [KOR-FACTUUR] `kor_active` erbij: zonder die kolom kan deze route niet zien dat de
-        // eigenaar geen btw mag rekenen, en dat is precies de controle hieronder.
-        .select('btw_number, kvk_number, address, company_name, full_name, kor_active')
-        .eq('id', ownerId)
-        .single()
-      const missingSeller: string[] = []
-      if (!sellerProfile?.btw_number || !String(sellerProfile.btw_number).trim()) missingSeller.push('BTW-nummer')
-      if (!sellerProfile?.kvk_number || !String(sellerProfile.kvk_number).trim()) missingSeller.push('KvK-nummer')
-      if (!sellerProfile?.address || !String(sellerProfile.address).trim()) missingSeller.push('adres')
-      if (!sellerProfile?.company_name?.trim() && !sellerProfile?.full_name?.trim()) missingSeller.push('bedrijfsnaam')
+      // [PROFILE-READ] Read CLASSIFIED, not just destructured.
+      //
+      // This was `const { data: sellerProfile }` and nothing else, so supabase-js's one failure
+      // shape — `{ data: null, error }` — arrived here as a profile with nothing in it, and the
+      // four checks below then reported all four fields as missing. The owner was told to go and
+      // fill in a BTW-nummer that has been on file for a year, because a query timed out.
+      //
+      // Both directions refuse, so NOTHING that used to be let through is let through now: this
+      // is the same refusal wearing the right reason. What changes is that the refusal is now
+      // true, and that the screen can tell "your details are incomplete" (a form) apart from "we
+      // could not look" (try again) instead of turning an outage into a setup wizard.
+      const sellerRead = classifyProfileRead(
+        await (isActingForOther(acting) ? createPipelineClient() : supabase)
+          .from('profiles')
+          // [KOR-FACTUUR] `kor_active` erbij: zonder die kolom kan deze route niet zien dat de
+          // eigenaar geen btw mag rekenen, en dat is precies de controle hieronder.
+          .select('btw_number, kvk_number, address, company_name, full_name, kor_active')
+          .eq('id', ownerId)
+          .single(),
+      )
+      if (sellerRead.kind === 'failed') {
+        console.error('[VERKOPER-COMPLEET] verkopersprofiel onleesbaar — geen nummer, geen verzending', {
+          ownerId, code: sellerRead.code, message: sellerRead.message,
+        })
+        return NextResponse.json(
+          {
+            error: 'We konden je bedrijfsgegevens nu niet lezen. Er is niets verstuurd en geen ' +
+              'factuurnummer uitgegeven — probeer het zo meteen opnieuw.',
+            code: 'profiel_onleesbaar',
+          },
+          { status: 503 },
+        )
+      }
+      const sellerProfile = sellerRead.kind === 'row' ? sellerRead.row : null
+
+      // [VERKOPER-COMPLEET] The four facts, from the shared module. Same fields, same order, same
+      // sentence as the four inline checks that stood here — the definition simply moved to where
+      // the screen can read it too.
+      const missingSeller = sellerFieldLabels(missingSellerFields(sellerProfile as SellerFacts | null))
       if (missingSeller.length > 0) {
         return NextResponse.json(
           {
