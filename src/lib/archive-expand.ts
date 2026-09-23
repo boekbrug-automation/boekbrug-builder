@@ -159,6 +159,58 @@ interface RawEntry {
   localHeaderOffset: number;
 }
 
+const MAX16 = 0xffff;
+const MAX32 = 0xffffffff;
+
+/** A 64-bit field as a number. Past 2^53 no size or offset in an archive we could open is real. */
+function u64(buf: Buffer, at: number): number {
+  const v = buf.readBigUInt64LE(at);
+  return v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(v);
+}
+
+/**
+ * [ARCHIEF-WAAR] The ZIP64 extended-information extra field (header 0x0001, APPNOTE 4.5.3) of one
+ * directory record. It holds, IN THIS ORDER and ONLY for the fields the record left as a placeholder:
+ * uncompressed size (8), compressed size (8), local-header offset (8), disk number (4). Null when a
+ * value the record needs is missing, or the extra area itself does not parse.
+ */
+function readZip64Extra(
+  extra: Buffer,
+  need: { uncompressed: boolean; compressed: boolean; offset: boolean; disk: boolean },
+): { uncompressed?: number; compressed?: number; offset?: number; disk?: number } | null {
+  for (let p = 0; p + 4 <= extra.length;) {
+    const id = extra.readUInt16LE(p);
+    const start = p + 4;
+    const end = start + extra.readUInt16LE(p + 2);
+    if (end > extra.length) return null;
+    if (id === 0x0001) {
+      const out: { uncompressed?: number; compressed?: number; offset?: number; disk?: number } = {};
+      let q = start;
+      for (const field of ["uncompressed", "compressed", "offset"] as const) {
+        if (!need[field]) continue;
+        if (q + 8 > end) return null;
+        out[field] = u64(extra, q);
+        q += 8;
+      }
+      if (need.disk) {
+        if (q + 4 > end) return null;
+        out.disk = extra.readUInt32LE(q);
+      }
+      return out;
+    }
+    p = end;
+  }
+  return null; // a placeholder with no ZIP64 field to resolve it
+}
+
+/** What the directory walk found, plus the view JSZip must be given (see ZIP64 below). */
+interface Directory {
+  entries: RawEntry[];
+  shift: number;
+  /** A copy for JSZip without the ZIP64 extensible data sector, or null to hand it the original. */
+  jszipView: Buffer | null;
+}
+
 /**
  * [ARCHIEF-WAAR] Read the central directory ourselves.
  *
@@ -167,36 +219,95 @@ interface RawEntry {
  * lists both. Returns null when the directory cannot be walked; the caller then refuses the archive,
  * because a name check that did not run has not proven anything.
  *
- * [ARCHIEF-WAAR] "Walked" means ACCOUNTED FOR: the records must end exactly where the directory
- * says it ends. An end record that under-counts its entries is read by JSZip as far as the count
- * goes and no further, so a record past the count is a file nothing downstream ever sees.
+ * "Walked" means ACCOUNTED FOR: the records must end exactly where the directory says it ends. An
+ * end record that under-counts its entries is read by JSZip as far as the count goes and no
+ * further, so a record past the count is a file nothing downstream ever sees.
+ *
+ * [ARCHIEF-WAAR] ZIP64 (APPNOTE 4.3.14–4.3.16, 4.5.3). A writer may use ZIP64 for a small archive
+ * too: 32-bit placeholders (0xFFFF / 0xFFFFFFFF) in the ordinary records, real values in ZIP64
+ * records. Reading the placeholder as a size refused a 179-byte archive as "larger than 25 MB".
+ *   · The ZIP64 end record is found through its LOCATOR, and it is variable-length: it is the record
+ *     whose own size field makes it end exactly at the locator. Its extensible data sector must be
+ *     whole blocks (id 2, size 4, data). Where the classic end record carries a real value, it must
+ *     agree with the ZIP64 one. The locator's offset must agree with where the record really is,
+ *     after the same shift the directory has.
+ *   · Every placeholder in a directory record is resolved from that record's ZIP64 extra field.
+ *   · Missing or inconsistent ZIP64 data is not guessed around: null, and the archive is refused as
+ *     damaged — which is then true.
+ *   · JSZip (3.x) cannot read an extensible data sector at all: its loop over it never advances. So
+ *     when one is present and valid, JSZip is handed a copy without it. The sector sits after the
+ *     directory, so no member offset moves.
  */
-function readCentralDirectory(buf: Buffer): { entries: RawEntry[]; shift: number } | null {
+function readCentralDirectory(buf: Buffer): Directory | null {
   const EOCD = 0x06054b50, CENTRAL = 0x02014b50, Z64_LOCATOR = 0x07064b50, Z64_EOCD = 0x06064b50;
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
     if (buf.readUInt32LE(i) === EOCD && i + 22 + buf.readUInt16LE(i + 20) === buf.length) { eocd = i; break; }
   }
   if (eocd < 0) return null;
-  let count = buf.readUInt16LE(eocd + 10);
-  let cdSize = buf.readUInt32LE(eocd + 12);
-  let cdOffset = buf.readUInt32LE(eocd + 16);
+  const classic = {
+    disk: buf.readUInt16LE(eocd + 4),
+    cdDisk: buf.readUInt16LE(eocd + 6),
+    onDisk: buf.readUInt16LE(eocd + 8),
+    count: buf.readUInt16LE(eocd + 10),
+    cdSize: buf.readUInt32LE(eocd + 12),
+    cdOffset: buf.readUInt32LE(eocd + 16),
+  };
+  const placeholders =
+    classic.disk === MAX16 || classic.cdDisk === MAX16 || classic.onDisk === MAX16 || classic.count === MAX16 ||
+    classic.cdSize === MAX32 || classic.cdOffset === MAX32;
+  const loc = eocd - 20;
+  const hasLocator = loc >= 0 && buf.readUInt32LE(loc) === Z64_LOCATOR;
+  if (placeholders && !hasLocator) return null;
+
+  let count = classic.count, cdSize = classic.cdSize, cdOffset = classic.cdOffset;
   let recordStart = eocd;
-  if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
-    const loc = eocd - 20;
-    if (loc < 0 || buf.readUInt32LE(loc) !== Z64_LOCATOR) return null;
-    const z = loc - 56;
-    if (z < 0 || buf.readUInt32LE(z) !== Z64_EOCD) return null;
-    count = Number(buf.readBigUInt64LE(z + 32));
-    cdSize = Number(buf.readBigUInt64LE(z + 40));
-    cdOffset = Number(buf.readBigUInt64LE(z + 48));
+  let z64Shift: number | null = null;
+  let jszipView: Buffer | null = null;
+  if (hasLocator) {
+    if (buf.readUInt32LE(loc + 4) !== 0 || buf.readUInt32LE(loc + 16) !== 1) return null; // one disk only
+    const declared = u64(buf, loc + 8);
+    // The variable-length record: the one whose own size field ends it exactly at the locator.
+    let z = -1;
+    for (let p = loc - 56; p >= Math.max(0, loc - 56 - 0xffff); p--) {
+      if (buf.readUInt32LE(p) === Z64_EOCD && p + 12 + u64(buf, p + 4) === loc) { z = p; break; }
+    }
+    if (z < 0 || u64(buf, z + 4) < 44) return null;
+    if (buf.readUInt32LE(z + 16) !== 0 || buf.readUInt32LE(z + 20) !== 0) return null;
+    const z64 = { onDisk: u64(buf, z + 24), count: u64(buf, z + 32), cdSize: u64(buf, z + 40), cdOffset: u64(buf, z + 48) };
+    if (z64.onDisk !== z64.count) return null;
+    // The extensible data sector: whole blocks of id (2) + size (4) + data, nothing left over.
+    const sectorEnd = loc;
+    for (let q = z + 56; q < sectorEnd;) {
+      if (q + 6 > sectorEnd) return null;
+      q += 6 + buf.readUInt32LE(q + 2);
+      if (q > sectorEnd) return null;
+    }
+    // A real value in the classic record must agree with its ZIP64 counterpart.
+    if (classic.count !== MAX16 && classic.count !== z64.count) return null;
+    if (classic.onDisk !== MAX16 && classic.onDisk !== z64.onDisk) return null;
+    if (classic.cdSize !== MAX32 && classic.cdSize !== z64.cdSize) return null;
+    if (classic.cdOffset !== MAX32 && classic.cdOffset !== z64.cdOffset) return null;
+    count = z64.count; cdSize = z64.cdSize; cdOffset = z64.cdOffset;
     recordStart = z;
+    z64Shift = z - declared;
+    if (z + 56 < sectorEnd) {
+      const head = Buffer.from(buf.subarray(z, z + 56));
+      head.writeBigUInt64LE(BigInt(44), 4);
+      jszipView = Buffer.concat([buf.subarray(0, z), head, buf.subarray(sectorEnd)]);
+    }
+  } else if (classic.disk !== 0 || classic.cdDisk !== 0 || classic.onDisk !== classic.count) {
+    return null; // a spanned archive; nothing here reads one
   }
+
   // The directory ends where the end record begins. Bytes prepended to the archive (a self-extractor
-  // stub, a mail gateway's banner) shift every stored offset by the same amount.
+  // stub, a mail gateway's banner) shift every stored offset by the same amount — the ZIP64 record's
+  // offset in the locator included.
   const cdStart = recordStart - cdSize;
   if (cdStart < 0) return null;
   const shift = cdStart - cdOffset;
+  if (shift < 0 || (z64Shift !== null && z64Shift !== shift)) return null;
+
   const entries: RawEntry[] = [];
   let pos = cdStart;
   for (let n = 0; n < count; n++) {
@@ -204,19 +315,37 @@ function readCentralDirectory(buf: Buffer): { entries: RawEntry[]; shift: number
     const nameLen = buf.readUInt16LE(pos + 28);
     const extraLen = buf.readUInt16LE(pos + 30);
     const commentLen = buf.readUInt16LE(pos + 32);
+    if (pos + 46 + nameLen + extraLen + commentLen > recordStart) return null;
     const utf8 = (buf.readUInt16LE(pos + 8) & 0x0800) !== 0;
     const raw = buf.subarray(pos + 46, pos + 46 + nameLen);
+    let compressedSize = buf.readUInt32LE(pos + 20);
+    let declaredSize = buf.readUInt32LE(pos + 24);
+    let diskStart = buf.readUInt16LE(pos + 34);
+    let localHeaderOffset = buf.readUInt32LE(pos + 42);
+    const need = {
+      uncompressed: declaredSize === MAX32, compressed: compressedSize === MAX32,
+      offset: localHeaderOffset === MAX32, disk: diskStart === MAX16,
+    };
+    if (need.uncompressed || need.compressed || need.offset || need.disk) {
+      const z = readZip64Extra(buf.subarray(pos + 46 + nameLen, pos + 46 + nameLen + extraLen), need);
+      if (!z) return null;
+      if (need.uncompressed) declaredSize = z.uncompressed!;
+      if (need.compressed) compressedSize = z.compressed!;
+      if (need.offset) localHeaderOffset = z.offset!;
+      if (need.disk) diskStart = z.disk!;
+    }
+    if (diskStart !== 0) return null;
     entries.push({
       name: raw.toString(utf8 ? "utf8" : "latin1"),
       method: buf.readUInt16LE(pos + 10),
-      compressedSize: buf.readUInt32LE(pos + 20),
-      declaredSize: buf.readUInt32LE(pos + 24),
-      localHeaderOffset: buf.readUInt32LE(pos + 42),
+      compressedSize,
+      declaredSize,
+      localHeaderOffset,
     });
     pos += 46 + nameLen + extraLen + commentLen;
   }
   if (pos !== recordStart) return null; // records left over, or the count overran the directory
-  return { entries, shift };
+  return { entries, shift, jszipView };
 }
 
 /**
@@ -338,9 +467,13 @@ export async function openArchive<T extends ExpandableAttachment>(
   });
 
   const raw = toBuffer(att.data);
+  // [ARCHIEF-WAAR] The directory is walked FIRST: it decides whether the archive is sound, and what
+  // JSZip is shown (a ZIP64 extensible sector it cannot read is stripped; see readCentralDirectory).
+  const directory = readCentralDirectory(raw);
+  if (!directory) return wholeRefusal(KAPOT);
   let zip: JSZip;
   try {
-    zip = await JSZip.loadAsync(raw);
+    zip = await JSZip.loadAsync(directory.jszipView ?? raw);
   } catch (e) {
     return wholeRefusal(/encrypt/i.test(e instanceof Error ? e.message : "") ? VERGRENDELD : KAPOT);
   }
@@ -350,8 +483,6 @@ export async function openArchive<T extends ExpandableAttachment>(
   // A group is one document only when every entry in it has the same bytes; anything else, or
   // anything that cannot be compared, refuses the archive: two documents may not share one key,
   // and guessing which copy is "the" invoice is not ours to do.
-  const directory = readCentralDirectory(raw);
-  if (!directory) return wholeRefusal(KAPOT);
   const rawFiles = directory.entries.filter((e) => !e.name.endsWith("/") && !e.name.endsWith("\\"));
 
   // [ARCHIEF-WAAR] The ceilings apply to what the archive HOLDS, before anything is inflated.

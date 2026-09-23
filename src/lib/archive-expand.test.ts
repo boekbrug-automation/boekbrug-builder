@@ -345,3 +345,91 @@ test("[ARCHIEF-WAAR] a directory that under-counts its own entries is refused wh
   assert.equal(r.members.length, 0);
   assert.match(r.refusals[0].reason, /afzender/, "with an action the owner can take");
 });
+
+// ── [ARCHIEF-WAAR] review round 3 — ZIP64 ─────────────────────────────────────────────────────
+// A small archive may still be written in ZIP64 form: 32-bit placeholders (0xFFFF / 0xFFFFFFFF) in
+// the ordinary records, the real values in ZIP64 records. The fixtures are real JSZip archives
+// rewritten into that form (tests/render/support/zip64-fixture.ts).
+import { zip64ify } from "../../tests/render/support/zip64-fixture";
+
+async function twoMembers(): Promise<Buffer> {
+  return zipBytes({ "a.pdf": "%PDF member A", "map/b.pdf": "%PDF member B" });
+}
+const bodies = (r: { members: Array<{ data: string }> }) =>
+  r.members.map((m) => Buffer.from(m.data, "base64").toString()).sort();
+
+test("[ARCHIEF-WAAR] ZIP64: a small archive whose sizes live in the ZIP64 extra field is read", async () => {
+  const buf = zip64ify(await twoMembers(), { sizes: true });
+  const r = await openArchive(attachment("z64.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, false, r.refusals[0]?.reason);
+  assert.deepEqual(bodies(r), ["%PDF member A", "%PDF member B"]);
+});
+
+test("[ARCHIEF-WAAR] ZIP64: sizes AND offsets in the extra field, with a ZIP64 end record and locator", async () => {
+  const buf = zip64ify(await twoMembers(), { sizes: true, offsets: true, endRecord: true });
+  const r = await openArchive(attachment("z64.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, false, r.refusals[0]?.reason);
+  assert.deepEqual(bodies(r), ["%PDF member A", "%PDF member B"]);
+});
+
+test("[ARCHIEF-WAAR] ZIP64: a VARIABLE-length end record (extensible data) is located through the locator", async () => {
+  const buf = zip64ify(await twoMembers(), { sizes: true, offsets: true, endRecord: true, extensible: 40 });
+  const r = await openArchive(attachment("z64.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, false, r.refusals[0]?.reason);
+  assert.deepEqual(bodies(r), ["%PDF member A", "%PDF member B"]);
+});
+
+test("[ARCHIEF-WAAR] ZIP64: identical copies are compared at their REAL offsets and resolve once", async () => {
+  const buf = zip64ify(await sameNameZip(2, "x".repeat(4096)), { sizes: true, offsets: true, endRecord: true });
+  const r = await openArchive(attachment("z64.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r.refusedWhole, false, r.refusals[0]?.reason);
+  assert.equal(r.members.length, 1);
+  assert.equal(r.members[0].size, 4096);
+});
+
+test("[ARCHIEF-WAAR] ZIP64: the raw-entry ceiling still holds", async () => {
+  const buf = zip64ify(await sameNameZip(4, "%PDF same"), { sizes: true, offsets: true, endRecord: true });
+  const r = await openArchive(attachment("z64.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 1 << 20, maxEntries: 3 });
+  assert.equal(r.refusedWhole, true);
+  assert.match(r.refusals[0].reason, /meer dan 3/);
+});
+
+test("[ARCHIEF-WAAR] ZIP64: the declared total and the COUNTED budget still hold", async () => {
+  // Declared honestly: three different 4 KB files against a 10 KB archive budget.
+  const honest = zip64ify(await zipBytes({ "a.pdf": "a".repeat(4096), "b.pdf": "b".repeat(4096), "c.pdf": "c".repeat(4096) }),
+    { sizes: true, offsets: true, endRecord: true });
+  const r1 = await openArchive(attachment("z64.zip", honest.toString("base64")), { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r1.refusedWhole, true);
+  assert.match(r1.refusals[0].reason, /groter dan/);
+
+  // Under-declared inside the ZIP64 extra field: only the counted budget can stop the copies.
+  const lying = await sameNameZip(3, "x".repeat(4096));
+  const CENTRAL = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+  for (let i = lying.indexOf(CENTRAL); i !== -1; i = lying.indexOf(CENTRAL, i + 4)) lying.writeUInt32LE(100, i + 24);
+  const buf = zip64ify(lying, { sizes: true, offsets: true, endRecord: true });
+  const r2 = await openArchive(attachment("z64.zip", buf.toString("base64")), { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r2.refusedWhole, true);
+  assert.match(r2.refusals[0].reason, /groter dan/);
+});
+
+for (const [label, opts] of [
+  ["placeholders with no ZIP64 extra field", { sizes: true, omitExtra: true }],
+  ["placeholders in the end record with no locator", { endRecord: true, omitLocator: true }],
+  ["an end record whose size field is wrong", { sizes: true, offsets: true, endRecord: true, recordSizeSkew: 8 }],
+  ["an end record whose entry count is wrong", { sizes: true, offsets: true, endRecord: true, countSkew: 1 }],
+  ["a locator that points beside the end record", { sizes: true, offsets: true, endRecord: true, locatorSkew: 4 }],
+  ["an extensible block that overruns its sector", { sizes: true, offsets: true, endRecord: true, extensible: 16, extensibleOverrun: true }],
+] as const) {
+  test(`[ARCHIEF-WAAR] ZIP64 malformed — ${label} — is refused whole, truthfully, with an action`, async () => {
+    const buf = zip64ify(await twoMembers(), opts);
+    const r = await openArchive(attachment("stuk64.zip", buf.toString("base64")));
+    assert.equal(r.refusedWhole, true, "inconsistent ZIP64 data proves nothing and is refused");
+    assert.equal(r.members.length, 0);
+    assert.equal(r.refusals[0].key, "m1:stuk64.zip");
+    assert.match(r.refusals[0].reason, /beschadigd/, "the reason is the truth: the archive's records are damaged");
+    assert.doesNotMatch(r.refusals[0].reason, /groter dan/, "never a size claim the archive does not make");
+    assert.match(r.refusals[0].reason, /afzender/);
+  });
+}

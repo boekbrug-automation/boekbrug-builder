@@ -810,3 +810,39 @@ test("[ARCHIEF-WAAR] an archive whose directory hides an entry is refused durabl
   assert.match(registry()[0].reason, /afzender/);
   assert.equal(watermark(), iso(NOW - 3 * DAY));
 });
+
+// ── [ARCHIEF-WAAR] review round 3 — ZIP64 through the real sync ───────────────────────────────
+
+test("[ARCHIEF-WAAR] ZIP64: small till archives in ZIP64 form are kept, read by no model", async () => {
+  const { zip64ify } = await import("./support/zip64-fixture");
+  seedAccount("gmail");
+  const d4 = iso(NOW - 4 * DAY).slice(0, 10), d3 = iso(NOW - 3 * DAY).slice(0, 10);
+  mailbox = [
+    { id: "z1", at: NOW - 4 * DAY, atts: [{ name: "dag64.zip",
+      bytes: zip64ify(await zip({ "dagafsluiting.pdf": await tillPdf(d4, 111) }), { sizes: true }) }] },
+    { id: "z2", at: NOW - 3 * DAY, atts: [{ name: "dag64.zip",
+      bytes: zip64ify(await zip({ "dagafsluiting.pdf": await tillPdf(d3, 222) }), { sizes: true, offsets: true, endRecord: true, extensible: 24 }) }] },
+  ];
+  await sync();
+  assert.equal(modelCalls, 0, "a till closing is recognised locally, ZIP64 or not");
+  assert.equal(db.t("documents").length, 2, "both closings are stored");
+  assert.deepEqual(regKeys(), [mk("z1", "dag64.zip", "dagafsluiting.pdf"), mk("z2", "dag64.zip", "dagafsluiting.pdf")].sort());
+  assert.equal(db.t("invoices").length, 0);
+  assert.equal(db.t("daily_turnover").length, 0);
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+});
+
+test("[ARCHIEF-WAAR] ZIP64: an archive with inconsistent ZIP64 records is refused durably and truthfully", async () => {
+  const { zip64ify } = await import("./support/zip64-fixture");
+  seedAccount("gmail");
+  const d = iso(NOW - 3 * DAY).slice(0, 10);
+  mailbox = [{ id: "z3", at: NOW - 3 * DAY, atts: [{ name: "stuk64.zip",
+    bytes: zip64ify(await zip({ "dagafsluiting.pdf": await tillPdf(d) }), { sizes: true, offsets: true, endRecord: true, locatorSkew: 4 }) }] }];
+  await sync();
+  assert.equal(modelCalls, 0);
+  assert.equal(db.t("documents").length, 0, "nothing from an archive whose records disagree is kept as if it were sound");
+  assert.deepEqual(regKeys(), ["z3:stuk64.zip"], "refused under the archive's own key");
+  assert.match(registry()[0].reason, /beschadigd/);
+  assert.match(registry()[0].reason, /afzender/);
+  assert.equal(watermark(), iso(NOW - 3 * DAY), "a durable refusal does not freeze the mailbox");
+});

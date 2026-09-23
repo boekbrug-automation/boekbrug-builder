@@ -2589,9 +2589,16 @@ test("[E-FACTUUR-XML] a free read never spends the monthly AI allowance", () => 
   assert.doesNotMatch(mimes!, /xml/i, "an e-invoice XML is read mechanically and must never count as a model read");
   assert.match(src, /const costsModelRead = \(a: GmailAttachment\): boolean =>\s*MODEL_READ_MIMES\.has\(a\.mimeType\)/,
     "the cost predicate must be derived from the model-read types");
+  // [ARCHIEF-WAAR] review round 3: the reservation's OWN argument, not the text anywhere in the file.
+  // `wanted: aiCandidates.length` also appears as a field of the hold-warning log, so a match on the
+  // whole file stayed green while the reservation itself asked for a different number.
+  const reservations = [...src.matchAll(/await consumeFairUseUpTo\(\{([^}]*)\}\)/g)];
+  assert.equal(reservations.length, 1, "exactly one monthly-allowance reservation in the sync — re-point this gate");
+  const reservation = reservations[0][1];
+  assert.match(reservation, /\bmetric: 'aiDocuments'/, "the reservation is on the AI-reading allowance");
   assert.match(
-    src, /wanted: aiCandidates\.length/,
-    "…and the reservation must ask for that number, not the batch size",
+    reservation, /(^|[\s,{])wanted: aiCandidates\.length\s*,?\s*$/m,
+    "…and the reservation must ask for exactly the paid reads, not the batch, not a derived number",
   );
   // A positional slice would let a free XML occupy a paid place. The selection walks the batch and
   // keeps every XML plus paid reads until the grant runs out.
@@ -27456,6 +27463,18 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
     "the bytes inflated to compare copies are no longer on the archive's account");
   assert.match(expand, /hash: createHash\("sha256"\)\.update\(out\)\.digest\("hex"\)/,
     "copies are compared by retaining their bytes again — memory grows with the number of copies");
+  // [ARCHIEF-WAAR] review round 3 — ZIP64: the end record found through its locator (variable
+  // length), placeholders resolved from the record's own ZIP64 extra field, JSZip handed a view it
+  // can read, and the walk run BEFORE JSZip loads anything.
+  assert.match(expand, /buf\.readUInt32LE\(p\) === Z64_EOCD && p \+ 12 \+ u64\(buf, p \+ 4\) === loc/,
+    "the ZIP64 end record is assumed to have a fixed size again — a variable-length one is refused as damaged");
+  assert.match(expand, /z64Shift !== null && z64Shift !== shift\)\) return null/,
+    "the locator's offset is no longer checked against where the ZIP64 end record really is");
+  assert.match(expand, /const z = readZip64Extra\(buf\.subarray\(pos \+ 46 \+ nameLen, pos \+ 46 \+ nameLen \+ extraLen\), need\);?\s*if \(!z\) return null/,
+    "a 0xFFFFFFFF placeholder is read as a size again — a small ZIP64 archive is refused as 'larger than 25 MB'");
+  const walkAt = expand.indexOf("const directory = readCentralDirectory(raw)");
+  const loadAt = expand.indexOf("zip = await JSZip.loadAsync(directory.jszipView ?? raw)");
+  assert.ok(walkAt > -1 && loadAt > walkAt, "JSZip loads the archive before its directory is validated, or is handed the raw bytes it cannot read");
   assert.match(expand, /if \(pos !== recordStart\) return null;?/,
     "a directory whose records do not end where it says it ends is accepted — an under-counted entry is invisible");
   assert.match(src, /const keptDurably = \(r: KeepResult\)[^=]*=>[\s\S]{0,120}?registered/,
