@@ -44,11 +44,13 @@ let syncUserEmails: (userId: string, opts?: { fromMs?: number; holdWatermark?: b
 let currentPeriod: () => string;
 let limitForPlan: (key: string, plan: string) => number;
 let runIntakeDrain: (deps: any) => Promise<any>;
+let computeContentHash: (buf: Buffer) => string;
 before(async () => {
   ({ textToPdf } = await import(u("lib/text-to-pdf.ts")) as any);
   ({ syncUserEmails } = await import(u("lib/email-integration.ts")) as any);
   ({ currentPeriod, limitForPlan } = await import(u("lib/fair-use-usage.ts")) as any);
   ({ runIntakeDrain } = await import(u("lib/intake-drain.ts")) as any);
+  ({ computeContentHash } = await import(u("lib/content-hash.ts")) as any);
 });
 
 // ── fixtures ───────────────────────────────────────────────────────────────────────────────────
@@ -101,6 +103,8 @@ let mailbox: Mail[] = [];
 // ── the model ─────────────────────────────────────────────────────────────────────────────────
 
 let modelCalls = 0;
+/** What the model says about every document; default "not an invoice". */
+let modelVerdict: Record<string, unknown> | null = null;
 /** Return a status to fail THIS call (e.g. 529 = overloaded, transient). */
 let modelFault: (body: string, n: number) => number | null = () => null;
 const unknownUrls: string[] = [];
@@ -109,7 +113,7 @@ const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
 
 function anthropicAnswer() {
-  const answer = { is_invoice: false, confidence: 0.95, reason: "geen factuur (testantwoord)", document_kind: "other" };
+  const answer = modelVerdict ?? { is_invoice: false, confidence: 0.95, reason: "geen factuur (testantwoord)", document_kind: "other" };
   return json({
     id: "msg", type: "message", role: "assistant", model: "fake",
     content: [{ type: "text", text: JSON.stringify(answer) }],
@@ -264,6 +268,7 @@ const snapshot = () => ({
 
 beforeEach(() => {
   modelCalls = 0;
+  modelVerdict = null;
   modelFault = () => null;
   mailbox = [];
   unknownUrls.length = 0;
@@ -619,4 +624,32 @@ test("[ARCHIEF-WAAR] the legacy row STAYS while the archive is not yet handled",
   db.storageFault = () => true;
   await sync();
   assert.deepEqual(regKeys(), ["v2:dag.zip"], "nothing was handled, so nothing is replaced");
+});
+
+test("[ARCHIEF-WAAR] a member proven a duplicate by its bytes is known as one, and never read again", async () => {
+  seedAccount("gmail");
+  const member = await otherPdf("dup-1");
+  // The same bytes are already in the administration (uploaded by hand earlier).
+  db.t("documents").push({
+    id: "existing-doc", user_id: U, file_name: "eerder.pdf", content_hash: computeContentHash(member),
+    trashed: false, invoice_id: null, source: "upload",
+  });
+  mailbox = [{ id: "d1", at: NOW - 3 * DAY, atts: [{ name: "z.zip", bytes: await zip({ "a.pdf": member }) }] }];
+  modelVerdict = {
+    is_invoice: true, confidence: 0.95, reason: "factuur", document_kind: "invoice",
+    vendor_name: "Leverancier BV", invoice_number: "DUP-1", invoice_date: "2026-09-10",
+    total_ex_btw: 100, btw_amount: 21, total_inc_btw: 121,
+  };
+  const r = await sync();
+  assert.equal(r.errors, 0);
+  // An invoice verdict can take the reader more than one call (its own second pass); the number
+  // that matters is the one below — nothing at all on the next sync.
+  assert.ok(modelCalls >= 1);
+  assert.deepEqual(regKeys(), ["d1:z — a.pdf:dubbel"], "the member is on record as a duplicate");
+  assert.equal(db.t("documents").length, 1, "no second copy of the bytes");
+  assert.equal(db.t("invoices").length, 0, "and no second invoice");
+  assert.equal(watermark(), iso(NOW - 3 * DAY), "a proven duplicate is a durable outcome");
+  const s = snapshot();
+  await sync();
+  assert.deepEqual(snapshot(), s, "the next sync knows it through the :dubbel fold — zero reads, zero rows");
 });
