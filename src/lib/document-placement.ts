@@ -143,7 +143,18 @@ export type ClassifyOutcome =
   | { kind: "placed"; documentId: string }
   | { kind: "gone" }
   | { kind: "superseded"; aiDocType: string | null }
-  | { kind: "completed_elsewhere"; aiDocType: string | null; identical: boolean }
+  /**
+   * Already final.
+   *
+   * [UPLOAD-TRUTH-1] `noticeArmed` reports whether the winner's row carries a delivery arm
+   * (`intake_retry_after`). It is NOT part of `identical`, and deliberately not in
+   * CLASSIFICATION_KEYS: it says nothing about what the document IS, only about whether its owner
+   * has yet been told. During a rolling deploy the winner can be a build that knew nothing about
+   * arming, and a loser that reads only `identical` would call that finished — leaving a terminal
+   * unreadable document that no notice pass can ever see. Reported, not repaired, here: the repair
+   * belongs to the caller that knows the document ended unreadable.
+   */
+  | { kind: "completed_elsewhere"; aiDocType: string | null; identical: boolean; noticeArmed: boolean }
   | { kind: "failed"; error: string | null }
 
 /**
@@ -181,11 +192,26 @@ export async function updateClassification(
   expectedAiDocType: string | null,
   classification: DocumentClassification,
   pipeline: Pipeline = createPipelineClient(),
+  /**
+   * [UPLOAD-TRUTH-1] Columns written in the SAME statement as the classification, that are not
+   * part of what the document IS.
+   *
+   * There is exactly one today and it is the reason this parameter exists: `intake_retry_after`,
+   * the delivery arm for the unreadable notice. It has to travel with the terminal write and not
+   * after it, because "terminal state written, process dies, arm never set" is precisely the hole
+   * this slice closes — and a second statement is a second place to die.
+   *
+   * Kept OUT of DocumentClassification and out of CLASSIFICATION_KEYS on purpose: those define
+   * classification IDENTITY, which `identical` is measured against. A delivery flag in that set
+   * would make two rows describing the same document compare unequal because one owner has been
+   * told and the other has not.
+   */
+  alsoSet: Record<string, unknown> = {},
 ): Promise<ClassifyOutcome> {
   try {
     const owned = pipeline
       .from("documents")
-      .update(classification)
+      .update({ ...classification, ...alsoSet })
       .eq("id", documentId)
       .eq("user_id", userId)
     // PostgREST has no `= NULL`: a document that never carried an ai_doc_type must be matched with
@@ -199,9 +225,13 @@ export async function updateClassification(
     if ((data ?? []).length) return { kind: "placed", documentId }
 
     // Zero rows. Three different facts look identical from here, so read the row and say which.
+    // [UPLOAD-TRUTH-1] `intake_retry_after` is read alongside, never folded into
+    // CLASSIFICATION_KEYS: `identical` below must keep meaning "the same classification", and the
+    // arm is not classification. It is read because a loser of this race is the only thing left
+    // that can notice the winner armed nothing — see `noticeArmed` on the outcome.
     const { data: row, error: readError } = await pipeline
       .from("documents")
-      .select(CLASSIFICATION_KEYS.join(", "))
+      .select([...CLASSIFICATION_KEYS, "intake_retry_after"].join(", "))
       .eq("id", documentId)
       .eq("user_id", userId)
       .maybeSingle()
@@ -218,7 +248,9 @@ export async function updateClassification(
     const identical = CLASSIFICATION_KEYS.every(
       (key) => classification[key] === undefined || row[key] === classification[key],
     )
-    return { kind: "completed_elsewhere", aiDocType, identical }
+    // [UPLOAD-TRUTH-1] A separate question from `identical`, answered from the same read.
+    const noticeArmed = (row as { intake_retry_after?: string | null }).intake_retry_after != null
+    return { kind: "completed_elsewhere", aiDocType, identical, noticeArmed }
   } catch (e) {
     return { kind: "failed", error: e instanceof Error ? e.message : String(e) }
   }

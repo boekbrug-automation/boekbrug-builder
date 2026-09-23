@@ -1762,7 +1762,14 @@ export const MESSAGES = {
   },
   'int.voortgang.klaarmaken': { nl: 'Bestand wordt klaargemaakt…', ar: 'يجري تجهيز الملف…', en: 'Preparing the file…' },
   'int.voortgang.uploaden': { nl: 'Uploaden… {p}%', ar: 'جارٍ الرفع… {p}%', en: 'Uploading… {p}%' },
-  'int.voortgang.lezen': { nl: 'Wordt gelezen — dit kan even duren', ar: 'جارٍ القراءة — قد يستغرق ذلك قليلًا', en: 'Being read — this can take a moment' },
+  // [ONTVANGEN-WAAR] Deze fase begint als de laatste byte weg is, en heette 'Wordt gelezen — dit
+  // kan even duren'. Onder receive-first is dat niet meer waar: wat de server op dat moment doet is
+  // de overdracht duurzaam maken — bestand opslaan, rij schrijven — en de lezing komt daarna, in de
+  // achtergrond. De oude zin beloofde dus precies het wachten dat deze hele omslag heeft weggehaald.
+  'int.voortgang.bewaren': { nl: 'Bewaren…', ar: 'جارٍ الحفظ…', en: 'Securing…' },
+  // [ONTVANGEN-WAAR] De EINDstand van een receive-first-overdracht. 'Klaar' zou hier beloven dat
+  // het lezen achter de rug is; wat achter de rug is, is het afgeven.
+  'int.voortgang.ontvangen': { nl: 'Ontvangen ✓', ar: 'تم الاستلام ✓', en: 'Received ✓' },
   'int.voortgang.klaar': { nl: 'Klaar', ar: 'جاهز', en: 'Done' },
   'int.voortgang.mislukt': { nl: 'Niet gelukt', ar: 'لم ينجح', en: 'Did not succeed' },
   'int.bestaande': { nl: 'Bekijk de bestaande factuur', ar: 'عرض الفاتورة الموجودة', en: 'View the existing invoice' },
@@ -8929,10 +8936,13 @@ export const MESSAGES = {
     ar: 'أضفت هذا الملف من قبل:',
     en: 'You already added this file before:',
   },
+  // [ONTVANGEN-WAAR] Zei: "…terwijl deze werden gelezen. Dit is waar ze terecht zijn gekomen."
+  // Allebei de helften claimen een afgeronde lezing, en dat is precies wat er bij receive-first
+  // nog niet is. De ene ware zin die overblijft is waarom de eigenaar door kon gaan.
   'int.batchUitleg': {
-    nl: 'Je kon doorgaan met fotograferen terwijl deze werden gelezen. Dit is waar ze terecht zijn gekomen.',
-    ar: 'كان بإمكانك متابعة التصوير أثناء قراءتها. هذا ما آلت إليه.',
-    en: 'You could keep photographing while these were read. This is where they ended up.',
+    nl: 'Je kon doorgaan met fotograferen. Per bestand zie je hieronder wat er is gebeurd.',
+    ar: 'كان بإمكانك متابعة التصوير. أدناه ما جرى مع كل ملف.',
+    en: 'You could keep photographing. Below is what happened to each file.',
   },
   'int.bestaatAl': {
     nl: 'Deze factuur bestaat al',
@@ -9054,6 +9064,13 @@ export const MESSAGES = {
     ar: 'تذكير بالدفع ← حُفظ ولم يُقيّد',
     en: 'payment reminder → filed, not booked',
   },
+  // [ONTVANGEN-WAAR] De samenvattingsregel van een fotoreeks. Elke andere regel hier noemt een
+  // BESTEMMING ("→ geboekt", "→ gecontroleerd"); deze mag er geen noemen, want die is er nog niet.
+  'int.landed.ontvangen': {
+    nl: 'ontvangen → we verwerken dit verder',
+    ar: 'تم الاستلام ← نتابع المعالجة',
+    en: 'received → we carry on with it',
+  },
   'int.herinneringBewaard': {
     nl: 'Dit is een betalingsherinnering, geen factuur. Hij staat in je bestanden en is niet als kost geboekt.',
     ar: 'هذا تذكير بالدفع وليس فاتورة. حُفظ في ملفاتك ولم يُقيَّد كتكلفة.',
@@ -9074,10 +9091,15 @@ export const MESSAGES = {
     ar: 'صوّر أو اختر كل صفحة من الفاتورة نفسها. سنجمعها في فاتورة واحدة.',
     en: 'Photograph or choose each page of the same invoice. We merge them into one invoice.',
   },
-  'int.nVerwerkt': {
-    nl: '{n} verwerkt',
-    ar: 'عدد المعالَج: {n}',
-    en: '{n} processed',
+  // [ONTVANGEN-WAAR] Was 'int.nVerwerkt' — «{n} verwerkt». Eén blanket-uitspraak over een lijst
+  // waarin de regels onder elkaar heel verschillende dingen zeggen, en sinds receive-first ook
+  // «ontvangen → we verwerken dit verder». Drie regels die zeggen dat het werk nog loopt, onder
+  // een kop die zegt dat het klaar is — dezelfde tegenspraak als op het uploadscherm, op een
+  // tweede plek. De kop hoeft niets samen te vatten: de regels eronder doen dat al, per bestand.
+  'int.batchKop': {
+    nl: 'Dit gebeurde met je bestanden',
+    ar: 'هذا ما جرى مع ملفاتك',
+    en: 'This is what happened to your files',
   },
   'int.opgeslagen': {
     nl: 'Opgeslagen in je bestanden',
@@ -9133,6 +9155,13 @@ export const MESSAGES = {
     nl: 'Toegevoegd ✓',
     ar: 'أُضيف ✓',
     en: 'Added ✓',
+  },
+  // [ONTVANGEN-WAAR] De terugval als de route geen eigen zin meesturt. 'Toegevoegd ✓' was de oude
+  // terugval en is hier onwaar: toegevoegd waaraan weet op dit moment niemand.
+  'int.ontvangen': {
+    nl: 'Ontvangen ✓ — je kunt verder.',
+    ar: 'تم الاستلام ✓ — يمكنك المتابعة.',
+    en: 'Received ✓ — you can carry on.',
   },
   'int.veiligNietGelezen': {
     nl: 'Het bestand is veilig opgeslagen, maar we konden er niets uit lezen:',
@@ -11030,6 +11059,25 @@ export const MESSAGES = {
     nl: 'Klaar — {n} bestand(en) verwerkt',
     ar: 'تم — الملفات المعالَجة: {n}',
     en: 'Done — {n} file(s) processed',
+  },
+  // [ONTVANGEN-WAAR] Wat een receive-first-antwoord BETEKENT. Het bestand is duurzaam van ons —
+  // daar staat het vinkje voor — maar of het gelezen en geboekt is weet niemand op dit moment, en
+  // deze pagina hoort dat niet te suggereren. Geen 'klaar', geen 'verwerkt', geen 'factuur gelezen'.
+  'up.ontvangen': {
+    nl: 'Ontvangen ✓ — BoekBrug verwerkt dit verder.',
+    ar: 'تم الاستلام ✓ — يتابع BoekBrug المعالجة.',
+    en: 'Received ✓ — BoekBrug carries on with it.',
+  },
+  'up.nOntvangen': {
+    nl: '{n} ontvangen — we verwerken ze',
+    ar: 'المستلمة: {n} — نعالجها الآن',
+    en: '{n} received — we are processing them',
+  },
+  // De kop boven de samenvatting. 'Klaar ✓' zou hier liegen: er staat nog werk open dat wij doen.
+  'up.ontvangenKop': {
+    nl: 'Ontvangen ✓ — we verwerken ze',
+    ar: 'تم الاستلام ✓ — نعالجها الآن',
+    en: 'Received ✓ — we are processing them',
   },
   'up.klaarVink': {
     nl: 'Klaar ✓',
@@ -13587,8 +13635,42 @@ export const MESSAGES = {
     ar: 'يبدو أن هذه الفاتورة موجودة بالفعل.',
     en: 'This invoice appears to already exist.',
   },
-  'ink.vraag.bestaande': { nl: 'Bestaande houden', ar: 'الاحتفاظ بالموجودة', en: 'Keep the existing one' },
-  'ink.vraag.tochToevoegen': { nl: 'Toch toevoegen', ar: 'أضفها على أي حال', en: 'Add it anyway' },
+  'ink.vraag.bestaande':{ nl: 'Bestaande houden', ar: 'الاحتفاظ بالموجودة', en: 'Keep the existing one' },
+  // [ONTVANGEN-WAAR] Was 'Toch toevoegen'. Dat beschrijft een klik; dit beschrijft de bewering die
+  // de eigenaar doet, en dát is wat een tweede kostenpost en een tweede voorbelasting rechtvaardigt.
+  // De opgeslagen beslissing heet nog steeds `add_anyway` — die staat in de database en verandert niet.
+  'ink.vraag.andereFactuur': {
+    nl: 'Dit is echt een andere factuur',
+    ar: 'هذه فاتورة أخرى فعلًا',
+    en: 'This really is a different invoice',
+  },
+  // [ONTVANGEN-WAAR] Wat er met het geld van de BESTAANDE factuur is gebeurd. Korte zakelijke
+  // waarheid, geen machinetaal — en niets als de betaalstand niet vast te stellen is.
+  'ink.vraag.geld.onbetaald': { nl: 'Nog niet betaald', ar: 'لم تُدفع بعد', en: 'Not paid yet' },
+  'ink.vraag.geld.onbetaaldOpen': {
+    nl: 'Nog niet betaald · {open} open',
+    ar: 'لم تُدفع بعد · {open} مفتوح',
+    en: 'Not paid yet · {open} outstanding',
+  },
+  'ink.vraag.geld.deels': {
+    nl: '{betaald} betaald · {open} open',
+    ar: 'مدفوع {betaald} · {open} مفتوح',
+    en: '{betaald} paid · {open} outstanding',
+  },
+  'ink.vraag.geld.betaald': { nl: 'Betaald ✓', ar: 'مدفوعة ✓', en: 'Paid ✓' },
+  'ink.vraag.geld.teveel': {
+    nl: 'Meer betaald dan het bedrag',
+    ar: 'دُفع أكثر من المبلغ',
+    en: 'Paid more than the amount',
+  },
+  // [DUP-ARCHIVED] De eigenaar ziet deze factuur in geen enkele gewone lijst staan. Zonder deze
+  // regel vraagt het paneel iets over een factuur die hij nergens kan vinden.
+  'ink.vraag.staatInGenegeerd': { nl: 'Staat in Genegeerd', ar: 'موجودة في المتجاهَلة', en: 'Sits in Genegeerd' },
+  'ink.vraag.alVerwerkt': {
+    nl: 'Je boekhouder heeft deze factuur al verwerkt',
+    ar: 'قام محاسبك بمعالجة هذه الفاتورة بالفعل',
+    en: 'Your accountant has already processed this invoice',
+  },
   // [AR-TERMEN] «عرض», the verbal noun, not the imperative «اعرض»: a label names what the control
   // DOES, and in Arabic that is a noun. The reviewed vocabulary is explicit about this.
   'ink.vraag.bekijkBestaande': { nl: 'Bekijk de bestaande factuur', ar: 'عرض الفاتورة الموجودة', en: 'View the existing invoice' },
@@ -16157,6 +16239,22 @@ export const MESSAGES = {
     en: 'This quarter has not started yet, so there is nothing to assess. Choose another quarter.',
   },
   'start.klaar.onvolledig': { nl: 'Nog niet alles gecontroleerd', en: 'Not everything checked yet' },
+
+  // [UPLOAD-TRUTH-1] De melding die volgt op "Ontvangen" wanneer de lezer het bestand niet kon
+  // lezen. De bel rendert deze twee sleutels op grond van notifications.event_key; de opgeslagen
+  // Nederlandse tekst blijft de bron én de terugval (zie notification-copy.ts). Geen bestandsnaam
+  // in de zin: de link draagt de identiteit, en een zelfstandig naamwoord in een vertaalde zin is
+  // precies wat AGENTS.md verbiedt.
+  'meld.onleesbaar.titel': {
+    nl: 'Een bestand konden we niet lezen',
+    ar: 'تعذّر علينا قراءة أحد الملفات',
+    en: 'We could not read one of your files',
+  },
+  'meld.onleesbaar.tekst': {
+    nl: 'Je bestand is ontvangen en staat veilig in je bestanden, maar we konden het niet uitlezen. Bekijk het even — je kunt het opnieuw laten lezen, of het zelf verwerken.',
+    ar: 'تمّ استلام ملفك وهو محفوظ بأمان في ملفاتك، لكننا لم نتمكّن من قراءته. راجعه — يمكنك طلب قراءته مرّة أخرى، أو معالجته بنفسك.',
+    en: 'Your file was received and is safely stored in your files, but we could not read it. Take a look — you can have it read again, or handle it yourself.',
+  },
 
 } satisfies Record<string, Message>
 

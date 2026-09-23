@@ -55,8 +55,15 @@ export async function GET(req: NextRequest) {
   const cronRunId = await beginCronRun(createPipelineClient(), "intake-drain", new Date().toISOString());
   try {
     const report = await runIntakeDrain();
-    await finishCronRun(createPipelineClient(), cronRunId, { ok: true, result: report });
-    return NextResponse.json({ ok: true, ...report });
+    // [NO-SILENT-EMPTY] A notices pass that could not READ its work list is a degraded run, and
+    // the heartbeat is the one place a human looks to find that out. Recording ok:true over it
+    // would launder the distinction NoticeReport was reshaped to preserve, one layer further up:
+    // the row would say the drain ran cleanly, while nobody measured the backlog it owed.
+    const notices = report.notices;
+    await finishCronRun(createPipelineClient(), cronRunId, notices.kind === "unavailable"
+      ? { ok: false, error: `notices unavailable: ${notices.error}`, result: report }
+      : { ok: true, result: report });
+    return NextResponse.json({ ok: notices.kind !== "unavailable", ...report });
   } catch (e) {
     // runIntakeDrain isolates each document, so reaching here means the SELECT itself failed. The
     // documents are untouched and still waiting; the next pass reads them again.

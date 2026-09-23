@@ -414,6 +414,23 @@ export function duplicateQuestionEventKey(documentId: string): string {
   return `intake:duplicate-question:${documentId}`;
 }
 
+/**
+ * [UPLOAD-TRUTH-1] The durable name of "we could not read this file, and it is waiting for you".
+ *
+ * The third and last terminal outcome an owner has to hear about, and the one that had no voice.
+ * A finished read rings `auto-finished`; a question rings `duplicate-question`; a file the reader
+ * gave up on wrote `could_not_read` to the row and told nobody. The document is safe, the file is
+ * in Bestanden, and the only place it surfaces is a panel nothing points at.
+ *
+ * Same shape and same guarantee as its two siblings: one key per document, derived from the
+ * document id alone. It is what makes the delivery RETRY safe — the notice loop may attempt this
+ * notification on every pass, and the partial UNIQUE turns every attempt after the first into a
+ * no-op with no second push.
+ */
+export function unreadableEventKey(documentId: string): string {
+  return `intake:unreadable:${documentId}`;
+}
+
 // ── [ONTVANGEN] Moving a document into the owner's hands ──────────────────────────────────────
 
 export type HoldWrite =

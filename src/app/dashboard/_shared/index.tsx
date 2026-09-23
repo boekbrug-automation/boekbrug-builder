@@ -21,6 +21,9 @@ import { M3, FONT, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 import type { InvoiceStatusFilter, AccountantStatusFilter } from '@/hooks/useInfiniteInvoices'
 import type { ProfileRow, NotificationRow } from '@/types/rows'
 import { safeNotificationLink } from '@/lib/notification-link'
+// [UPLOAD-TRUTH-1] A stored notification, in the language of the person reading it — see the
+// module header for why the writer cannot know that language and the bell can.
+import { notificationCopy } from '@/lib/notification-copy'
 // [MELDING-WAARHEID] The local view of "read", and how it is taken back when the store refuses.
 import { markedRead, rolledBack, isUnread, unreadIds, type ReadOverride } from '@/lib/notification-read'
 import { useToast } from '@/components/ui/Toast'
@@ -509,6 +512,24 @@ export function NotificationsBell({
                 // side has always checked it; the screen did not, and did router.push() on it raw.
                 const href = safeNotificationLink(n.link)
                 const ongelezen = isUnread(n, readOverride)
+                // [UPLOAD-TRUTH-1] A notification a MACHINE raised carries no language of its
+                // own. It is written by a background pass — no request, no session, no screen —
+                // so the writer stores Dutch and the row carries `event_key`, which names the
+                // EVENT. That is enough to render the sentence in the language of whoever opens
+                // the bell.
+                //
+                // Title AND body, together. Translating only the heading leaves an Arabic line
+                // over a Dutch paragraph, which is worse than leaving both Dutch: it looks
+                // finished, so nothing points at the gap.
+                //
+                // `null` is the normal answer — a notification a person triggered has no key, and
+                // a historical row has one this map has never heard of. Both keep exactly the
+                // strings they were stored with. `event_key` is not in the generated types (the
+                // migration ships by hand, ahead of them), so it is read through the same narrow
+                // accessor notifications.ts uses on the way in.
+                const copy = notificationCopy((n as { event_key?: string | null }).event_key)
+                const titel = copy ? t(copy.titleKey) : n.title
+                const tekst = copy ? t(copy.bodyKey) : n.body
                 // [MELDING-TIK] Every row responds to a tap, not only the ones that go somewhere.
                 // Measured on production: 295 of 1031 notifications (28,6%) carry no link at all —
                 // "Inkoopfactuur betaald" has one on none of its 96 rows. A tap on those did
@@ -543,8 +564,8 @@ export function NotificationsBell({
                     cursor: href ? 'pointer' : 'default',
                   }}
                 >
-                  <p style={{ fontSize: 13, fontWeight: 500, color: '#202124', margin: 0 }}>{n.title}</p>
-                  {n.body && <p style={{ fontSize: 12, color: '#5F6368', margin: '2px 0 0' }}>{n.body}</p>}
+                  <p style={{ fontSize: 13, fontWeight: 500, color: '#202124', margin: 0 }}>{titel}</p>
+                  {tekst && <p style={{ fontSize: 12, color: '#5F6368', margin: '2px 0 0' }}>{tekst}</p>}
                   <p style={{ fontSize: 11, color: '#70757a', margin: '4px 0 0' }}>
                     {n.created_at ? new Date(n.created_at).toLocaleDateString('nl-NL') : ''}
                   </p>

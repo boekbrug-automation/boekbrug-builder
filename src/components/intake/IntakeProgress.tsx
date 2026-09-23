@@ -34,7 +34,12 @@ import { DismissX } from '@/components/ui/DismissX'
 // otherwise "back" leaves the page behind the dialog, with the upload's outcome still to come.
 import { useCloseOnBack } from '@/lib/use-close-on-back'
 
-export type ProgressPhase = 'fitting' | 'uploading' | 'reading' | 'done' | 'failed'
+// [ONTVANGEN-WAAR] 'received' sits between 'reading' and 'done', and is neither.
+//
+// The bar is FULL — the handoff finished, the owner may walk away, and a bar left hanging would
+// say the opposite. But the colour is not the green of a finished read, because what the reader
+// will make of the file is not known at this moment and this row may not imply that it is.
+export type ProgressPhase = 'fitting' | 'uploading' | 'reading' | 'received' | 'done' | 'failed'
 
 export interface ProgressRow {
   id: string
@@ -85,7 +90,9 @@ export function IntakeProgress({ open, title, rows, closeLabel, footnote, onClos
         <ul style={{ listStyle: 'none', margin: '8px 0 0', padding: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
           {rows.map((r) => {
             const determinate = r.phase === 'uploading'
-            const full = r.phase === 'done' || r.phase === 'failed'
+            // [ONTVANGEN-WAAR] A received row is FULL (the handoff is over) and PRIMARY (the read
+            // is not). Only a genuinely finished outcome earns the green.
+            const full = r.phase === 'done' || r.phase === 'failed' || r.phase === 'received'
             const indeterminate = r.phase === 'fitting' || r.phase === 'reading'
             const fill = r.phase === 'failed' ? M3.error : r.phase === 'done' ? M3.success : M3.primary
             return (

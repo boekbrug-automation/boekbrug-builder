@@ -80,6 +80,11 @@ import { type IntakeIntent } from "@/lib/intake-intent"
 // [OBSERVABILITY] Eén bron voor "dit bestand is bewaard maar niet gelezen" — gedeeld met het
 // overgeslagen-paneel, dat vroeger op een andere waarde las dan hier werd geschreven.
 import { docTypeForStoredFile, DOC_TYPE_REMINDER } from "@/lib/skipped-import"
+// [UPLOAD-TRUTH-1] Arming, telling and repairing the arm — one tested module, shared with the
+// intake drain's notice pass so the two cannot drift about what "armed" or "delivered" means.
+import {
+  unreadableArmColumns, deliverUnreadableNotice, repairUnreadableArm,
+} from "@/lib/unreadable-delivery"
 // [HERINNERING-NOOIT] A reminder is filed and linked to its invoice, never booked.
 import { fileReminder } from "@/lib/reminder-file"
 // [SHEET-INTAKE] Route an uploaded kassa Z-report / grootboek export into the EXISTING
@@ -292,6 +297,20 @@ async function writeClassification(args: {
   failure: string
   /** Undo the file this run stored. Never called on the stored path — see [ONTVANGEN] below. */
   rollback: () => Promise<void>
+  /**
+   * [UPLOAD-TRUTH-1] Columns written in the SAME statement as the classification, that are not
+   * part of what the document IS. Today: the unreadable notice's delivery arm. A second statement
+   * would be a second place to die between the terminal truth and the owner hearing it.
+   */
+  alsoSet?: Record<string, unknown>
+  /**
+   * [UPLOAD-TRUTH-1] Another worker finished this document first.
+   *
+   * Handed the state it left behind, so a caller that concluded "unreadable" can notice the winner
+   * armed no delivery — a real possibility during a rolling deploy, where the winner may be a
+   * build that has never heard of arming. Returning nothing keeps the existing behaviour.
+   */
+  onCompletedElsewhere?: (info: { aiDocType: string | null; noticeArmed: boolean }) => Promise<void>
 }): Promise<ClassifyStep> {
   if (!args.stored) {
     const placed = await insertClassifiedDocument(args.identity, args.classification, args.pipeline)
@@ -305,6 +324,8 @@ async function writeClassification(args: {
 
   const said = await updateClassification(
     args.stored.documentId, args.userId, args.stored.expectedAiDocType, args.classification, args.pipeline,
+    // [UPLOAD-TRUTH-1] The delivery arm rides the terminal statement, never a second one.
+    args.alsoSet ?? {},
   )
   switch (said.kind) {
     case "placed":
@@ -324,6 +345,11 @@ async function writeClassification(args: {
     case "superseded":
       return { ok: false, outcome: json({ ok: true, destination: "document", skipped: "superseded", state: said.aiDocType }) }
     case "completed_elsewhere":
+      // [UPLOAD-TRUTH-1] The winner finished the document; this run must not write a classification
+      // over it. But a finished document can still owe its owner the telling, and this is the last
+      // moment anything knows to look. The caller decides — it is the one that knows what it
+      // concluded. Awaited: the answer below is this run's last act.
+      await args.onCompletedElsewhere?.({ aiDocType: said.aiDocType, noticeArmed: said.noticeArmed })
       return { ok: false, outcome: json({ ok: true, destination: "document", skipped: "completed_elsewhere", state: said.aiDocType }) }
   }
 }
@@ -433,6 +459,19 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
           ai_processed: false,
           ai_doc_type: DOC_TYPE_COULD_NOT_READ,
         },
+        undefined,
+        // [UPLOAD-TRUTH-1] THE SECOND terminal-unreadable writer, and the likelier of the two.
+        //
+        // The branch above reaches could_not_read because the model READ the file and got nothing
+        // out of it; this one because the model could not be reached at all — a reader outage,
+        // which is what most of these documents actually are. Both end on the same terminal row,
+        // so both must arm the same delivery, in the same statement, for the same reason: after
+        // this write the drain's reader never returns to this document, and an unarmed terminal
+        // row is one no notice pass can ever find.
+        //
+        // This one does not go through writeClassification, so it was missed on the first pass of
+        // this slice — which is exactly how the original silence got in.
+        unreadableArmColumns(new Date()),
       )
       if (marked.kind === "failed") {
         // The bytes and the row are both still there — only the LABEL did not land, so the drain
@@ -441,6 +480,21 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
           documentId: stored.documentId, error: marked.error,
         })
         return json({ error: "Dit bestand kon niet worden gelezen, en dat kon nu ook niet worden vastgelegd." }, { status: 503 })
+      }
+      // [UPLOAD-TRUTH-1] Armed and terminal; tell the owner now if we can. A failure here costs
+      // nothing — the arm is durable and the notice pass owns it from this moment. No reader.
+      const noticeDeps = { pipeline: createPipelineClient() }
+      if (marked.kind === "placed") {
+        await deliverUnreadableNotice({ documentId: stored.documentId, userId: user.id, deps: noticeDeps })
+      } else if (marked.kind === "completed_elsewhere"
+                 && marked.aiDocType === DOC_TYPE_COULD_NOT_READ && !marked.noticeArmed) {
+        // Same rolling-deploy race as the read branch: a winner that armed nothing.
+        const repaired = await repairUnreadableArm({
+          documentId: stored.documentId, userId: user.id, deps: noticeDeps,
+        })
+        if (repaired) {
+          await deliverUnreadableNotice({ documentId: stored.documentId, userId: user.id, deps: noticeDeps })
+        }
       }
       return json({
         ok: true,
@@ -987,9 +1041,47 @@ export async function processIntakeDocument(ctx: IntakeProcessContext): Promise<
       ),
       failure: "Opslaan in je bestanden is mislukt — probeer het opnieuw.",
       rollback: async () => { await supabase.storage.from("documents").remove([storagePath]) },
+      // ── [UPLOAD-TRUTH-1] Arm the delivery in the SAME statement as the terminal state ────────
+      //
+      // Only on the stored road, and only when the reader gave up. The interactive road answers a
+      // request that is still open — the owner is looking at the screen and gets this outcome as
+      // JSON — so a bell there would be the app telling someone what they are already reading.
+      //
+      // Same statement, because the alternative is a second write that a crash can land between:
+      //
+      //   terminal could_not_read written  → process dies → arm never set
+      //   the drain's reader never returns to could_not_read (by design)
+      //   no notice pass can see the row   → the owner is never told
+      //
+      // which is the exact silence this slice exists to close, reintroduced one line later.
+      alsoSet: couldNotRead && stored ? unreadableArmColumns(new Date()) : undefined,
+      // [UPLOAD-TRUTH-1] …and if another worker got there first, make sure IT armed something.
+      // During a rolling deploy the winner can be a build that never heard of arming.
+      onCompletedElsewhere: couldNotRead && stored
+        ? async ({ aiDocType, noticeArmed }) => {
+            if (aiDocType !== DOC_TYPE_COULD_NOT_READ || noticeArmed) return
+            const repaired = await repairUnreadableArm({
+              documentId: stored.documentId, userId: user.id, deps: { pipeline },
+            })
+            // Best-effort delivery on top of a durable arm: if the notification fails now, the row
+            // is armed and the notice pass owns it. No reader, no AI, no second read.
+            if (repaired) {
+              await deliverUnreadableNotice({
+                documentId: stored.documentId, userId: user.id, deps: { pipeline },
+              })
+            }
+          }
+        : undefined,
     })
     if (!placedA.ok) return placedA.outcome
     const doc = { id: placedA.documentId }
+    // [UPLOAD-TRUTH-1] The terminal row is armed; try to tell the owner now. This is the fast path
+    // only — exactly the relationship kickStoredDocument has with the drain. A failure here is not
+    // an error to report anywhere: the arm survives it, and the notice pass in the intake drain is
+    // what makes the promise true. Never blocks, never rolls back, never re-reads.
+    if (couldNotRead && stored) {
+      await deliverUnreadableNotice({ documentId: doc.id, userId: user.id, deps: { pipeline } })
+    }
     // [INTAKE-FEEDBACK] resolve the folder name so the client can show "where"
     // and deep-link to it (same breadcrumb helper as the duplicate path).
     const docFolderPath = await buildFolderBreadcrumb(supabase, user.id, folderId)

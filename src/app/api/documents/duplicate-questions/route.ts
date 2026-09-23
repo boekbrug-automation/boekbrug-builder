@@ -67,7 +67,12 @@ export async function GET() {
     (ids) => fetchAllRowsForIds<CandidateRow, string>(ids, (chunk, from, to) =>
       supabase
         .from("invoices")
-        .select("id, invoice_number, client_name")
+        // [ONTVANGEN-WAAR] The money columns come along. Read-only, from the same one row, in the
+        // same one round trip — no new table, no new column, no second query. What they buy is the
+        // difference between "deze factuur lijkt al te bestaan" over a €500 bill nobody has paid
+        // and the same sentence over a €500 bill that is already settled: the same question, and
+        // very different consequences for answering it wrong.
+        .select("id, invoice_number, client_name, total_inc_btw, amount_paid, status, accountant_status, invoice_type")
         .eq("receiver_id", user.id)
         .in("id", chunk)
         .range(from, to)),

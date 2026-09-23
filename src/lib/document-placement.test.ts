@@ -266,7 +266,44 @@ test("[ONTVANGEN-CAS] a replay of a write that already landed is identical, not 
   const p = new FakePipeline()
   p.rows = [{ id: "doc-1", ...IDENTITY, ...AS_INVOICE }]
   const r = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
-  assert.deepEqual(r, { kind: "completed_elsewhere", aiDocType: "invoice", identical: true })
+  // [UPLOAD-TRUTH-1] `noticeArmed` rides along: a document that is already final can still owe its
+  // owner the telling, and the loser of this race is the last thing that can notice. It is read
+  // from the same row and is deliberately NOT part of `identical` — see document-placement.ts.
+  assert.deepEqual(r, {
+    kind: "completed_elsewhere", aiDocType: "invoice", identical: true, noticeArmed: false,
+  })
+})
+
+test("[UPLOAD-TRUTH-1] a lost race reports whether the winner armed the owner's notice", async () => {
+  // The rolling-deploy case: the winner can be a build that never heard of arming, and then the
+  // terminal row carries no delivery work-list entry at all. Without this field the loser walks
+  // away calling it finished, and the owner is never told.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ...AS_INVOICE, intake_retry_after: null }]
+  const unarmed = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p)
+  assert.equal(unarmed.kind === "completed_elsewhere" ? unarmed.noticeArmed : true, false,
+    "a winner that armed nothing must be visible as such")
+
+  const q = new FakePipeline()
+  q.rows = [{ id: "doc-1", ...IDENTITY, ...AS_INVOICE, intake_retry_after: "2026-09-23T10:00:00Z" }]
+  const armed = await updateClassification("doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, q)
+  assert.equal(armed.kind === "completed_elsewhere" ? armed.noticeArmed : false, true,
+    "…and a winner that DID arm must not be repaired a second time")
+})
+
+test("[UPLOAD-TRUTH-1] a non-classification column travels in the same UPDATE, and only there", async () => {
+  // The whole point of `alsoSet`: the delivery arm must land in the statement that writes the
+  // terminal state, because a second write is a second place for a crash to lose it.
+  const p = new FakePipeline()
+  p.rows = [{ id: "doc-1", ...IDENTITY, ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }]
+  const r = await updateClassification(
+    "doc-1", USER, DOC_TYPE_WACHT_OP_LEZEN, AS_INVOICE, p,
+    { intake_retry_after: "2026-09-23T10:00:00Z" },
+  )
+  assert.equal(r.kind, "placed")
+  assert.equal(p.rows[0].intake_retry_after, "2026-09-23T10:00:00Z",
+    "the arm landed in the same statement as the classification")
+  assert.equal(p.rows[0].ai_doc_type, "invoice", "…and the classification landed too")
 })
 
 test("[ONTVANGEN-CAS] the same doc type in a different folder is NOT our write having happened", async () => {

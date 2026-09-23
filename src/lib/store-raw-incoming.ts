@@ -57,10 +57,22 @@ import { releaseTrashedHash } from "@/lib/trashed-dedup"
  *              financial effect or push a finished document back into a queue.
  * `failed`   — the bytes and the row are NOT both durable. Whatever else happens, the owner must
  *              not be told we have their file.
+ *
+ * ── [UPLOAD-TRUTH-1] WHY BOTH LIVE OUTCOMES CARRY `folderId` ─────────────────────────────────
+ *
+ * The receive-first answer is the only thing the owner can follow after "Ontvangen": there is no
+ * invoice yet, so the stored file IS the destination. /dashboard/bestanden finds a focused
+ * document only inside the folder it is told to open — it filters by folder and returns silently
+ * when the id is not in that list — and receive puts the file in "Geïmporteerde bestanden", never
+ * in the root. So an answer carrying only the id produces a link to the ROOT, which lands on a
+ * list the file is not in, and says nothing at all.
+ *
+ * This function is the one place that knows the folder. It resolved it two statements ago and
+ * then dropped it on the floor. Returning it is the whole fix; every consumer already reads it.
  */
 export type ReceiveOutcome =
-  | { kind: "created"; documentId: string; contentHash: string }
-  | { kind: "existing"; documentId: string; contentHash: string }
+  | { kind: "created"; documentId: string; contentHash: string; folderId: string | null }
+  | { kind: "existing"; documentId: string; contentHash: string; folderId: string | null }
   | { kind: "failed"; reason: "storage" | "row" | "intent" | "unexpected" }
 
 export interface ReceiveOpts {
@@ -162,13 +174,18 @@ export async function receiveRawIncoming(
   const kept = opts.storeInstead ?? { buffer, fileName: file.name, fileType: file.type }
   const keptType = kept.fileType || "application/octet-stream"
   try {
+    // [UPLOAD-TRUTH-1] `folder_id` is read here for the same reason the created arm returns one:
+    // the answer this produces is what the upload screen links to, and a link that names no
+    // folder opens the root — where a received file never is.
     const { data: existing } = await supabase
-      .from("documents").select("id, trashed").eq("user_id", userId).eq("content_hash", hash).limit(1).maybeSingle()
+      .from("documents").select("id, trashed, folder_id").eq("user_id", userId).eq("content_hash", hash).limit(1).maybeSingle()
     // [DUP-TRASHED] Een weggegooide rij teruggeven zou de boeking koppelen aan bewijs dat de eigenaar
     // niet meer ziet staan. Sleutel vrijgeven en vers opslaan; lukt dat niet, dan loopt de insert
     // hieronder op de UNIQUE index stuk en valt dit terug op "geen document" — dit is en blijft
     // best-effort opslag, de boeking zelf is de money-truth.
-    if (existing?.id && existing.trashed !== true) return { kind: "existing", documentId: existing.id, contentHash: hash }
+    if (existing?.id && existing.trashed !== true) {
+      return { kind: "existing", documentId: existing.id, contentHash: hash, folderId: existing.folder_id ?? null }
+    }
     if (existing?.id) await releaseTrashedHash(supabase, userId, existing.id)
     const safeName = kept.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
     const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
@@ -234,7 +251,7 @@ export async function receiveRawIncoming(
       await supabase.storage.from("documents").remove([storagePath]).catch(() => {})
       return { kind: "failed", reason: "row" }
     }
-    return { kind: "created", documentId: doc.id, contentHash: hash }
+    return { kind: "created", documentId: doc.id, contentHash: hash, folderId }
   } catch (e) {
     console.error("[STORE-RAW] unexpected failure — the file is NOT kept", { userId, file: file.name, error: e instanceof Error ? e.message : String(e) })
     return { kind: "failed", reason: "unexpected" }

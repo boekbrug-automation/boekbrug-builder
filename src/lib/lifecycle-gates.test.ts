@@ -22,6 +22,8 @@ import { LOCALE_BOOT_SCRIPT } from "./i18n/locale-boot";
 // [TAAL] The catalogue as a VALUE. An entity in a message survives every source-level check
 // there is; only the shipped string shows it.
 import { MESSAGES } from "./i18n/messages";
+// [UPLOAD-TRUTH-1] Asserted as a VALUE — see the arm gate for why a text window was the wrong tool.
+import { CLASSIFICATION_KEYS } from "./document-placement";
 import { AR_SETTLED, AR_DELIBERATE_SPLITS, AR_RETIRED, AR_RETIRED_EVERYWHERE, NL_RETIRED, EN_VAT_KEEPS_BTW } from "./i18n/ar-decisions";
 import { DOCUMENT_REFERRERS } from "./document-references";
 // [RECONCILE-VOLGORDE] The reconcile pass list as DATA — the gates below ask it rather than
@@ -19623,8 +19625,14 @@ test("[BESTANDEN-WIJS] wat /api/intake stuurt om naartoe te linken, wordt ook ec
   // 3. En het uploadscherm VERBINDT ze — op allebei de takken, want de duplicaat-tak is degene
   //    die vergeten was.
   const upload = code("src/app/dashboard/upload/UploadClient.tsx");
-  assert.equal((upload.match(/targetFromIntake\(data\)/g) ?? []).length, 2,
-    "zowel de geslaagde als de duplicaat-tak leest het doel");
+  // Drie takken sinds [ONTVANGEN-WAAR]: geslaagd, duplicaat, en ontvangen. Die derde hoort er
+  // NET ZO GOED bij — een receive-first-antwoord draagt zijn documentId, het bestand staat op dat
+  // moment al in bestanden, en juist bij die rij is de link het enige wat de eigenaar kan volgen:
+  // er is nog geen factuur om naartoe te gaan.
+  assert.equal((upload.match(/targetFromIntake\(data\)/g) ?? []).length, 3,
+    "de geslaagde, de duplicaat- én de ontvangen-tak lezen het doel");
+  assert.match(upload, /status: 'received'[^}]*targetFromIntake\(data\)/,
+    "[ONTVANGEN-WAAR] de ontvangen-rij moet naar het bewaarde bestand kunnen linken");
   // Op de VOORWAARDE, niet alleen op een vermelding. Deze gate matchte eerst de losse aanroep, en
   // bleef daardoor groen toen de conditie op `false` werd gezet: de `href` verderop noemde de
   // functie nog. Precies de fout die dit bestand overal elders opspoort.
@@ -22541,7 +22549,17 @@ test("[INTAKE-VOORTGANG] the add-button shows the upload's progress honestly, an
   assert.match(btn, /patchRow\(rowId, \{ phase: 'uploading', percent: 0 \}\)/);
   assert.match(btn, /onUploaded: \(\) => patchRow\(rowId, \{ phase: 'reading', percent: 100 \}\)/);
   assert.match(btn, /patchRow\(rowId, \{ phase: outcome === 'error' \? 'failed' : 'done' \}\)/, "a refused upload leaves its row spinning");
-  assert.match(btn, /patchRow\(rowId, \{ phase: 'done' \}\)\s*\n\s*return 'ok'/, "a landed upload leaves its row spinning");
+  // [ONTVANGEN-WAAR] Was `patchRow(rowId, { phase: 'done' })`. A landed upload has TWO honest end
+  // states now, because receive-first landed is not receive-first finished — but the rule this
+  // line has always guarded is unchanged and is what is asserted: whatever the answer was, the row
+  // reaches a TERMINAL phase before the function returns, and never keeps spinning.
+  assert.match(btn, /patchRow\(rowId, \{ phase: isReceived \? 'received' : 'done' \}\)\s*\n\s*return 'ok'/,
+    "a landed upload leaves its row spinning");
+  assert.match(btn, /const isReceived = data\.received === true/,
+    "…and which of the two it is comes from the route's own field, not from a guess about the destination");
+  // The one that would be silent: 'received' quietly re-pointed at the finished label.
+  assert.match(btn, /r\.phase === 'received' \? t\('int\.voortgang\.ontvangen'\)/,
+    "a received handoff must not end on the word for a finished read");
   assert.match(btn, /patchRow\(rowId, \{ phase: 'failed' \}\)\s*\n\s*return 'error'/, "a thrown upload leaves its row spinning");
   assert.match(btn, /function noteLanded\(rowId: string, name: string, where: string\)/, "where the file landed does not reach its row");
   assert.doesNotMatch(btn, /noteLanded\(file\.name/, "a call site forgot its row");
@@ -38278,4 +38296,352 @@ test("[KWT-TABS] an unsent proposal outlives the row it was typed in", () => {
   // Nothing is written either way: this refuses a navigation, it does not undo anything.
   assert.doesNotMatch(nav, /fetch\(|supabase|setVoorstelConcept\(null\)/,
     "a view change writes to the server, or throws the draft away after asking");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// [UPLOAD-TRUTH-1] "Ontvangen" is a promise, and a promise has an ending.
+//
+// The slice closes two silences that both begin AFTER the owner has been told their file is safe:
+//
+//   · the received row's link pointed at the root of Bestanden, where a received file never is;
+//   · a terminal `could_not_read` told nobody at all, ever.
+//
+// Every gate below guards a place where the fix could be undone without any test going red —
+// which is how both defects survived a full gate run in the first place.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+test("[UPLOAD-TRUTH-1] the receive-first answer says WHERE the file went, not only that it went", () => {
+  // The defect, exactly: targetFromIntake learned to read `folderId` and the upload screen started
+  // rendering the link, while the route sent only `documentId`. So every received row produced
+  // `?focus=` alone — the root — and Bestanden, which loads ONE folder and returns silently when
+  // the focused id is not in it, showed nothing. The link looked deliberate and was dead.
+  const store = code("src/lib/store-raw-incoming.ts");
+  assert.match(store, /kind: "created"; documentId: string; contentHash: string; folderId: string \| null/,
+    "the handoff must return the folder it filed the file in");
+  assert.match(store, /kind: "existing"; documentId: string; contentHash: string; folderId: string \| null/,
+    "…and so must the racing-duplicate answer, which points at the file that is ALREADY there");
+  assert.match(store, /return \{ kind: "created", documentId: doc\.id, contentHash: hash, folderId \}/,
+    "the folder it just resolved is the folder it returns");
+  assert.match(store, /\.select\("id, trashed, folder_id"\)/,
+    "the duplicate lookup must read the folder, or it has none to report");
+
+  const route = code("src/app/api/intake/route.ts");
+  assert.match(route, /folderId: received\.folderId/, "the receive-first response carries it");
+  assert.match(route, /existing: \{ id: received\.documentId, folder_id: received\.folderId/,
+    "and the duplicate branch stops hard-coding the root");
+  assert.match(route, /buildFolderBreadcrumb\(supabase, user\.id, received\.folderId\)/,
+    "the breadcrumb names the real folder too — it said 'root' over a file in a folder");
+});
+
+test("[UPLOAD-TRUTH-1] a terminal unreadable document is armed in the SAME statement", () => {
+  // The hole this closes is one line wide: terminal state written, process dies, arm never set —
+  // and the reader drain never returns to could_not_read, so no pass could ever find it again.
+  const proc = code("src/lib/intake-processor.ts");
+  assert.match(proc, /alsoSet: couldNotRead && stored \? unreadableArmColumns\(new Date\(\)\) : undefined/,
+    "the arm must travel with the classification, never in a second write");
+  assert.match(proc, /await updateClassification\(\s*args\.stored\.documentId[\s\S]{0,200}?args\.alsoSet \?\? \{\},/,
+    "…and writeClassification must actually pass it through to the one statement");
+
+  // THE SECOND WRITER, and the likelier one. A document reaches could_not_read two ways: the
+  // model read it and got nothing, or the model could not be reached at all (an outage — which is
+  // what most of these documents actually are). The outage branch does NOT go through
+  // writeClassification, so it was missed on the first pass of this slice. Both must arm.
+  // [GATE-VENSTER] Cut on REAL CODE. The first version of this gate opened on a [BEWAAR-EERST]
+  // comment — and code() strips comments, so indexOf returned -1, the window ran to the end of the
+  // file, and the gate measured something far larger than it claimed. AGENTS.md names this trap by
+  // name; it caught this gate on its first run.
+  const outage = proc.indexOf("} catch (aiErr) {");
+  assert.notEqual(outage, -1, "[GATE-VENSTER] the reader-outage branch is not where this gate expects it");
+  const outageEnd = proc.indexOf("const keptId = await storeRawIncoming", outage);
+  assert.notEqual(outageEnd, -1, "[GATE-VENSTER] the outage branch's end marker is gone");
+  const outageWindow = proc.slice(outage, outageEnd);
+  assert.ok(outageWindow.length > 200 && outageWindow.length < 4000,
+    `the outage window is ${outageWindow.length} characters`);
+  assert.match(outageWindow, /ai_doc_type: DOC_TYPE_COULD_NOT_READ/, "this branch is a terminal writer");
+  assert.match(outageWindow, /unreadableArmColumns\(new Date\(\)\)/,
+    "…so it must arm delivery in its own terminal statement too");
+  assert.match(outageWindow, /deliverUnreadableNotice\(/, "…and attempt the telling");
+
+  const place = code("src/lib/document-placement.ts");
+  assert.match(place, /\.update\(\{ \.\.\.classification, \.\.\.alsoSet \}\)/,
+    "one UPDATE carries both, or there are two places to die between them");
+  // The delivery flag is NOT classification identity. Folding it in would make two rows describing
+  // the same document compare unequal because one owner has been told and the other has not.
+  //
+  // [GATE-VENSTER] The FIRST version of this assertion cut a text window from
+  // "export const CLASSIFICATION_KEYS" to the next "]" — which is the `[` … `]` of the TYPE
+  // ANNOTATION `readonly (keyof DocumentClassification)[]`, 74 characters that never reach the
+  // array literal. `doesNotMatch(/intake_retry_after/)` over that window could not fail. A gate
+  // that cannot fail is not a gate, and this one was guarding the load-bearing claim of the whole
+  // arm design.
+  //
+  // So the list is asserted as a VALUE. It is exported and it is data; there is no window to get
+  // wrong, and a member added to it fails here whatever the source happens to look like.
+  assert.ok(!(CLASSIFICATION_KEYS as readonly string[]).includes("intake_retry_after"),
+    "the delivery arm must never become a classification key");
+  assert.deepEqual([...CLASSIFICATION_KEYS].sort(),
+    ["ai_doc_type", "ai_processed", "doc_type", "folder_id", "year"],
+    "…and the set it may not join is pinned, so a silent addition is visible here");
+
+  // The interface is a TYPE and erased at runtime, so it is read from source — with both ends
+  // asserted and the window measured, which is what the value assertion above makes unnecessary
+  // for the list.
+  const ifFrom = place.indexOf("export interface DocumentClassification");
+  assert.notEqual(ifFrom, -1, "[GATE-VENSTER] DocumentClassification is not where this gate expects it");
+  const ifTo = place.indexOf("}", ifFrom);
+  assert.notEqual(ifTo, -1, "[GATE-VENSTER] DocumentClassification has no end");
+  const iface = place.slice(ifFrom, ifTo);
+  assert.ok(iface.length > 80 && iface.length < 600, `the interface window is ${iface.length} characters`);
+  assert.match(iface, /ai_doc_type: string/, "the window really holds the interface body");
+  assert.doesNotMatch(iface, /intake_retry_after/,
+    "the arm must never become part of DocumentClassification");
+});
+
+test("[UPLOAD-TRUTH-1] the notice pass can never reach the AI reader", () => {
+  // The expensive trap. `could_not_read` is in SKIPPED_DOC_TYPES, so a candidate handed to
+  // processStoredDocument in `retry_skipped` mode is READ AGAIN by the model. The only thing
+  // standing between that and production is the `.in()` in selectDrainCandidates.
+  const drain = code("src/lib/intake-drain.ts");
+
+  const readerStart = drain.indexOf("export async function selectDrainCandidates");
+  assert.notEqual(readerStart, -1, "the reader selector is not where this gate expects it");
+  const readerEnd = drain.indexOf("export const NOTICE_BATCH", readerStart);
+  assert.notEqual(readerEnd, -1, "[GATE-VENSTER] the notice pass no longer follows the reader selector");
+  const readerWindow = drain.slice(readerStart, readerEnd);
+  assert.doesNotMatch(readerWindow, /DOC_TYPE_COULD_NOT_READ/,
+    "could_not_read in the READER's selection is a paid second AI read of a finished document");
+
+  const noticeStart = drain.indexOf("export async function runUnreadableNotices");
+  assert.notEqual(noticeStart, -1, "the notice loop is not where this gate expects it");
+  const noticeEnd = drain.indexOf("export interface DrainReport", noticeStart);
+  assert.notEqual(noticeEnd, -1, "[GATE-VENSTER] the notice loop's end marker is gone");
+  const noticeWindow = drain.slice(noticeStart, noticeEnd);
+  assert.ok(noticeWindow.length > 100, "the notice window is empty — the slice found nothing");
+  assert.doesNotMatch(noticeWindow, /processStoredDocument/,
+    "the notice loop must have no path to the reader, not even an unused one");
+
+  // ── And the module the loop actually calls ──────────────────────────────────────────────────
+  //
+  // The loop's whole body is `deliver(...)`, which defaults to deliverUnreadableNotice. Asserting
+  // only on this file leaves the real work unguarded — and unreadable-delivery.ts DOES import
+  // intake-processor.ts (for INTAKE_SOURCES), so the module graph offers a path to the reader and
+  // always did. The claim that the separation holds "because it does not import a path to it" was
+  // false; this is the assertion that makes it true, and the reason the comment there now points
+  // at a gate instead of at an import boundary.
+  const del2 = code("src/lib/unreadable-delivery.ts");
+  for (const reader of [
+    "processStoredDocument", "processIntakeDocument", "verifyInvoiceFromPdf",
+    "kickStoredDocument", "loadStoredDocument",
+  ]) {
+    assert.ok(!del2.includes(reader),
+      `unreadable-delivery.ts must never reach ${reader} — delivery costs nothing and must keep costing nothing`);
+  }
+  // It may import from intake-processor, but only for the closed source vocabulary. Anything else
+  // from that module is a reader surface arriving by the back door.
+  const imports = del2.match(/import \{([^}]*)\} from "@\/lib\/intake-processor"/);
+  if (imports) {
+    assert.deepEqual(imports[1].split(",").map((x) => x.trim()).filter(Boolean), ["INTAKE_SOURCES"],
+      "only the source vocabulary may cross from the processor into delivery");
+  }
+});
+
+test("[UPLOAD-TRUTH-1] the notice selector names every predicate that keeps it safe and finite", () => {
+  const drain = code("src/lib/intake-drain.ts");
+  const start = drain.indexOf("export async function selectUnreadableNoticeCandidates");
+  assert.notEqual(start, -1, "the notice selector is not where this gate expects it");
+  const end = drain.indexOf("export type NoticeReport", start);
+  assert.notEqual(end, -1, "[GATE-VENSTER] the notice selector's end marker is gone");
+  const q = drain.slice(start, end);
+
+  assert.match(q, /\.eq\("ai_doc_type", DOC_TYPE_COULD_NOT_READ\)/, "terminal unreadable only");
+  // Without this the set never shrinks: every could_not_read document ever written stays a
+  // candidate forever, and the pass becomes an unbounded scan instead of a work list.
+  assert.match(q, /\.not\("intake_retry_after", "is", null\)/, "armed only — this is what converges");
+  assert.match(q, /\.eq\("trashed", false\)/, "never announce a file the owner threw away");
+  assert.match(q, /\.is\("invoice_id", null\)/, "never announce a file that became an invoice");
+  assert.match(q, /\.in\("source", \[\.\.\.INTAKE_SOURCES\]\)/, "this door only — e-mail has its own registry");
+  assert.match(q, /\.limit\(NOTICE_BATCH\)/, "bounded in the statement");
+});
+
+test("[UPLOAD-TRUTH-1] the CAS-loser repair carries all four safety predicates", () => {
+  // A rolling deploy makes this real rather than theoretical: the winner can be a build that never
+  // heard of arming, and the loser is the only thing left that can notice.
+  const del = code("src/lib/unreadable-delivery.ts");
+  const start = del.indexOf("export async function repairUnreadableArm");
+  assert.notEqual(start, -1, "the repair is not where this gate expects it");
+  const end = del.indexOf("if (error) {", start);
+  assert.notEqual(end, -1, "[GATE-VENSTER] the repair's error branch is gone");
+  const stmt = del.slice(start, end);
+
+  assert.match(stmt, /\.eq\("id", args\.documentId\)/);
+  assert.match(stmt, /\.eq\("user_id", args\.userId\)/);
+  // Between the read and this write the owner can have pressed "Lees opnieuw" and turned the
+  // document into an invoice. Arming that would announce a failure that is no longer true.
+  assert.match(stmt, /\.eq\("ai_doc_type", DOC_TYPE_COULD_NOT_READ\)/);
+  // Dropping this one is the silent expensive mistake: it would refresh the date of a document
+  // whose owner has already been told, on every pass, forever.
+  assert.match(stmt, /\.is\("intake_retry_after", null\)/);
+  assert.match(stmt, /\.in\("source", \[\.\.\.INTAKE_SOURCES\]\)/);
+  assert.match(stmt, /\.update\(unreadableArmColumns\(now\)\)/, "the same arm the terminal write uses");
+
+  // And the caller repairs on the TERMINAL STATE, never on `identical`: a folder disagreement is a
+  // placement question, and silence is not its punishment.
+  const proc = code("src/lib/intake-processor.ts");
+  assert.match(proc, /if \(aiDocType !== DOC_TYPE_COULD_NOT_READ \|\| noticeArmed\) return/,
+    "the repair condition must read the terminal state and the arm, and nothing else");
+  assert.doesNotMatch(proc, /identical[\s\S]{0,80}repairUnreadableArm/,
+    "the repair must not be gated on classification identity");
+});
+
+test("[UPLOAD-TRUTH-1] the event key is derived from the document and nothing else", () => {
+  // A key that carried the clock, the run or the reader's conclusion would differ on a retry, and
+  // the partial UNIQUE would let the owner be told the same thing twice.
+  const stored = code("src/lib/stored-document.ts");
+  assert.match(stored, /export function unreadableEventKey\(documentId: string\): string \{\s*return `intake:unreadable:\$\{documentId\}`;?\s*\}/,
+    "one argument, one template, no clock");
+  // The three machine events must stay distinguishable, or one silences another through the key.
+  for (const key of ["intake:auto-finished:", "intake:duplicate-question:", "intake:unreadable:"]) {
+    assert.ok(stored.includes(key), `${key} is still its own event`);
+  }
+});
+
+test("[UPLOAD-TRUTH-1] the bell renders BOTH halves of a machine notification in the owner's language", () => {
+  // Translating only the title leaves an Arabic heading over a Dutch paragraph — worse than
+  // leaving both Dutch, because it looks finished and nothing points at the gap.
+  const bell = code("src/app/dashboard/_shared/index.tsx");
+  assert.match(bell, /const copy = notificationCopy\(\(n as \{ event_key\?: string \| null \}\)\.event_key\)/,
+    "the bell reads the event key off the row");
+  assert.match(bell, /const titel = copy \? t\(copy\.titleKey\) : n\.title/, "title through the catalogue");
+  assert.match(bell, /const tekst = copy \? t\(copy\.bodyKey\) : n\.body/, "body through the catalogue");
+  assert.match(bell, /\{titel\}/, "…and the rendered title is the resolved one");
+  assert.match(bell, /\{tekst && </, "…and so is the body, keeping the empty-body guard");
+  assert.doesNotMatch(bell, /\{n\.title\}|\{n\.body\}/,
+    "the raw stored strings must not be rendered beside the resolved ones");
+
+  // One render site, so both bells and the accountant header are covered by this single change.
+  for (const f of ["src/components/nav/RailAccount.tsx", "src/components/nav/MedewerkerHeader.tsx"]) {
+    const src = code(f);
+    assert.match(src, /<NotificationsBell/, `${f} must keep delegating to the shared bell`);
+    assert.doesNotMatch(src, /notificationCopy/, `${f} must not grow translation logic of its own`);
+  }
+});
+
+test("[UPLOAD-TRUTH-1] the unreadable notice ends on the existing recovery door", () => {
+  // A notification that ends on a file the owner can only LOOK at is the same silence one step
+  // further along. Inkomend is where "Lees opnieuw" is.
+  const notice = code("src/lib/unreadable-notice.ts");
+  assert.match(notice, /export const INKOMEND_PATH = "\/dashboard\/incoming"/);
+  assert.match(notice, /params\.set\(UNREADABLE_FOCUS_PARAM, documentId\)/, "landed on one document");
+
+  const ink = code("src/app/dashboard/incoming/IncomingInvoicesClient.tsx");
+  assert.match(ink, /new URLSearchParams\(window\.location\.search\)\.get\(UNREADABLE_FOCUS_PARAM\)/,
+    "the screen reads the parameter the notice writes");
+  // The panel starts COLLAPSED and fetches its list only when opened, so arriving without this is
+  // arriving at a page that shows no sign of the file the notification is about.
+  assert.match(ink, /void openSkipped\(\)/, "the deep link must open the panel it lands in");
+  assert.match(ink, /document\.getElementById\(unreadableRowDomId\(onleesbaarId\)\)/,
+    "…and land the exact row, by the id both sides derive from one helper");
+  assert.match(ink, /id=\{unreadableRowDomId\(d\.id\)\}/, "the row must be addressable");
+  // The re-read action is NOT reimplemented here; the notice leads to the one that exists.
+  assert.match(ink, /onClick=\{\(\) => void rereadDocument\(d\.id\)\}/,
+    "the existing Lees opnieuw action must still be the thing the owner reaches");
+});
+
+test("[UPLOAD-TRUTH-1] the upload hub records the door it actually is", () => {
+  // /api/intake falls back to 'camera' for a client that says nothing, which was written for old
+  // clients — and this screen was silently one of them. documents.source is a FILTER in the intake
+  // drain and the thing an audit reads to say where a document came from.
+  const up = code("src/app/dashboard/upload/UploadClient.tsx");
+  assert.match(up, /fd\.append\('source', 'upload'\)/, "the upload hub must name its own door");
+  const proc = code("src/lib/intake-processor.ts");
+  assert.match(proc, /export const INTAKE_SOURCES = \["camera", "upload"\] as const/,
+    "and 'upload' must stay in the closed vocabulary the CHECK constraint allows");
+});
+
+test("[UPLOAD-TRUTH-1] delivery reads the notification's ANSWER, and never reverts the truth", () => {
+  // createNotification does not throw; it returns { ok: false }. A caller that ignored that would
+  // log a success over a silence — the exact failure this whole slice exists to remove.
+  const del = code("src/lib/unreadable-delivery.ts");
+  assert.match(del, /if \(!bell\.ok\) \{/, "a refused write is read as refused");
+  assert.match(del, /return \{ kind: "failed", error: bell\.error \}/, "…and reported, leaving the arm set");
+  assert.match(del, /bell\.duplicate === true \? \{ kind: "already_reported" \}/,
+    "the uniqueness refusal is a success for the owner, and must clear the arm too");
+  // Nothing here may touch the terminal state. The document is FINISHED; only the telling is owed.
+  assert.doesNotMatch(del, /ai_doc_type: |DOC_TYPE_WACHT_OP_LEZEN/,
+    "delivery must never write a document state, and never put a document back in the queue");
+  // The arm, and only the arm. intake_pause_reason carries CHECK (… = 'fair_use') and would need
+  // a migration; this slice is designed to require none.
+  assert.doesNotMatch(del, /intake_pause_reason/, "the CHECK-constrained column is not the arm");
+});
+
+test("[NO-SILENT-EMPTY] the notice scan cannot report a failed read as an empty work list", () => {
+  // This slice shipped the exact lie it exists to remove, in its first version: the selector
+  // returned `[]` on a database error, under a comment saying that a failed read is not an empty
+  // work list, and the test asserting it was NAMED "a failed candidate read is not an empty work
+  // list". Comment, name and assertion all disagreed with the code, and every one of them was
+  // green. So the rule is pinned on the TYPE now, where prose cannot drift away from it.
+  const drain = code("src/lib/intake-drain.ts");
+  assert.match(drain, /export type NoticeScan =\s*\|\s*\{ kind: "ok"; candidates: NoticeCandidate\[\] \}\s*\|\s*\{ kind: "unavailable"; error: string \}/,
+    "the two answers must be different SHAPES, not a shared array");
+  assert.match(drain, /return \{ kind: "unavailable", error: String\(error\.message \?\? "read failed"\) \}/,
+    "a read error answers unavailable");
+  // The report may not launder it back into a number either: `picked: 0` is a claim that nobody
+  // was owed anything, and a pass whose scan failed has not earned it.
+  assert.match(drain, /export type NoticeReport =\s*\|\s*\{ kind: "scanned"; picked: number; outcomes: Record<string, number> \}\s*\|\s*\{ kind: "unavailable"; error: string \}/,
+    "an unavailable pass must not be expressible as a clean pass over zero documents");
+  assert.match(drain, /if \(scan\.kind === "unavailable"\) return \{ kind: "unavailable", error: scan\.error \}/,
+    "…and the pass must actually propagate it instead of looping over nothing");
+
+  // Same rule one level down, at the delivery boundary: `data` is null on a failed read, so a
+  // `?? []` there would make "we could not ask" read as "no row matched" — which reads as
+  // resolved, drops the document, and is under-delivery.
+  const del = code("src/lib/unreadable-delivery.ts");
+  const start = del.indexOf("async function stillOwedNotice");
+  assert.notEqual(start, -1, "[GATE-VENSTER] the revalidation is not where this gate expects it");
+  const end = del.indexOf("async function clearUnreadableArm", start);
+  assert.notEqual(end, -1, "[GATE-VENSTER] the revalidation's end marker is gone");
+  const window = del.slice(start, end);
+  assert.ok(window.length > 200, "the revalidation window is empty");
+  assert.match(window, /if \(error\) return \{ kind: "unavailable", error: String\(error\.message \?\? "read failed"\) \}/,
+    "the error is read BEFORE the rows, or a failed read becomes 'not owed'");
+});
+
+test("[UPLOAD-TRUTH-1] delivery re-asks the full eligibility question at its own door", () => {
+  // Case #8 was overstated: the work list filters trashed/invoice_id at SELECTION time, and the
+  // owner can resolve or bin the document between the list being read and one document's delivery
+  // running. The guarded arm-clear protects the WRITE; a notification cannot be unsent.
+  const del = code("src/lib/unreadable-delivery.ts");
+  const start = del.indexOf("async function stillOwedNotice");
+  // [GATE-VENSTER] Both ends, asserted. Without the second check `end` is -1, `slice(start, -1)`
+  // runs to the end of the file, and repairUnreadableArm — which legitimately carries id, user_id,
+  // ai_doc_type, trashed, invoice_id and source predicates of its own — satisfies EVERY assertion
+  // below. Renaming clearUnreadableArm would then leave this gate green over a gutted revalidation.
+  assert.notEqual(start, -1, "[GATE-VENSTER] the revalidation is not where this gate expects it");
+  const end = del.indexOf("async function clearUnreadableArm", start);
+  assert.notEqual(end, -1, "[GATE-VENSTER] the revalidation's end marker is gone");
+  const q = del.slice(start, end);
+  assert.ok(q.length > 200 && q.length < 2500, `the revalidation window is ${q.length} characters`);
+  // The SAME five questions the work list asks. A narrower question here would let exactly the
+  // rows the list excludes through, one at a time.
+  assert.match(q, /\.eq\("id", args\.documentId\)/);
+  assert.match(q, /\.eq\("user_id", args\.userId\)/);
+  assert.match(q, /\.eq\("ai_doc_type", DOC_TYPE_COULD_NOT_READ\)/);
+  assert.match(q, /\.not\("intake_retry_after", "is", null\)/);
+  assert.match(q, /\.eq\("trashed", false\)/);
+  assert.match(q, /\.is\("invoice_id", null\)/);
+  assert.match(q, /\.in\("source", \[\.\.\.INTAKE_SOURCES\]\)/);
+
+  // And it is asked BEFORE the notification, not after: the order is the whole point.
+  const deliver = del.indexOf("export async function deliverUnreadableNotice");
+  const check = del.indexOf("await stillOwedNotice(", deliver);
+  const send = del.indexOf("await notify(", deliver);
+  assert.ok(check !== -1 && send !== -1, "both halves must exist");
+  assert.ok(check < send, "the eligibility check must precede the send — after it, the bell has rung");
+  assert.match(del, /if \(!owed\.owed\) return \{ kind: "no_longer_owed" \}/,
+    "a resolved document is answered, not notified");
+
+  // The clear reports rows AFFECTED. A guarded UPDATE that matches nothing succeeds, so `!error`
+  // would report a clear that did not happen on exactly the row where it did not happen.
+  assert.match(del, /return \(\(data \?\? \[\]\) as unknown\[\]\)\.length > 0/,
+    "the clear must count the rows it changed, not merely the absence of an error");
 });

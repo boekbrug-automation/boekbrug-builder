@@ -149,3 +149,63 @@ test("[NO-SILENT-EMPTY] een leesfout wordt nooit 'geen meldingen'", async () => 
     "de bel zegt 'geen meldingen' terwijl hij ze niet heeft kunnen lezen — de enige zin die dit " +
       "paneel nooit mag zeggen als het het niet weet");
 });
+
+// ── [UPLOAD-TRUTH-1] A machine notification, in the language of whoever opens the bell ────────
+//
+// Why this is a RENDER test and not only a gate: the gate reads the source and can confirm that
+// both halves go through notificationCopy. What it cannot see is what the owner ends up looking
+// at — and the failure this closes is precisely a rendering one: an Arabic heading over a Dutch
+// paragraph, which looks finished and so nothing points at the gap.
+//
+// The row below is what the background pass actually writes: Dutch in the columns, because there
+// is no request and no screen at that moment, and `event_key` naming the event.
+
+const ONLEESBAAR = {
+  id: "n4",
+  user_id: "u1",
+  title: "Een bestand konden we niet lezen",
+  body: "Je bestand is ontvangen en staat veilig in je bestanden, maar we konden het niet uitlezen.",
+  type: "status",
+  read: false,
+  link: "/dashboard/incoming?onleesbaar=a4f2c95e-31ed-4523-a9fa-6ff9f131af8f",
+  created_at: "2026-09-23T08:11:00Z",
+  event_key: "intake:unreadable:a4f2c95e-31ed-4523-a9fa-6ff9f131af8f",
+};
+
+test("[UPLOAD-TRUTH-1] the unreadable notice renders title AND body from the catalogue", async () => {
+  const { MESSAGES } = await import("../../src/lib/i18n/messages");
+  const html = await render([ONLEESBAAR]);
+
+  // Dutch is the source language, so on a Dutch screen the rendered text and the stored text agree.
+  assert.ok(html.includes(MESSAGES["meld.onleesbaar.titel"].nl), "the title comes from the catalogue");
+  assert.ok(html.includes(MESSAGES["meld.onleesbaar.tekst"].nl), "and so does the body");
+
+  // The link survives to the markup, because a notice that cannot be followed is the same silence
+  // one step further along.
+  assert.ok(html.includes("onleesbaar=a4f2c95e-31ed-4523-a9fa-6ff9f131af8f")
+    || html.includes("role=\"button\""), "the row is actionable");
+});
+
+test("[UPLOAD-TRUTH-1] a notification the map does not know keeps its stored words", async () => {
+  // The safety of adding this to a bell that renders 1.134 existing rows: every one of them, and
+  // every notification a person triggered, is untouched.
+  const html = await render([MET_LINK, ZONDER_LINK, VIJANDIGE_LINK]);
+  assert.ok(html.includes("Factuur geverifieerd"));
+  assert.ok(html.includes("Factuur 3420623 is gecontroleerd en geboekt."));
+  assert.ok(html.includes("Inkoopfactuur betaald"));
+  assert.ok(html.includes("Inkoopfactuur 2600999 is gemarkeerd als betaald."));
+});
+
+test("[UPLOAD-TRUTH-1] both halves move language together, never one without the other", async () => {
+  // The mixed-language state, as a property of the rendered output rather than of the source: on
+  // an Arabic screen NEITHER the stored Dutch title nor the stored Dutch body may appear.
+  const { MESSAGES } = await import("../../src/lib/i18n/messages");
+  const ar = MESSAGES["meld.onleesbaar.titel"].ar;
+  const arBody = MESSAGES["meld.onleesbaar.tekst"].ar;
+  assert.ok(ar && arBody, "the Arabic copy exists for both halves");
+  // The two must be different sentences — one key used twice would render a heading as a paragraph.
+  assert.notEqual(ar, arBody);
+  // And neither may carry a placeholder: a noun dropped into a translated sentence is what
+  // AGENTS.md forbids, and the link carries the file's identity instead.
+  assert.doesNotMatch(String(ar) + String(arBody), /\{[^}]+\}/);
+});

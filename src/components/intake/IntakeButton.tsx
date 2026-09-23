@@ -391,8 +391,21 @@ export default function IntakeButton({
       // Destination-aware feedback + navigation.
       onDone?.(data)
 
+      // [ONTVANGEN-WAAR] Receive-first is its own outcome, and the ONLY one where nothing is known
+      // yet about what the file is. `received: true` is the fact; `destination: 'received'` is the
+      // same fact under the field every other branch here switches on. Read the boolean, because
+      // that is what the route promises and what the upload screen also reads.
+      const isReceived = data.received === true
+
       // Route the owner to where the item landed, so they can confirm/see it.
-      if (data.destination === 'invoice' || data.destination === 'receipt') {
+      if (isReceived) {
+        // No navigation and no destination sheet: there is nowhere better to be than here. The
+        // server's own sentence already says the whole thing ("Ontvangen — je kunt verder…"), so
+        // this adds no wording of its own, and the summary line during a photo series says the
+        // same as the row: received, not filed.
+        showToast(data.message || t('int.ontvangen'))
+        noteLanded(rowId, file.name, t('int.landed.ontvangen'))
+      } else if (data.destination === 'invoice' || data.destination === 'receipt') {
         showToast(data.message || t('int.toegevoegd'))
         // [AUTO-ADVANCE-HONESTY] An auto-verified invoice is booked ('received') and so
         // is NOT in the verify queue. Sending the owner to /dashboard/incoming — as this
@@ -495,7 +508,17 @@ export default function IntakeButton({
         showToast(data.message || t('int.toegevoegd'))
         router.refresh()
       }
-      patchRow(rowId, { phase: 'done' })
+      // [ONTVANGEN-WAAR] Wat deze rij als EINDstand mag zeggen.
+      //
+      // De voortgangsfase heette hierboven al geen 'lezen' meer, maar de laatste regel zei nog
+      // 'Klaar'. Bij receive-first is dat de verkeerde belofte: de eigenaar gaf het bestand af en
+      // dát is af — de lezing begint dan pas. "Je hebt het aan BoekBrug gegeven, jouw werk zit
+      // erop" en "de AI is al klaar" zijn twee verschillende uitspraken, en alleen de eerste is op
+      // dit moment te bewijzen.
+      //
+      // Er komt met opzet geen volgsysteem bij om de rij later alsnog op 'Klaar' te zetten; de
+      // openstaande vraag, als die er komt, verschijnt in het vragenpaneel.
+      patchRow(rowId, { phase: isReceived ? 'received' : 'done' })
       return 'ok'
     } catch {
       showToast(t('int.fout.toevoegen'))
@@ -640,7 +663,9 @@ export default function IntakeButton({
           phaseLabel:
             r.phase === 'fitting' ? t('int.voortgang.klaarmaken')
             : r.phase === 'uploading' ? t('int.voortgang.uploaden', { p: r.percent })
-            : r.phase === 'reading' ? t('int.voortgang.lezen')
+            : r.phase === 'reading' ? t('int.voortgang.bewaren')
+            // [ONTVANGEN-WAAR] The handoff is complete; the read is not. Not 'Klaar'.
+            : r.phase === 'received' ? t('int.voortgang.ontvangen')
             : r.phase === 'done' ? t('int.voortgang.klaar')
             : t('int.voortgang.mislukt'),
         }))}
@@ -845,7 +870,11 @@ export default function IntakeButton({
             style={{ background: '#fff', borderRadius: '20px 20px 0 0', padding: '22px 20px', paddingBottom: sheetPaddingBottom(22), width: '100%', maxWidth: 460, maxHeight: '80vh', overflowY: 'auto' }}
           >
             <p style={{ fontSize: 17, fontWeight: 700, color: '#202124', margin: 0 }}>
-              {t('int.nVerwerkt', { n: batchSummary.length })}
+              {/* [ONTVANGEN-WAAR] Neutraal, en met opzet zonder samenvattend oordeel: de regels
+                  hieronder zeggen per bestand wat er is gebeurd — «factuur → …», «bank → …»,
+                  «ontvangen → we verwerken dit verder». Een kop die daar één woord overheen legt
+                  kan alleen maar minder waar zijn dan de lijst die hij samenvat. */}
+              {t('int.batchKop')}
             </p>
             <p style={{ fontSize: 13, color: '#5F6368', margin: '4px 0 14px', lineHeight: 1.45 }}>
               {t('int.batchUitleg')}
@@ -1012,7 +1041,11 @@ export interface IntakeResult {
   // met wat we van die leverancier hebben (welke factuur mis ik?).
   // 'turnover' = kassa-omzet, meteen geboekt in daily_turnover → te zien in Dagomzet.
   // 'ledger'   = grootboek/controle-check, nadrukkelijk GEEN geld → werkt door in de reconciliatie.
-  destination?: 'invoice' | 'receipt' | 'bank' | 'document' | 'statement' | 'reminder' | 'turnover' | 'ledger'
+  // [ONTVANGEN-WAAR] 'received' = receive-first: the handoff is durable and NOTHING else is known.
+  // Not a destination in the sense the others are — those all say what the file turned out to be.
+  destination?: 'invoice' | 'receipt' | 'bank' | 'document' | 'statement' | 'reminder' | 'turnover' | 'ledger' | 'received'
+  /** [ONTVANGEN-WAAR] The receive-first road sets this; the synchronous road never does. */
+  received?: boolean
   message?: string
   // [UNREAD-HONESTY] true wanneer het bestand wél is opgeslagen maar NIET gelezen kon worden. Dat is
   // iets anders dan "geen factuur herkend": er is niets van geboekt en er moet nog iets gebeuren.

@@ -128,6 +128,9 @@ import { M3, COLUMN, PAGE_HEADER_HEIGHT } from '@/lib/design/tokens'
 import { applyServerRefresh } from '@/lib/queue-sync'
 // [FOCUS-KOP] Where a deep-linked row must come to rest — see the header of that file.
 import { landRowUnderChrome } from '@/lib/focus-scroll'
+// [UPLOAD-TRUTH-1] The parameter the unreadable notification puts in the URL, and the DOM id
+// of the row it names. Both live beside the notice itself so they cannot drift apart.
+import { UNREADABLE_FOCUS_PARAM, unreadableRowDomId } from '@/lib/unreadable-notice'
 // [ONE-TAP-REPAIR] The gate that names the two possible readings of a broken breakdown.
 import { reconcileBtw } from '@/lib/btw-reconcile'
 import { proposeSplit } from '@/lib/vendor-vat-rate'
@@ -603,6 +606,50 @@ function ConnectEmailCard({ status }: { status: ConnectionStatus }) {
     }
   };
 
+  // ── [UPLOAD-TRUTH-1] Landing on the file we could not read ──────────────────────────────────
+  //
+  // The unreadable notification's whole job is to end somewhere useful. Its link is
+  // /dashboard/incoming?onleesbaar=<documentId>, and without this it would end on this screen with
+  // the skipped panel COLLAPSED (skippedOpen starts false and the list is only fetched when it is
+  // opened) — so the owner would arrive at a page that shows no sign of the file the notification
+  // is about. The sentence names no file either, deliberately: the link is the identity.
+  //
+  // Three steps, in the order the screen can actually do them: open the panel (which triggers its
+  // one lazy fetch), remember which row to land on, and clean the parameter so a manual refresh
+  // does not re-run it. The landing itself waits for the list — see the effect below.
+  const [onleesbaarId, setOnleesbaarId] = useState<string | null>(null);
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get(UNREADABLE_FOCUS_PARAM);
+    if (!id) return;
+    // Same tick discipline as the focus effect above: nothing touches state synchronously in the
+    // effect body, because that cascades a render during the effects pass.
+    const applyTimer = setTimeout(() => {
+      void openSkipped();
+      setOnleesbaarId(id);
+    }, 0);
+    window.history.replaceState({}, "", window.location.pathname);
+    return () => clearTimeout(applyTimer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!onleesbaarId) return;
+    // The row cannot be landed until the list it is in has arrived, so this runs again on every
+    // change to unreadDocs rather than once on mount. A document that is NOT in the list — the
+    // owner re-read it, or threw it away between the bell and the tap — simply leaves the
+    // highlight unset; the panel is open and honest, which is the right ending for that case.
+    if (!unreadDocs.some((d) => d.id === onleesbaarId)) return;
+    const timer = setTimeout(() => setOnleesbaarId(null), 2600);
+    requestAnimationFrame(() => {
+      landRowUnderChrome(
+        document.getElementById(unreadableRowDomId(onleesbaarId)),
+        null,
+        PAGE_HEADER_HEIGHT,
+      );
+    });
+    return () => clearTimeout(timer);
+  }, [onleesbaarId, unreadDocs]);
+
+
   // ── [CIRKEL] The overgeslagen/onleesbaar pile, extracted so BOTH states render it ──
   //
   // /api/email/skipped is source-agnostic (every document with a skipped ai_doc_type and no
@@ -665,7 +712,14 @@ function ConnectEmailCard({ status }: { status: ConnectionStatus }) {
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {(unreadDocs ?? []).map((d) => (
-                          <div key={d.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
+                          // [UPLOAD-TRUTH-1] Addressable and briefly highlighted: this is where the
+                          // unreadable notification lands, and a panel that merely opened would
+                          // leave the owner reading a list for a file it never named.
+                          <div key={d.id} id={unreadableRowDomId(d.id)}
+                            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5,
+                              background: onleesbaarId === d.id ? "#E8F0FE" : "transparent",
+                              borderRadius: 8, padding: onleesbaarId === d.id ? "6px 8px" : 0,
+                              transition: "background 0.2s" }}>
                             <span style={{ color: "#202124", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
                               {d.fileName}
                             </span>

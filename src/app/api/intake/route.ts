@@ -528,11 +528,15 @@ async function runIntake(req: NextRequest) {
     // upload; reaching it HERE means two requests raced. The earlier document is already read,
     // waiting or booked — so no state is reset, no second pass is scheduled, and no second
     // financial effect can follow from this request.
-    const folderPath = await buildFolderBreadcrumb(supabase, user.id, null).catch(() => [])
+    // [UPLOAD-TRUTH-1] The breadcrumb and the link are built from the folder the earlier document
+    // is ACTUALLY in. Both were hard-coded `null` here, which is the root — so the sentence named
+    // the wrong place and the link opened a list the file is not in. receiveRawIncoming now
+    // returns the folder it found, for exactly this.
+    const folderPath = await buildFolderBreadcrumb(supabase, user.id, received.folderId).catch(() => [])
     return NextResponse.json({
       error: "Dit bestand is al toegevoegd.",
       duplicate: true,
-      existing: { id: received.documentId, folder_id: null, folder_name: folderPath.length ? folderPath[folderPath.length - 1] : null },
+      existing: { id: received.documentId, folder_id: received.folderId, folder_name: folderPath.length ? folderPath[folderPath.length - 1] : null },
     }, { status: 409 })
   }
 
@@ -556,6 +560,13 @@ async function runIntake(req: NextRequest) {
     received: true,
     destination: "received",
     documentId: received.documentId,
+    // [UPLOAD-TRUTH-1] WHERE it is, beside WHAT it is. targetFromIntake already reads this field
+    // ([ONTVANGEN-WAAR] added the reader); until now nothing ever sent it, so the received row's
+    // link resolved to `?focus=` alone. /dashboard/bestanden opens the folder it is given and
+    // looks for the document only in THAT list, and receive files into "Geïmporteerde bestanden"
+    // — so a link without the folder opened the root and found nothing, silently. The one row
+    // where the link matters most is the one that had none.
+    folderId: received.folderId,
     // [ONTVANGEN] The whole promise, in one sentence: we have it, and you are free to go.
     message: "Ontvangen — je kunt verder. We lezen dit bestand zo voor je uit; je hoeft niet te wachten.",
   })

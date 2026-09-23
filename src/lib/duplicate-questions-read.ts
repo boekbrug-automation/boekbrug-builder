@@ -15,7 +15,8 @@
 // The question is the primary truth. The candidate's number and supplier are what we print beside
 // it. One of those may be missing; the other may not.
 
-import type { DuplicateQuestion } from "@/lib/duplicate-question"
+import type { DuplicateQuestion, CandidateFacts, CandidateWhere } from "@/lib/duplicate-question"
+import { betaalstandVan } from "@/lib/factuurstaat"
 
 /** One `documents` row, as the question list selects it. */
 export interface QuestionRow {
@@ -24,11 +25,28 @@ export interface QuestionRow {
   duplicate_candidate_invoice_id: string | null
 }
 
-/** One `invoices` row, as the enrichment selects it. */
+/**
+ * One `invoices` row, as the enrichment selects it.
+ *
+ * ── [ONTVANGEN-WAAR] WHY THE MONEY COLUMNS ARE HERE ──────────────────────────────────────────
+ *
+ * The question used to carry a number and a supplier, and nothing else. So the owner saw the SAME
+ * question whether the invoice already in the books was €500 completely unpaid, €500 fully paid, or
+ * €200 paid with €300 still open. Those are three different risks and one of them is a double
+ * payment, which makes "not enough context" the wrong amount of context for a money decision.
+ *
+ * Nothing here is new: every column already exists on the row and is already true. What was missing
+ * was reading it.
+ */
 export interface CandidateRow {
   id: string
   invoice_number: string | null
   client_name: string | null
+  total_inc_btw: number | null
+  amount_paid: number | null
+  status: string | null
+  accountant_status: string | null
+  invoice_type: string | null
 }
 
 export interface CandidateLookup {
@@ -88,8 +106,79 @@ export function buildQuestions(rows: QuestionRow[], found: CandidateLookup): Dup
       documentId: r.id,
       fileName: r.file_name ?? "document",
       candidate: hit && id
-        ? { invoiceId: id, invoiceNumber: hit.invoice_number ?? null, vendor: hit.client_name ?? null }
+        ? {
+            invoiceId: id,
+            invoiceNumber: hit.invoice_number ?? null,
+            vendor: hit.client_name ?? null,
+            ...candidateFactsOf(hit),
+          }
         : null,
     }
   })
+}
+
+/**
+ * [ONTVANGEN-WAAR] What is TRUE about the invoice already in the books, as facts and not as words.
+ *
+ * Three rules, and each one is a thing this could get wrong in a way that costs money:
+ *
+ *  1. **Payment comes from the amounts, through the one authority.** `betaalstandVan` reads
+ *     total_inc_btw and amount_paid and nothing else, because `status` is not the payment truth —
+ *     a row can say 'paid' while carrying a part payment. Re-deriving that here would make a
+ *     seventieth place in this app that decides "is it paid" for itself.
+ *
+ *  2. **`onbekend` is an answer and is passed through as one.** An invoice whose total could not be
+ *     read is not unpaid. Printing "Nog niet betaald" over it would invent the single fact most
+ *     likely to make an owner pay a bill twice, and it would look exactly as confident as a fact we
+ *     actually know.
+ *
+ *  3. **Payment state is context, never identity.** Nothing derived here says whether this is a
+ *     duplicate. If the document IS the same invoice it stays the same invoice whether the original
+ *     is unpaid, half paid, paid or overpaid — those change what the owner risks, not what the
+ *     document is. The only way to a second invoice remains the owner saying so.
+ */
+function candidateFactsOf(row: CandidateRow): CandidateFacts {
+  const { stand, openstaand } = betaalstandVan({
+    status: row.status,
+    direction: "incoming",
+    invoice_type: row.invoice_type,
+    total_inc_btw: row.total_inc_btw,
+    amount_paid: row.amount_paid,
+  })
+  return {
+    total: typeof row.total_inc_btw === "number" && Number.isFinite(row.total_inc_btw)
+      ? row.total_inc_btw
+      : null,
+    payment: stand,
+    outstanding: openstaand,
+    where: whereOf(row.status),
+    // The accountant's lock. Not changeable from this panel — this only says that it is there.
+    accountantProcessed: row.accountant_status === "verwerkt",
+  }
+}
+
+/**
+ * [ONTVANGEN-WAAR] Which screen holds an invoice with this status.
+ *
+ * Read off the two screens rather than invented here:
+ *
+ *   `/dashboard/incoming`        → `.eq("status","archived")` and `.eq("status","processing")`
+ *   `/dashboard/incoming/manage` → `.in('status', ['received','paid'])`
+ *
+ * The sets are disjoint and the hard semantic gate filters on no status at all, so all four are
+ * reachable as a candidate. Anything outside them is `unknown` on purpose: a status this function
+ * has not been taught about must produce NO link rather than a guess, because a link to the wrong
+ * screen is indistinguishable from a working one until the owner is already lost.
+ *
+ * [DUP-ARCHIVED] `archived` doubles as what the owner is told — the invoice is in Genegeerd, which
+ * is why "deze factuur bestaat al" was useless on its own: it named something invisible.
+ */
+function whereOf(status: string | null): CandidateWhere {
+  switch (status) {
+    case "processing": return "queue"
+    case "archived": return "archived"
+    case "received":
+    case "paid": return "books"
+    default: return "unknown"
+  }
 }

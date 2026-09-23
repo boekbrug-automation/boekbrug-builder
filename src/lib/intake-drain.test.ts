@@ -12,7 +12,10 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { selectDrainCandidates, runIntakeDrain, DRAIN_BATCH } from "./intake-drain"
+import {
+  selectDrainCandidates, runIntakeDrain, DRAIN_BATCH,
+  selectUnreadableNoticeCandidates, NOTICE_BATCH,
+} from "./intake-drain"
 import {
   DOC_TYPE_WACHT_OP_LEZEN, DOC_TYPE_WACHT_OP_LIMIET, DOC_TYPE_WACHT_OP_BESLUIT,
   DOC_TYPE_COULD_NOT_READ,
@@ -23,37 +26,94 @@ const NOW = new Date("2026-09-18T10:00:00Z")
 
 type Row = Record<string, unknown>
 
-/** A stand-in for the documents table that applies the filters the statement asks for. */
+/** One predicate the statement asked for, recorded so a test can prove it is IN the query. */
+type Pred = { op: "in" | "eq" | "is" | "not-is"; column: string; value: unknown }
+
+function matches(row: Row, preds: Pred[]): boolean {
+  return preds.every((p) => {
+    const v = row[p.column]
+    if (p.op === "in") return (p.value as unknown[]).includes(v as never)
+    if (p.op === "eq") return v === p.value
+    if (p.op === "is") return p.value === null ? v == null : v === p.value
+    // not-is null → the column must carry something
+    return p.value === null ? v != null : v !== p.value
+  })
+}
+
+/**
+ * A stand-in for the documents table that applies the filters the statement asks for.
+ *
+ * [UPLOAD-TRUTH-1] It answers UPDATE as well as SELECT now, because the notice pass's safety is in
+ * the predicates of a write: an arm repair that dropped `intake_retry_after IS NULL` would re-arm
+ * a document whose owner has already been told, on every pass, forever.
+ */
 class Fake {
   rows: Row[] = []
   selectError: { message: string } | null = null
+  updateError: { message: string } | null = null
   /** The (column, values) pairs the SELECT filtered on — proof the filters are in the statement. */
   filters: Array<[string, unknown]> = []
+  /** Every predicate of every statement, by operator. */
+  preds: Pred[] = []
+  /** Each UPDATE: the patch and the predicates it was aimed with. */
+  updates: Array<{ patch: Row; preds: Pred[] }> = []
+  /**
+   * [UPLOAD-TRUTH-1] Every `.order(column, opts)` the statement asked for.
+   *
+   * The first version of this fake sorted by created_at then id unconditionally and threw
+   * `.order()`'s arguments away — so "oldest owed first" was a property of the FAKE, and a
+   * selector that asked for no ordering at all, or the wrong one, passed that test. Rows now come
+   * back in the order they were given, and the ordering is asserted on what was REQUESTED.
+   */
+  orders: Array<[string, unknown]> = []
 
   from = (table: string) => {
     assert.equal(table, "documents")
     const self = this as Fake
-    const inFilters: Array<[string, unknown[]]> = []
+    const preds: Pred[] = []
+    let patch: Row | null = null
+    // [UPLOAD-TRUTH-1] The limit is MODELLED, not ignored. selectDrainCandidates bounds itself in
+    // JS after the read; the notice selector bounds itself in the statement, and a fake that drops
+    // `.limit()` would let an unbounded pass look bounded.
+    let cap: number | null = null
+
+    const add = (op: Pred["op"], column: string, value: unknown) => {
+      const p: Pred = { op, column, value }
+      preds.push(p)
+      self.preds.push(p)
+      if (op === "in") self.filters.push([column, value])
+      return q
+    }
+
+    const run = () => {
+      if (patch === null) {
+        if (self.selectError) return { data: null, error: self.selectError }
+        // Rows come back in the order they were GIVEN. The fake does not sort: a fake that sorts
+        // proves its own ordering, not the statement's.
+        const hit = self.rows.filter((r) => matches(r, preds))
+        return { data: cap === null ? hit : hit.slice(0, cap), error: null }
+      }
+      self.updates.push({ patch, preds: [...preds] })
+      if (self.updateError) return { data: null, error: self.updateError }
+      const hit = self.rows.filter((r) => matches(r, preds))
+      for (const r of hit) Object.assign(r, patch)
+      return { data: hit.map((r) => ({ id: r.id })), error: null }
+    }
+
     const q = {
       select: () => q,
-      in: (column: string, values: unknown[]) => {
-        inFilters.push([column, values])
-        self.filters.push([column, values])
-        return q
+      update: (p: Row) => { patch = p; return q },
+      in: (column: string, values: unknown[]) => add("in", column, values),
+      eq: (column: string, value: unknown) => add("eq", column, value),
+      is: (column: string, value: unknown) => add("is", column, value),
+      not: (column: string, op: string, value: unknown) => {
+        assert.equal(op, "is", "only `.not(col, 'is', null)` is modelled")
+        return add("not-is", column, value)
       },
-      order: () => q,
-      limit: () => q,
-      then: <A, B>(ok?: (v: { data: Row[]; error: unknown }) => A | PromiseLike<A>, bad?: (e: unknown) => B) =>
-        Promise.resolve().then(() => {
-          if (self.selectError) return { data: null, error: self.selectError }
-          const hit = self.rows.filter((r) =>
-            inFilters.every(([c, vs]) => vs.includes(r[c] as never)))
-          // created_at ascending, then id — the deterministic order the pass relies on.
-          hit.sort((a, b) =>
-            String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")) ||
-            String(a.id).localeCompare(String(b.id)))
-          return { data: hit, error: null }
-        }).then(ok as never, bad as never),
+      order: (column: string, opts?: unknown) => { self.orders.push([column, opts]); return q },
+      limit: (n: number) => { cap = n; return q },
+      then: <A, B>(ok?: (v: { data: Row[] | null; error: unknown }) => A | PromiseLike<A>, bad?: (e: unknown) => B) =>
+        Promise.resolve().then(run).then(ok as never, bad as never),
     }
     return q
   }
@@ -147,6 +207,12 @@ test("[ONTVANGEN-DRAIN] oldest first, and bounded", async () => {
   const picked = await selectDrainCandidates({ pipeline: db, now: NOW })
   assert.equal(picked.length, DRAIN_BATCH, "a pass that tries to finish everything finishes nothing")
   assert.equal(picked[0].documentId, "d-000", "the longest wait goes first")
+  // …and the order is what the STATEMENT asked for. The fake no longer sorts, so without this the
+  // assertion above would only be reporting the order the fixture happened to be written in.
+  assert.deepEqual(db.orders, [
+    ["created_at", { ascending: true, nullsFirst: true }],
+    ["id", { ascending: true }],
+  ], "deterministic order, or a backlog churns instead of draining")
   assert.equal(picked[DRAIN_BATCH - 1].documentId, `d-${String(DRAIN_BATCH - 1).padStart(3, "0")}`)
 })
 
@@ -205,4 +271,181 @@ test("[ONTVANGEN-DRAIN] the pass writes no 'done' state of its own", async () =>
     run: (async () => ({ kind: "resumed" as const, invoiceId: "inv-1" })),
   })
   assert.equal(JSON.stringify(db.rows), before, "the drain must not mark the row itself")
+})
+
+// ── [UPLOAD-TRUTH-1] The notice pass ──────────────────────────────────────────────────────────
+//
+// The defect it closes: a stored document reaches terminal `could_not_read`, the file is safe, and
+// nothing ever tells its owner. The reader drain may not be widened to cover it — `could_not_read`
+// is in SKIPPED_DOC_TYPES, so a candidate handed to processStoredDocument in `retry_skipped` mode
+// would be read by the AI again, every pass, on behalf of nobody.
+
+function unread(over: Row = {}): Row {
+  return doc({
+    ai_doc_type: DOC_TYPE_COULD_NOT_READ,
+    intake_retry_after: "2026-09-18T09:30:00Z", // armed = not yet delivered
+    trashed: false,
+    invoice_id: null,
+    ...over,
+  })
+}
+
+test("[UPLOAD-TRUTH-1] an armed terminal unreadable document is a notice candidate", async () => {
+  const db = new Fake()
+  db.rows = [unread({ id: "a" })]
+  const scan = await selectUnreadableNoticeCandidates({ pipeline: db, now: NOW })
+  assert.equal(scan.kind, "ok")
+  assert.deepEqual(scan.kind === "ok" ? scan.candidates : null, [{ documentId: "a", ownerId: OWNER }])
+})
+
+test("[UPLOAD-TRUTH-1] every predicate is in the STATEMENT, and each one forbids something", async () => {
+  const db = new Fake()
+  db.rows = [unread({ id: "a" })]
+  await selectUnreadableNoticeCandidates({ pipeline: db, now: NOW })
+  const has = (op: string, column: string, test: (v: unknown) => boolean) =>
+    db.preds.some((p) => p.op === op && p.column === column && test(p.value))
+
+  assert.ok(has("eq", "ai_doc_type", (v) => v === DOC_TYPE_COULD_NOT_READ), "terminal unreadable only")
+  assert.ok(has("not-is", "intake_retry_after", (v) => v === null), "armed only — this is what makes the set shrink")
+  assert.ok(has("eq", "trashed", (v) => v === false), "never announce a file the owner threw away")
+  assert.ok(has("is", "invoice_id", (v) => v === null), "never announce a file that became an invoice")
+  assert.ok(
+    has("in", "source", (v) => Array.isArray(v) && v.includes("camera") && v.includes("upload") && !v.includes("email")),
+    "this door only — the e-mail road has its own registry",
+  )
+})
+
+test("[UPLOAD-TRUTH-1] a delivered document leaves the set permanently", async () => {
+  // The arm is the work list, and delivery clears it. Steady state is an empty selection — not an
+  // anti-join that re-examines every could_not_read document ever written.
+  const db = new Fake()
+  db.rows = [unread({ id: "a", intake_retry_after: null })]
+  const scan = await selectUnreadableNoticeCandidates({ pipeline: db, now: NOW })
+  assert.deepEqual(scan, { kind: "ok", candidates: [] },
+    "an EMPTY work list is a successful answer, and says so")
+})
+
+test("[UPLOAD-TRUTH-1] trashed, already-an-invoice and e-mail rows are never announced", async () => {
+  const db = new Fake()
+  db.rows = [
+    unread({ id: "weg", trashed: true }),
+    unread({ id: "geboekt", invoice_id: "inv-1" }),
+    unread({ id: "mail", source: "email" }),
+    unread({ id: "nog-wachtend", ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN }),
+    unread({ id: "goed" }),
+  ]
+  const scan = await selectUnreadableNoticeCandidates({ pipeline: db, now: NOW })
+  assert.deepEqual(scan.kind === "ok" ? scan.candidates.map((c) => c.documentId) : null, ["goed"])
+})
+
+test("[NO-SILENT-EMPTY] a failed candidate read is not an empty work list", async () => {
+  // This test asserted the OPPOSITE of its own name in its first version: the selector returned
+  // `[]` on a read error and the assertion agreed with it. "Nobody is owed anything" and "we could
+  // not find out" are different facts, and the one surface whose whole job is that an outcome is
+  // never lost quietly is the last place to collapse them.
+  const db = new Fake()
+  db.rows = [unread({ id: "a" })]
+  db.selectError = { message: "statement timeout" }
+
+  const scan = await selectUnreadableNoticeCandidates({ pipeline: db, now: NOW })
+  assert.equal(scan.kind, "unavailable", "a failed read must NOT look like an empty list")
+  assert.match(scan.kind === "unavailable" ? scan.error : "", /statement timeout/,
+    "…and it must carry why, or the log cannot tell the two apart either")
+
+  // The regression, stated as a value: the two answers are not deep-equal, so a future `return []`
+  // in the error arm cannot satisfy both this and the empty-list test above.
+  const empty = await selectUnreadableNoticeCandidates({ pipeline: new Fake(), now: NOW })
+  assert.notDeepEqual(scan, empty, "an unavailable scan and an empty scan are different values")
+})
+
+test("[NO-SILENT-EMPTY] a pass that could not read its work list never reports 'nothing to do'", async () => {
+  // picked: 0 is a CLAIM — that nobody was owed anything. A pass whose scan failed has not earned
+  // it, and the report shape must make that claim impossible rather than merely discouraged.
+  const db = new Fake()
+  db.rows = [unread({ id: "a" }), unread({ id: "b" })]
+  db.selectError = { message: "connection reset" }
+  let delivered = 0
+  const report = await runIntakeDrain({
+    pipeline: db, now: NOW,
+    run: (async () => ({ kind: "gone" as const })),
+    deliver: (async () => { delivered += 1; return { kind: "delivered" as const } }),
+  })
+  assert.equal(report.notices.kind, "unavailable", "the pass says it could not find out")
+  assert.ok(!("picked" in report.notices), "…and cannot be read as a clean pass over zero documents")
+  assert.equal(delivered, 0, "nothing was delivered off a list we never read")
+})
+
+test("[UPLOAD-TRUTH-1] oldest owed first, and bounded", async () => {
+  const db = new Fake()
+  db.rows = Array.from({ length: NOTICE_BATCH + 5 }, (_, i) =>
+    unread({ id: `n-${String(i).padStart(3, "0")}`, created_at: `2026-09-${String(i + 1).padStart(2, "0")}T09:00:00Z` }))
+  const scan = await selectUnreadableNoticeCandidates({ pipeline: db, now: NOW })
+  const picked = scan.kind === "ok" ? scan.candidates : []
+  assert.equal(picked.length, NOTICE_BATCH, "bounded in the statement, not by the caller")
+  // The ORDER is asserted on what the statement asked the database for. The fake deliberately does
+  // not sort — proving ordering against a fake that sorts proves only that the fake sorts.
+  assert.deepEqual(db.orders, [
+    ["created_at", { ascending: true, nullsFirst: true }],
+    ["id", { ascending: true }],
+  ], "oldest owed first, then id — a total order, so a capped pass keeps starting with the same rows")
+})
+
+test("[UPLOAD-TRUTH-1] terminal unreadable documents are never handed to the reader loop", async () => {
+  // The expensive trap: could_not_read is in SKIPPED_DOC_TYPES, so a candidate handed to
+  // processStoredDocument in retry_skipped mode is read by the AI again.
+  //
+  // What this test proves, exactly: with ONLY terminal unreadable documents present, the reader
+  // loop receives nothing and the notice loop receives them all. It does NOT prove that the notice
+  // loop is incapable of calling a reader — `run` is a dependency only the reader loop reads, so
+  // counting it can never show that. The absence of a reader CALL inside the notice loop and
+  // inside unreadable-delivery.ts is a source-level guarantee, asserted by the [UPLOAD-TRUTH-1]
+  // gates in lifecycle-gates.test.ts. Naming that split here so the two are not confused again.
+  const db = new Fake()
+  db.rows = [unread({ id: "a" }), unread({ id: "b" })]
+  let readerCalls = 0
+  const delivered: string[] = []
+  const report = await runIntakeDrain({
+    pipeline: db, now: NOW,
+    run: (async () => { readerCalls += 1; return { kind: "gone" as const } }),
+    deliver: (async ({ documentId }: { documentId: string }) => {
+      delivered.push(documentId)
+      return { kind: "delivered" as const }
+    }),
+  })
+  assert.equal(readerCalls, 0, "the reader loop was offered nothing — no paid re-read of a finished document")
+  assert.deepEqual(delivered, ["a", "b"], "both owed owners were told")
+  assert.deepEqual(report.notices, { kind: "scanned", picked: 2, outcomes: { delivered: 2 } })
+})
+
+test("[UPLOAD-TRUTH-1] one notice that throws does not stop the rest of the pass", async () => {
+  const db = new Fake()
+  db.rows = [unread({ id: "a" }), unread({ id: "b" }), unread({ id: "c" })]
+  const seen: string[] = []
+  const report = await runIntakeDrain({
+    pipeline: db, now: NOW,
+    run: (async () => ({ kind: "gone" as const })),
+    deliver: (async ({ documentId }: { documentId: string }) => {
+      seen.push(documentId)
+      if (documentId === "b") throw new Error("boom")
+      return { kind: "delivered" as const }
+    }),
+  })
+  assert.deepEqual(seen, ["a", "b", "c"])
+  assert.equal(report.notices.kind === "scanned" ? report.notices.outcomes.threw : 0, 1)
+  assert.equal(report.notices.kind === "scanned" ? report.notices.outcomes.delivered : 0, 2)
+})
+
+test("[UPLOAD-TRUTH-1] the reader loop and the notice loop stay separate sets", async () => {
+  // A waiting document is read; a terminal unreadable one is only announced. Neither crosses.
+  const db = new Fake()
+  db.rows = [doc({ id: "wachtend" }), unread({ id: "onleesbaar" })]
+  const read: string[] = []
+  const told: string[] = []
+  await runIntakeDrain({
+    pipeline: db, now: NOW,
+    run: (async (args: { documentId: string }) => { read.push(args.documentId); return { kind: "gone" as const } }),
+    deliver: (async ({ documentId }: { documentId: string }) => { told.push(documentId); return { kind: "delivered" as const } }),
+  })
+  assert.deepEqual(read, ["wachtend"], "only the waiting document reaches the reader")
+  assert.deepEqual(told, ["onleesbaar"], "only the terminal one is announced")
 })
