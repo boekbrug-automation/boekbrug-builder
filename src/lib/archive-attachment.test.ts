@@ -100,3 +100,19 @@ test("[ARCHIEF-OPEN] precies op de grens mag nog", () => {
   assert.equal(opDeGrens.take.length, MAX_ENTRIES);
   assert.equal(opDeGrens.refusedWhole, undefined);
 });
+
+test("[ARCHIEF-WAAR] chrome is refused silently; a real file is refused with a way out", () => {
+  // A panel line per `__MACOSX` shadow file is the noise that makes an owner stop reading the
+  // panel; a real file refused without an action leaves them with a document and nowhere to put it.
+  for (const naam of ["__MACOSX/._factuur.pdf", ".DS_Store", "map/"]) {
+    const v = judgeEntry({ filename: naam, bytes: 100 });
+    assert.equal(v.take, false);
+    assert.equal((v as { silent?: boolean }).silent, true, `${naam} should be silent`);
+  }
+  for (const naam of ["virus.exe", "binnenin.zip", "enorm.pdf"]) {
+    const v = judgeEntry({ filename: naam, bytes: naam === "enorm.pdf" ? 11 * 1024 * 1024 : 100 });
+    assert.equal(v.take, false);
+    assert.notEqual((v as { silent?: boolean }).silent, true, `${naam} must be shown`);
+    assert.match((v as { reason: string }).reason, /Uploaden/, `${naam}: no owner action`);
+  }
+});

@@ -20,10 +20,11 @@ import { createPipelineClient } from '@/lib/supabase-pipeline'
 import { throttledFetch, beginThrottleBudget } from '@/lib/mail-throttle'
 import { ownedStoragePath } from '@/lib/storage-path'
 // [BRIDGE-EXTRACT] byte-hash dedup — één bestand → één hash → één record
-import { expandArchives } from "@/lib/archive-expand";
+// [ARCHIEF-WAAR] One archive at a time, with an outcome per member — see the planning step below.
+import { openArchive, type ArchiveRefusal } from "@/lib/archive-expand";
 // [OVERSLAG-VERJAART] Het antwoord van de app zelf op "kan ik dit openen" — zie PHASE 0.
-import { isOpenableArchive } from "@/lib/archive-attachment";
-import { judgeKeepable } from "@/lib/turnover-keepable";
+import { isOpenableArchive, ARCHIVE_MIME } from "@/lib/archive-attachment";
+import { judgeKeepable, couldBeBookableFile, type KeepVerdict } from "@/lib/turnover-keepable";
 import { computeContentHash } from '@/lib/content-hash'
 // [EIGEN-POST] Het ene adres waar dit product vandaan mailt, en de twee vormen waarin de sync het
 // nodig heeft. Afgeleid van MAIL_FROM_ADDRESS — zie de kop van dat bestand voor waarom deze poort
@@ -75,6 +76,17 @@ import { storageRoom, storageFits, type StorageRoom } from '@/lib/fair-use-gate'
  * failed". The difference decides the watermark: a failure may be given up on, a full disk may not.
  */
 const STORAGE_FULL = 'storage_full' as const
+/**
+ * [ARCHIEF-WAAR] "Keeping it failed": the bytes are not in storage or the row is not written. It
+ * was `null`, and null read as "done" to four of the five callers — a till closing could be
+ * registered as kept while nothing was stored anywhere. A caller that gets this HOLDS.
+ */
+const NOT_STORED = 'not_stored' as const
+/**
+ * [ARCHIEF-WAAR] What keeping an attachment produced. `registered` is whether the NEXT sync will
+ * know it — a stored file the registry does not know about is re-read and re-charged every run.
+ */
+type KeepResult = { documentId: string; registered: boolean } | typeof STORAGE_FULL | typeof NOT_STORED
 import { planForUser } from '@/lib/fair-use-gate'
 // [BON-EMAIL] The payment question, answered in ONE place for every door. The camera path and this
 // one must never disagree about whether a bon was paid — a second copy of that reasoning here is
@@ -690,15 +702,14 @@ export interface GmailAttachment {
   fromBody?: boolean
   /**
    * [ARCHIEF-OPEN] This attachment came OUT of a zip; it never hung on the mail under this name.
-   * That matters in exactly one place, and it is a money-safety place: the watermark. A normal
-   * attachment that fails to classify holds the mark, so the next sync fetches the same message and
-   * tries again. An unpacked one cannot — its parent archive is marked complete unconditionally
-   * (it has to be, or one corrupt zip freezes the mailbox forever), so the mark walks past and the
-   * retry never comes. PHASE 2 therefore keeps an archive entry's bytes the moment a read fails,
-   * instead of trusting a retry that will not happen. Absent on every attachment that really was
-   * attached.
+   * [ARCHIEF-WAAR] Its archive is complete only when every member is — see the completion step
+   * after PHASE 2 — so a member that fails is retried exactly like a loose attachment: the archive
+   * stays open, the watermark holds, the next sync opens the zip again. Absent on every attachment
+   * that really was attached.
    */
   fromArchive?: boolean
+  /** [ARCHIEF-WAAR] `${messageId}:${filename}` of the archive this member came out of. */
+  archiveKey?: string
 }
 
 // [EMAIL→BANK] A machine-readable bank statement (MT940 / CAMT.053 / bank CSV) seen as an
@@ -1061,7 +1072,7 @@ async function fetchMessageAttachments(
       // inline/forwarded parts; isLikelyInvoiceCandidate already treats 0 as "keep" (a PDF
       // always passes). Dropping here first contradicted that and lost real attachments.
       if (!filename) continue
-      const mimeType = normalizeAttachmentMime(rawMime, filename)
+      const mimeType = resolveAttachmentMime(rawMime, filename)
       if (!mimeType) {
         // [EMAIL→BANK] This attachment is being DROPPED (unreadable MIME — not a pdf/image the
         // classifier can read). If its name looks like a machine-readable bank statement (MT940
@@ -1606,7 +1617,7 @@ async function readEmbeddedMessageAttachments(
   const raw = value.bytes
   // normalizeAttachmentMime is INJECTED, never reimplemented: "which types can we read" must have
   // exactly one answer, or a file is dropped by one door and accounted for by the other.
-  const found = extractMimeAttachments(raw, { normalizeMime: normalizeAttachmentMime })
+  const found = extractMimeAttachments(raw, { normalizeMime: resolveAttachmentMime })
   const items = found.map((f) => ({ ...f, filename: uniqueAttachmentName(f.filename, takenNames) }))
 
   // Nothing readable inside. Say so only when the paper really was a message: a mis-guessed
@@ -1749,7 +1760,7 @@ async function fetchOutlookMessageAttachments(
 
     // [H2] Same mislabelled-MIME recovery as Gmail — a real PDF/image sent with a generic
     // content-type is normalised by extension instead of being dropped unseen.
-    const mimeType = normalizeAttachmentMime(rawMime, filename)
+    const mimeType = resolveAttachmentMime(rawMime, filename)
     if (!mimeType) {
       // [EMAIL→BANK] Being dropped (unreadable MIME). Surface a machine-readable bank statement
       // (MT940 / CAMT.053 / bank CSV) instead of losing it silently. Inside the null-MIME branch
@@ -2172,6 +2183,21 @@ export function normalizeAttachmentMime(mimeType: string, filename: string): str
 }
 
 /**
+ * [ARCHIEF-WAAR] The one answer to "which attachment types does the mail door take in": the types
+ * a reader can open, plus the archives the sync opens itself.
+ *
+ * A zip used to fall out of normalizeAttachmentMime as null and down the "cannot read this format"
+ * branch — before the archive step that exists to open it ever saw it. So the daily till closing
+ * was written off as unreadable every day while the code to read it sat unused. This wrapper does
+ * NOT teach the classifier anything: a zip never reaches a reader as a zip. It only routes the
+ * envelope to the expansion step. Both walkers and the forwarded-message reader call THIS, so the
+ * three doors cannot disagree about what comes in.
+ */
+export function resolveAttachmentMime(mimeType: string, filename: string): string | null {
+  return normalizeAttachmentMime(mimeType, filename) ?? (isOpenableArchive(filename) ? ARCHIVE_MIME : null)
+}
+
+/**
  * [OVERSLAG-ZICHTBAAR] Waarom is deze bijlage NIET meegenomen — en moet de eigenaar dat weten?
  *
  * Elke weigering hieronder valt in precies één van twee bakken, en het verschil is het hele punt:
@@ -2209,6 +2235,13 @@ export interface AttachmentTriage {
   /** null wanneer er niets te melden valt. */
   kind: AttachmentSkipKind | null
 }
+
+/**
+ * [ARCHIEF-WAAR] The types verifyInvoiceFromPdf hands to the MODEL (a PDF, or one of four image
+ * types); every other type is answered without one. The sync reserves the monthly read allowance
+ * for exactly these — a gate keeps this set equal to the reader's own branches.
+ */
+const MODEL_READ_MIMES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 /** Alles wat wél binnenkwam maar niet gelezen is, reist hier langs. */
 const KEEP: AttachmentTriage = { keep: true, reason: null, kind: null }
@@ -2290,6 +2323,11 @@ export function triageAttachment(att: {
 
   // PDF's gaan altijd door — het sterkste factuursignaal, nooit op omvang of naam gefilterd.
   if (att.mimeType === 'application/pdf') return KEEP
+
+  // [ARCHIEF-WAAR] An archive the sync will open. BELOW the size ceiling on purpose: an envelope over
+  // 10 MB is reported and never downloaded, like any other oversized attachment. And ABOVE the
+  // image-only rule below, which would otherwise drop it with no row at all.
+  if (att.mimeType === ARCHIVE_MIME) return KEEP
 
   // Niet-afbeelding, niet-PDF hoort hier niet te komen (de fetchers filteren al op MIME); als het
   // toch gebeurt, is het geen factuur die wij kunnen lezen.
@@ -2907,19 +2945,27 @@ export async function syncUserEmails(
   //
   // Check A stays in the save loop too (cheap, belt-and-braces + the DB unique
   // index); Check B (content match) must stay there — it needs AI output.
-  const allKeys = attachments.map((a) => `${a.messageId}:${a.filename}`)
   const knownKeys = new Set<string>()
-  if (allKeys.length > 0) {
+  // [ARCHIEF-WAAR] One reader for "is this key already handled?", used for the fetched attachments
+  // here AND for the members that come out of an archive further down — the same two tables, the
+  // same :dubbel fold, the same archive exemption, so a member cannot be judged by a second rule.
+  //
+  // It answers `false` when a read FAILED. That used to be impossible to see: `{ data }` was
+  // destructured, the error dropped, and an unreachable registry read as an empty one — every
+  // handled attachment in the window was then new again, re-read through the model and re-reserved
+  // against the owner's allowance. A failed read is UNKNOWN, and nothing may be decided on it.
+  const readKnownKeys = async (keys: string[], into: Set<string>): Promise<boolean> => {
     // Chunk the IN() to stay well under URL/param limits on big backfills.
-    for (const keyChunk of chunkArray(allKeys, 100)) {
-      const { data: existingRows } = await supabase
+    for (const keyChunk of chunkArray(keys, 100)) {
+      const { data: existingRows, error: existingErr } = await supabase
         .from('invoices')
         .select('source_message_id')
         .eq('receiver_id', userId)
         .eq('source', 'email')
         .in('source_message_id', keyChunk)
+      if (existingErr) return false
       for (const row of (existingRows ?? []) as Array<{ source_message_id: string | null }>) {
-        if (row.source_message_id) knownKeys.add(row.source_message_id)
+        if (row.source_message_id) into.add(row.source_message_id)
       }
       // [BOEK-011] Also skip attachments we previously classified as NOT an
       // invoice (logos, signatures, catalogs). Without this registry they left
@@ -2936,11 +2982,12 @@ export async function syncUserEmails(
       // day, visible in production as hour-on-hour identical audit rows (the FAMZFOOD trail:
       // one rejected message id logged 14× in 32 hours). A supplier who re-attaches old invoices
       // to every mail — FAMZFOOD does — turns that into a standing daily cost.
-      const { data: skippedRows } = await supabase
+      const { data: skippedRows, error: skippedErr } = await supabase
         .from('email_skipped_attachments')
         .select('source_message_id, filename')
         .eq('user_id', userId)
         .in('source_message_id', [...keyChunk, ...keyChunk.map((k) => `${k}:dubbel`)])
+      if (skippedErr) return false
       for (const row of (skippedRows ?? []) as Array<{ source_message_id: string | null; filename: string | null }>) {
         const id = row.source_message_id
         if (!id) continue
@@ -2959,8 +3006,22 @@ export async function syncUserEmails(
         // dan verjaren de overslagen daarvan dezelfde minuut mee — zonder dat iemand hier iets moet
         // bijhouden. Een lijst met redenen zou precies dat wél vragen, en verouderen.
         if (isOpenableArchive(row.filename)) continue
-        knownKeys.add(id.endsWith(':dubbel') ? id.slice(0, -':dubbel'.length) : id)
+        into.add(id.endsWith(':dubbel') ? id.slice(0, -':dubbel'.length) : id)
       }
+    }
+    return true
+  }
+  const allKeys = attachments.map((a) => `${a.messageId}:${a.filename}`)
+  if (!(await readKnownKeys(allKeys, knownKeys))) {
+    // [ARCHIEF-WAAR] Nothing is decided on an unread registry: no model call, no reservation, no
+    // key completed, and the watermark untouched. Everything stays in the mailbox for the next run,
+    // which is the one outcome that cannot lose or double anything.
+    console.error('[ARCHIEF-WAAR] the known-attachment registry could not be read — holding the whole run', { userId })
+    return {
+      provider: tokens.provider, fetched: attachments.length, verified: 0, saved: 0, autoAdvanced: 0,
+      errors: 1, remaining: attachments.length, heldByFairUse: 0, storageHeld: 0, readerOutage: false,
+      skipped: 0, couldNotRead: 0, keptForBooking: 0,
+      balance: { fetched: attachments.length, imported: 0, skipped: 0, couldNotRead: 0, duplicate: 0, pending: attachments.length, balanced: true },
     }
   }
 
@@ -2996,10 +3057,15 @@ export async function syncUserEmails(
   const blockedBySender = blockedSenders.size
     ? notKnown.filter((a) => senderIsBlocked(a.from, blockedSenders))
     : []
+  // [ARCHIEF-WAAR] Whether the owner's "ignore this sender" rows are on record. Only then is a
+  // blocked attachment DONE this run — see where completedKeys is built. It matters for an archive
+  // in particular: an archive's own row never makes it "known" (PHASE 0 deliberately expires those),
+  // so a zip from a blocked sender would otherwise stay open forever and hold the watermark.
+  let blockedRegistered = false
   if (blockedBySender.length > 0) {
     try {
       const skipPipeline = createPipelineClient()
-      await skipPipeline.from('email_skipped_attachments').upsert(
+      const { error: blockedErr } = await skipPipeline.from('email_skipped_attachments').upsert(
         blockedBySender.map((a) => ({
           user_id: userId,
           source_message_id: `${a.messageId}:${a.filename}`,
@@ -3008,6 +3074,8 @@ export async function syncUserEmails(
         })),
         { onConflict: 'user_id,source_message_id', ignoreDuplicates: true }
       )
+      blockedRegistered = !blockedErr
+      if (blockedErr) console.error('[AFZENDERREGEL] kon overgeslagen bijlage niet registreren', blockedErr.message)
     } catch (e) {
       // De registratie is de verantwoording, niet de blokkade zelf. Mislukt hij, dan wordt de
       // bijlage nog steeds overgeslagen — maar we laten het niet in stilte gebeuren.
@@ -3043,7 +3111,87 @@ export async function syncUserEmails(
     if (Number.isFinite(raw) && raw >= 1 && raw <= 100) return Math.round(raw)
     return 40
   })()
-  const batchCandidates = freshAll.slice(0, SYNC_BATCH_MAX)
+  // ── [ARCHIEF-WAAR] The batch is counted in DOCUMENTS that need work, not in envelopes ─────────
+  //
+  // The cap used to be a slice over the fetched attachments, with a zip counting as one. That was
+  // wrong in both directions. A zip of twelve closings took one place and cost twelve reads against
+  // one reservation. And a zip whose contents were ALL handled already still took a place on every
+  // run — it is never "known" itself (only its members are), so a backfill over forty handled zips
+  // re-selected the same forty every round and never reached the forty-first.
+  //
+  // So archives are opened HERE, one at a time, oldest first, and only the members that still need
+  // work take a place. A member already handled costs nothing. An archive whose members are all
+  // handled costs nothing. Opening is local work (no model, no storage); a member's bytes are kept
+  // only when it takes a place, so memory stays bounded by the cap.
+  type ArchiveRun = {
+    key: string
+    messageId: string
+    filename: string
+    memberKeys: string[]
+    refusals: ArchiveRefusal[]
+    refusedWhole: boolean
+    /** The member lookup failed. UNKNOWN: nothing about this archive is decided this run. */
+    registryUnknown: boolean
+    /** Members that did not get a place this run (batch full). */
+    unreached: number
+  }
+  const archiveRuns: ArchiveRun[] = []
+  const batchCandidates: GmailAttachment[] = []
+  /** Units of work left for a later run — the backlog the client keeps pressing through. */
+  let notReached = 0
+  for (const a of freshAll) {
+    if (batchCandidates.length >= SYNC_BATCH_MAX) { notReached++; continue }
+    if (!isOpenableArchive(a.filename)) { batchCandidates.push(a); continue }
+    const opened = await openArchive(a)
+    const run: ArchiveRun = {
+      key: opened.archiveKey,
+      messageId: a.messageId,
+      filename: a.filename,
+      memberKeys: opened.members.map((m) => `${m.messageId}:${m.filename}`),
+      refusals: opened.refusals,
+      refusedWhole: opened.refusedWhole,
+      registryUnknown: false,
+      unreached: 0,
+    }
+    archiveRuns.push(run)
+    if (opened.members.length === 0) continue
+    const memberKnown = new Set<string>()
+    if (!(await readKnownKeys(run.memberKeys, memberKnown))) {
+      console.error('[ARCHIEF-WAAR] member registry unreadable — archive left for the next run', { key: run.key })
+      run.registryUnknown = true
+      continue
+    }
+    for (const m of opened.members) {
+      const k = `${m.messageId}:${m.filename}`
+      if (memberKnown.has(k)) { knownKeys.add(k); continue }
+      if (batchCandidates.length >= SYNC_BATCH_MAX) { run.unreached++; notReached++; continue }
+      batchCandidates.push(m)
+    }
+  }
+
+  // ── [ARCHIEF-WAAR] A till closing is recognised by the reader that books it, BEFORE any model ──
+  //
+  // The daily closing was sent to the model first and to the deterministic till reader only when the
+  // model said "not an invoice". That order let a model that misread a Z-report as a receipt turn
+  // the owner's own turnover into a purchase invoice, and it charged a read for a file a local
+  // parser recognises for free. The question "would /api/documents/reprocess book this?" is now
+  // asked first, of the real bytes; a yes is kept for booking and never reaches the model or the
+  // invoice path. Nothing is BOOKED here — [ZELF-EERST]: an unattended sync does not book money.
+  const tillKeep = new Map<string, KeepVerdict>()
+  for (const a of batchCandidates) {
+    if (!couldBeBookableFile(a.filename)) continue
+    const verdict = await judgeKeepable(a.filename, Buffer.from(a.data, 'base64'), await loadBookableReaders())
+    if (verdict.keep && verdict.kind) tillKeep.set(`${a.messageId}:${a.filename}`, verdict)
+  }
+  /**
+   * [ARCHIEF-WAAR] Does this document cost a MODEL read? Only what verifyInvoiceFromPdf actually
+   * sends to the model does: a PDF or one of the four image types. An e-invoice XML is read
+   * mechanically, a recognised till closing is not read at all, and any other type (a .csv, a .heic
+   * out of a zip) is answered "unsupported" without a call — reserving the owner's allowance for
+   * those would charge them for reads that never happen.
+   */
+  const costsModelRead = (a: GmailAttachment): boolean =>
+    MODEL_READ_MIMES.has(a.mimeType) && !tillKeep.has(`${a.messageId}:${a.filename}`)
 
   // ── [EERLIJK-GEBRUIK] De maandteller telt eindelijk ook hier mee ────────────────────────
   //
@@ -3083,7 +3231,7 @@ export async function syncUserEmails(
   // zonder model en zonder kosten. Die meetellen zou de eigenaar laten betalen voor iets gratis —
   // en erger, echte facturen uit de maandgrens duwen die wél gelezen moeten worden. Ze gaan er dus
   // altijd doorheen, ook wanneer de grens bereikt is; de volgorde van de rest blijft gelijk.
-  const aiCandidates = batchCandidates.filter((a) => !isEInvoiceXmlMime(a.mimeType))
+  const aiCandidates = batchCandidates.filter((a) => costsModelRead(a))
   // [OPSLAG-DEUR] `batchCandidates`, not `aiCandidates`: an e-factuur XML costs no AI read but it
   // still takes room on the disk, so the plan has to be known whenever there is anything to STORE.
   // The "don't add a query to an empty sync" rule the comment above is about is untouched — a sync
@@ -3169,12 +3317,14 @@ export async function syncUserEmails(
   // meetellen als plek en dus alsnog een echte factuur wegdrukken.
   let aiBudget = fairUse.granted
   const freshAttachments = batchCandidates.filter((a) => {
-    if (isEInvoiceXmlMime(a.mimeType)) return true
+    if (!costsModelRead(a)) return true
     if (aiBudget <= 0) return false
     aiBudget--
     return true
   })
-  const remainingAfterBatch = freshAll.length - freshAttachments.length
+  // [ARCHIEF-WAAR] Everything that did not get a place, plus everything that got one but no read
+  // allowance. Counted in documents, like the batch itself.
+  const remainingAfterBatch = notReached + (batchCandidates.length - freshAttachments.length)
 
   // [POISON-PILL] Consecutive-failure guard for the watermark. The mark walks messages oldest-first
   // and stops at the first with an attachment that didn't finish this run — correct for a genuine
@@ -3233,57 +3383,69 @@ export async function syncUserEmails(
     aiDocType: string = DOC_TYPE_COULD_NOT_READ,
     // [HERINNERING-NOOIT] A reminder WAS read; the caller says so. Every other kept file was not.
     opts: { aiProcessed?: boolean } = {},
-    // [OPSLAG-DEUR] STORAGE_FULL is a THIRD answer, not a flavour of null. `null` here already
-    // means "could not keep it" and four of the five callers answer that by letting the watermark
-    // pass — which is right for a failure and catastrophic for a full disk, because the mail would
-    // be marked done while nothing was stored. A distinct value makes the compiler ask each caller
-    // what it wants to do, exactly as it did for the AI account id.
-  ): Promise<string | null | typeof STORAGE_FULL> => {
+    // [OPSLAG-DEUR] STORAGE_FULL is a THIRD answer, not a flavour of a failure: a failure may be given
+    // up on, a full disk may not, because the mail would be marked done while nothing was stored.
+    // [ARCHIEF-WAAR] …and a failure is NOT_STORED, never null. `null` read as "done" to four of the
+    // five callers, and this function then wrote a registry row with the caller's "kept" reason for
+    // bytes that existed nowhere — a till closing registered as "klaar om te boeken" with no file.
+  ): Promise<KeepResult> => {
+    let documentId: string | null = null
     try {
       const buf = Buffer.from(att.data, 'base64')
       const hash = computeContentHash(buf)
-      const { data: dupDoc } = await supabase
+      const { data: dupDoc, error: dupErr } = await supabase
         .from('documents').select('id, trashed')
         .eq('user_id', userId).eq('content_hash', hash).limit(1).maybeSingle()
+      // [ARCHIEF-WAAR] A failed probe is not "no duplicate". Storing on it would write a second copy
+      // under the unique hash index — or fail on it and be read as a storage error. Hold instead.
+      if (dupErr) return NOT_STORED
       // [DUP-TRASHED] Ook het onleesbare-bijlage-pad: botst het op een weggegooide rij, dan is er
       // niets meer om naar te verwijzen en hoort de bijlage gewoon opnieuw bewaard te worden.
-      if (dupDoc && !(await trashedDuplicateCleared(supabase, userId, dupDoc))) return dupDoc.id
-      // [OPSLAG-DEUR] AFTER the duplicate check, deliberately: these exact bytes are already on the
-      // disk, so handing back the row that holds them costs nothing and must keep working on a full
-      // account. The limit is about ADDING, never about reaching what is already there.
-      if (!roomFor(buf.length)) {
-        storageHeld++
-        return STORAGE_FULL
-      }
-      {
+      if (dupDoc && !(await trashedDuplicateCleared(supabase, userId, dupDoc))) {
+        documentId = dupDoc.id
+      } else {
+        // [OPSLAG-DEUR] AFTER the duplicate check, deliberately: these exact bytes are already on the
+        // disk, so handing back the row that holds them costs nothing and must keep working on a full
+        // account. The limit is about ADDING, never about reaching what is already there.
+        if (!roomFor(buf.length)) {
+          storageHeld++
+          return STORAGE_FULL
+        }
         const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
         const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
         const { error: upErr } = await supabase.storage
           .from('documents').upload(storagePath, buf, { contentType: att.mimeType, upsert: false })
-        if (!upErr) {
-          tookRoom(buf.length)
-          const folderId = await resolveImportTarget(userId, null, 'facturen', 'pipeline')
-          const { data: docRow, error: docErr } = await supabase.from('documents').insert({
-            user_id: userId,
-            file_name: att.filename,
-            file_url: storagePath,
-            file_size: buf.length,
-            file_type: att.mimeType,
-            doc_type: 'overig',
-            folder_id: folderId,
-            source: 'email',
-            ai_processed: opts.aiProcessed === true, // false unless the caller READ it — never claim we did
-            // [OBSERVABILITY] The shared constant, not the string. skipped-import.ts exists because
-            // the WRITER and the READER of this column once used different values, and a kept file
-            // then counted as nothing: the panel said "Niets overgeslagen" over an unread invoice.
-            // That file promises "een test die faalt zodra iemand er één verplaatst" — and this
-            // writer was still typing the literal, so the promise held for every door but this one.
-            ai_doc_type: aiDocType,
-            content_hash: hash,
-          }).select('id').single()
-          if (docErr) await supabase.storage.from('documents').remove([storagePath])
-          else return (docRow as { id: string } | null)?.id ?? null
+        if (upErr) {
+          console.error('[ARCHIEF-WAAR] kept attachment could not be uploaded — held', { filename: att.filename, error: upErr.message })
+          return NOT_STORED
         }
+        tookRoom(buf.length)
+        const folderId = await resolveImportTarget(userId, null, 'facturen', 'pipeline')
+        const { data: docRow, error: docErr } = await supabase.from('documents').insert({
+          user_id: userId,
+          file_name: att.filename,
+          file_url: storagePath,
+          file_size: buf.length,
+          file_type: att.mimeType,
+          doc_type: 'overig',
+          folder_id: folderId,
+          source: 'email',
+          ai_processed: opts.aiProcessed === true, // false unless the caller READ it — never claim we did
+          // [OBSERVABILITY] The shared constant, not the string. skipped-import.ts exists because
+          // the WRITER and the READER of this column once used different values, and a kept file
+          // then counted as nothing: the panel said "Niets overgeslagen" over an unread invoice.
+          // That file promises "een test die faalt zodra iemand er één verplaatst" — and this
+          // writer was still typing the literal, so the promise held for every door but this one.
+          ai_doc_type: aiDocType,
+          content_hash: hash,
+        }).select('id').single()
+        const insertedId = (docRow as { id: string } | null)?.id ?? null
+        if (docErr || !insertedId) {
+          await supabase.storage.from('documents').remove([storagePath])
+          console.error('[ARCHIEF-WAAR] kept attachment row could not be written — held', { filename: att.filename, error: docErr?.message })
+          return NOT_STORED
+        }
+        documentId = insertedId
       }
     } catch (e) {
       // [LEES] This is the failure that makes an attachment exist NOWHERE: not in bestanden, not
@@ -3292,27 +3454,35 @@ export async function syncUserEmails(
       console.error('[BOEK-011] could-not-read save failed', e)
       reportHandledFailure({
         tag: 'LEES', severity: 'data-integrity',
-        message: 'unreadable e-mail attachment could not be SAVED — it now exists nowhere the owner can see',
+        message: 'unreadable e-mail attachment could not be SAVED — it is held for the next sync',
         context: { userId, filename: att.filename, error: e instanceof Error ? e.message : String(e) },
       })
+      return NOT_STORED
     }
-    // NB: the skip upsert is inside its OWN try/catch — this function must NEVER throw (its callers
-    // run inside the PHASE-2 try/catch, and a throw here would double-count the attempt and abort
-    // the whole sync before the watermark advance).
+
+    // [ARCHIEF-WAAR] Kept is only half of it: the NEXT sync must know. PHASE 0 knows an attachment by
+    // its invoice or by this registry row, and a kept file has no invoice — so without the row it is
+    // new again on every run inside the fetch window, read through the model again and reserved
+    // against the owner's allowance again. This row was written on every keep until 939406f1 moved
+    // the returns above it. The error is read: a keep the registry does not know about is reported
+    // as unregistered, and the caller holds rather than calling it done.
+    let registered = false
     try {
-      await supabase
+      const { error: regErr } = await supabase
         .from('email_skipped_attachments')
         .upsert(
           {
             user_id: userId,
             source_message_id: `${att.messageId}:${att.filename}`,
             filename: att.filename,
-            reason,
+            reason: reason.slice(0, 200),
           },
           { onConflict: 'user_id,source_message_id', ignoreDuplicates: true }
         )
+      registered = !regErr
+      if (regErr) console.error('[ARCHIEF-WAAR] kept attachment could not be registered — held', { filename: att.filename, error: regErr.message })
     } catch (e) {
-      console.error('[BOEK-011] skip-registry upsert failed (non-fatal)', e)
+      console.error('[BOEK-011] skip-registry upsert failed', e)
       // [LEES] Same shelf, other half: without the registry row the skipped panel says
       // "Niets overgeslagen" over a real unread file.
       reportHandledFailure({
@@ -3321,8 +3491,15 @@ export async function syncUserEmails(
         context: { userId, filename: att.filename, error: e instanceof Error ? e.message : String(e) },
       })
     }
-    return null
+    return { documentId, registered }
   }
+
+  /**
+   * [ARCHIEF-WAAR] Is a keep DONE? Only when the bytes are stored AND the registry knows the key.
+   * Anything less holds: the watermark stays behind the mail and the next sync finishes the job.
+   */
+  const keptDurably = (r: KeepResult): r is { documentId: string; registered: true } =>
+    typeof r === 'object' && r.registered === true
 
   // Record ONE failed processing attempt for an attachment. Returns true when it has now EXHAUSTED
   // its retries and was given up (kept owner-visible + terminal skip), so the caller lets the mark
@@ -3359,8 +3536,11 @@ export async function syncUserEmails(
     // [OPSLAG-DEUR] Giving up on a broken attachment still KEEPS its bytes, so a full disk means we
     // cannot give up either: returning true would retire it with nothing stored. Stay un-given-up
     // and let the next sync try again once there is room.
-    if (await saveKeptAttachment(att, 'repeatedly_failed') === STORAGE_FULL) return false
-    return true
+    // [ARCHIEF-WAAR] And a give-up that kept nothing is not a give-up: retiring the attachment with
+    // no stored file and no registry row is the silent loss the poison pill must never become.
+    const kept = await saveKeptAttachment(att, 'repeatedly_failed')
+    if (kept === STORAGE_FULL) return false
+    return keptDurably(kept)
   }
 
   console.log('[BOEK-011] Sync scope', {
@@ -3385,42 +3565,27 @@ export async function syncUserEmails(
     ? readingPromptHint(await loadReadingMemory(supabase, userId))
     : null
 
-  // [ARCHIEF-OPEN] Zips vervangen door wat erin zit, VÓÓR de classificatie. Daarmee loopt een
-  // uitgepakt bestand exact hetzelfde pad als een losse bijlage: dezelfde lezer, dezelfde
-  // dubbelpoorten, dezelfde verificatierij. Een archief is een envelop, geen achterdeur.
-  //
-  // Gemeten, niet aangenomen: van 410 overgeslagen bijlagen waren er 40 archieven, en 29 daarvan
-  // heten "Jouw dagafsluiting - DDMMYY HHMM.zip" — de kassa-afsluiting, elke dag, 28 losse dagen
-  // tussen 6 augustus en 2 september. Die zip is de KASSAKANT van de kaartomzet, en zonder hem
-  // heeft daily_turnover nul dagen in Q1 en Q3 terwijl er € 253.439 aan pos_income binnenkomt.
-  // financial-result.ts onderdrukt een kaartuitbetaling alleen tegen een gedekte dag; ontbreekt
-  // die, dan valt het bedrag door naar omzet ZONDER tarief — een `missing` die het kwartaal
-  // blokkeert. Eén containerformaat, en de aangifte staat stil.
-  const uitgepakt = await expandArchives(freshAttachments)
-  // PHASE 0's known-key filter ran BEFORE the archives were opened, so it never saw these entries:
-  // they carry keys (`messageId:entryname`) that did not exist when it ran. Without this second
-  // pass the same till closing is sent to Claude on EVERY sync for as long as its message stays
-  // inside the fetch window — paid for, rate-limited against, and thrown away at the duplicate gate
-  // each time. Same set, same question, one line later.
-  const attachmentsToClassify = uitgepakt.attachments.filter(
-    (a) => !knownKeys.has(`${a.messageId}:${a.filename}`),
-  )
-  // De geweigerde inhoud komt in hetzelfde paneel als elke andere overslag — met reden. Stil
-  // overslaan is precies wat die 410 regels waren.
-  if (uitgepakt.skipped.length > 0) {
-    unread.push(...uitgepakt.skipped.map((s) => ({
-      messageId: `archive:${s.filename}`,
-      filename: s.filename,
-      reason: s.reason,
-      kind: 'unreadable-format' as const,
-    })))
-  }
+  // [ARCHIEF-WAAR] The archives were opened in the planning step above, before the batch and the
+  // allowance were decided, so what reaches the reader here is already documents — members and loose
+  // attachments alike, each checked against the registry under its own key.
+  const attachmentsToClassify = freshAttachments
 
   // PHASE 1 — classify only NEW attachments in parallel (AI_CONCURRENCY in flight)
   const classified: Classified[] = await mapConcurrent(
     attachmentsToClassify,
     AI_CONCURRENCY,
     async (attachment) => {
+      // [ARCHIEF-WAAR] A recognised till closing is not read by the model at all; its verdict was
+      // reached above from the real bytes. It goes on as "not an invoice, confidently" so PHASE 2
+      // keeps it for booking — and it can never become a purchase invoice.
+      const till = tillKeep.get(`${attachment.messageId}:${attachment.filename}`)
+      if (till) {
+        return {
+          attachment,
+          classification: { isInvoice: false, confidence: 1, reason: till.reason } as Awaited<ReturnType<typeof classifyAttachment>>,
+          classifyFailed: false,
+        }
+      }
       try {
         const classification = await classifyAttachment(
           userId,
@@ -3500,34 +3665,11 @@ export async function syncUserEmails(
   // classifyFailed and save/processing errors are deliberately NOT in this set —
   // the watermark must not advance past them (they need a re-fetch to retry).
   const completedKeys = new Set<string>()
-  // [ARCHIEF-OPEN] Een uitgepakt archief is afgehandeld onder ZIJN EIGEN naam. De watermerkcontrole
-  // hieronder loopt over de oorspronkelijk opgehaalde bijlagen en eist elke sleutel terug; de zip
-  // is daar vervangen door zijn inhoud en zou dus eeuwig openstaan. Het bericht las dan als
-  // onvoltooid, het watermerk schoof nooit op, en de sync bleef rondlopen — precies de bevroren
-  // watermerk-bug waar [H3] en [NAN-DATE-GUARD] hierboven voor bestaan.
-  for (const k of uitgepakt.consumedKeys) completedKeys.add(k)
-
-  // [OVERSLAG-VERJAART] En nu het archief écht is uitgepakt, mag zijn overslagregel weg. Die zei
-  // "we konden dit bestandstype niet lezen", en dat is niet meer waar. Laat je hem staan, dan wordt
-  // dezelfde zip elke sync opnieuw opgehaald en uitgepakt zolang het bericht binnen het venster
-  // valt — geen modelkosten (de inhoud zit dan in knownKeys), wel werk dat nergens toe leidt.
-  //
-  // Niet-fataal: mislukt het opruimen, dan is het enige gevolg dat het archief nog een keer wordt
-  // opengemaakt. De inhoud is dan al binnen, dus er kan niets dubbel van komen.
-  if (uitgepakt.consumedKeys.length > 0) {
-    try {
-      const opruimen = createPipelineClient()
-      for (const chunk of chunkArray(uitgepakt.consumedKeys, 100)) {
-        await opruimen
-          .from('email_skipped_attachments')
-          .delete()
-          .eq('user_id', userId)
-          .in('source_message_id', chunk)
-      }
-    } catch (e) {
-      console.error('[OVERSLAG-VERJAART] verouderde overslagregel opruimen mislukt (niet-fataal)', e)
-    }
-  }
+  // [ARCHIEF-WAAR] An attachment the owner's sender rule turned away, with the row that says so on
+  // record, is handled — this run, not only once PHASE 0 finds the row next time.
+  if (blockedRegistered) for (const k of blockedKeys) completedKeys.add(k)
+  // [ARCHIEF-WAAR] Archives are NOT completed here. An archive is complete when each of its
+  // members is — decided after PHASE 2 from what actually happened to them. See the completion step.
 
   // [MODEL-OUTAGE] Decide, batch-wide, whether a TRANSIENT classify failure is a real outage or a
   // single stuck file. A config outage anywhere ⇒ app-wide outage. Otherwise a transient error is an
@@ -3538,6 +3680,10 @@ export async function syncUserEmails(
   // the exact bug the poison-pill prevents).
   const classifiedTotal = classified.length
   const classifiedFailed = classified.filter((c) => c.classifyFailed).length
+  // [ARCHIEF-WAAR] What to give back: only failures that HAD a reservation. An e-invoice XML or an
+  // unsupported type that fails was never reserved, and returning a unit for it would hand the
+  // owner a read they never paid for — the opposite drift of the one [EERLIJK-GEBRUIK] closed.
+  const reservedButUnread = classified.filter((c) => c.classifyFailed && costsModelRead(c.attachment)).length
   const configOutageAny = classified.some((c) => c.configOutage)
   // [COST-GUARD] One blown fuse is app-wide by definition, so a single occurrence makes the whole
   // run an outage — the same reasoning as a config outage, and deliberately not the batch-wide
@@ -3558,11 +3704,11 @@ export async function syncUserEmails(
   //
   // Nooit blokkerend: mislukt de teruggave zelf, dan staat er één document te veel op de
   // teller en dat is een kleiner onrecht dan een sync die hierop blijft hangen.
-  if (classifiedFailed > 0) {
+  if (reservedButUnread > 0) {
     await releaseFairUse({
       userId,
       metric: 'aiDocuments',
-      amount: classifiedFailed,
+      amount: reservedButUnread,
       period: fairUse.period,
     })
   }
@@ -3594,26 +3740,10 @@ export async function syncUserEmails(
       // stops blocking every newer invoice: it's kept owner-visible + registered terminal and the
       // mark is allowed to pass (completedKeys).
       if (classifyFailed) {
-        // [ARCHIEF-OPEN] …except that an unpacked file has no watermark to be held by. Its parent
-        // archive is in completedKeys unconditionally — it must be, or one corrupt zip freezes the
-        // mailbox — so the mark walks past this message and the "next sync retries it" promise
-        // above is simply false here: once the mark passes, the zip is never fetched again and the
-        // document inside it is gone with no row anywhere saying so. Keep the bytes NOW. Losing a
-        // read is recoverable (the file is in bestanden, with a re-read button); losing the file is
-        // not, and this is a till closing that a quarter's aangifte waits on.
-        if (attachment.fromArchive) {
-          if (await saveKeptAttachment(attachment, 'could_not_read') === STORAGE_FULL) {
-          // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
-          // all do not let the mark walk past it — the attachment is still in the mailbox and the
-          // next sync takes it the moment there is room. Marking it complete here is the silent
-          // loss this gate exists to prevent.
-            errors++
-            continue
-          }
-          couldNotRead++
-          completedKeys.add(wmKey)
-          continue
-        }
+        // [ARCHIEF-WAAR] An unpacked member takes this path too now. It used to be kept on the spot
+        // as could_not_read, because its archive was completed unconditionally and no retry would
+        // ever come. The archive now completes only when this member has, so the retry is real:
+        // the zip is opened again next sync, and the poison pill bounds it like any attachment.
         const gaveUp = await recordFailedAttempt(attachment, 'classify_failed')
         if (gaveUp) {
           couldNotRead++
@@ -3632,7 +3762,8 @@ export async function syncUserEmails(
       // owner is told, and register it with reason 'could_not_read' (still stops the
       // costly per-sync re-send, but is honest about WHY).
       if (!classification.isInvoice && !((classification.confidence ?? 0) > 0)) {
-        if (await saveKeptAttachment(attachment, 'could_not_read') === STORAGE_FULL) {
+        const kept = await saveKeptAttachment(attachment, 'could_not_read')
+        if (kept === STORAGE_FULL) {
           // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
           // all do not let the mark walk past it — the attachment is still in the mailbox and the
           // next sync takes it the moment there is room. Marking it complete here is the silent
@@ -3640,6 +3771,8 @@ export async function syncUserEmails(
           errors++
           continue
         }
+        // [ARCHIEF-WAAR] Not stored, or stored but not registered: HOLD, exactly like a full disk.
+        if (!keptDurably(kept)) { errors++; continue }
         couldNotRead++
         completedKeys.add(wmKey) // handled (kept + registered) = complete
         continue
@@ -3651,33 +3784,28 @@ export async function syncUserEmails(
       // the unique index makes a repeat insert a harmless conflict.
       if (!classification.isInvoice) {
         // [ARCHIEF-OPEN] …but "not an invoice" is not the same as "worth nothing". The daily till
-        // closing has no supplier, no invoice number and nothing to pay, so a CORRECT classifier
-        // says not-an-invoice — and this branch then dropped the cash side of the owner's own card
-        // income. Ask the readers that would book it (the same ones /api/documents/reprocess uses)
-        // before dropping the bytes; if one of them recognises the file, keep it where the owner
-        // can see it. Nothing is booked here: turnover feeds the btw-aangifte, and [ZELF-EERST]
-        // says an unattended sync does not book money.
-        const houden = await judgeKeepable(
-          attachment.filename,
-          Buffer.from(attachment.data, 'base64'),
-          await loadBookableReaders(),
-        )
-        if (houden.keep && houden.kind) {
-          if (await saveKeptAttachment(attachment, houden.reason, houden.kind) === STORAGE_FULL) {
-          // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
-          // all do not let the mark walk past it — the attachment is still in the mailbox and the
-          // next sync takes it the moment there is room. Marking it complete here is the silent
-          // loss this gate exists to prevent.
+        // closing has no supplier, no invoice number and nothing to pay.
+        // [ARCHIEF-WAAR] Whether a reader would book it was decided in the planning step, from the
+        // real bytes and before any model read (tillKeep). Kept under its own kind; nothing booked.
+        const houden = tillKeep.get(wmKey)
+        if (houden?.keep && houden.kind) {
+          const kept = await saveKeptAttachment(attachment, houden.reason, houden.kind)
+          if (kept === STORAGE_FULL) {
+            // [OPSLAG-DEUR] No room on the disk. HOLD: do not count it, do not register it, and above
+            // all do not let the mark walk past it — the attachment is still in the mailbox and the
+            // next sync takes it the moment there is room. Marking it complete here is the silent
+            // loss this gate exists to prevent.
             errors++
             continue
           }
+          if (!keptDurably(kept)) { errors++; continue }
           keptForBooking++
           skipped++
           completedKeys.add(wmKey) // [watermark] kept + registered = complete
           continue
         }
         const skipPipeline = createPipelineClient()
-        await skipPipeline
+        const { error: skipErr } = await skipPipeline
           .from('email_skipped_attachments')
           .upsert(
             {
@@ -3692,6 +3820,9 @@ export async function syncUserEmails(
             },
             { onConflict: 'user_id,source_message_id', ignoreDuplicates: true }
           )
+        // [ARCHIEF-WAAR] The row IS the outcome — it is what makes the next sync skip this file.
+        // Unwritten, it is not done: hold, and the next run reads it once more and writes it again.
+        if (skipErr) { errors++; continue }
         skipped++
         completedKeys.add(wmKey) // [watermark] registered = complete
         continue
@@ -3704,7 +3835,7 @@ export async function syncUserEmails(
       // a skip so the watermark advances and it is never re-fetched.
       const approxBytes = Math.floor((attachment.data.length * 3) / 4)
       if (approxBytes > MAX_EMAIL_ATTACHMENT_BYTES) {
-        await supabase
+        const { error: bigErr } = await supabase
           .from('email_skipped_attachments')
           .upsert(
             {
@@ -3715,6 +3846,7 @@ export async function syncUserEmails(
             },
             { onConflict: 'user_id,source_message_id', ignoreDuplicates: true }
           )
+        if (bigErr) { errors++; continue }
         skipped++
         completedKeys.add(wmKey)
         continue
@@ -3777,6 +3909,24 @@ export async function syncUserEmails(
           entityId: existingByHash.id,
           newValue: { file_name: attachment.filename, content_hash: contentHash, path: 'email' },
         })
+        // [ARCHIEF-WAAR] A member proven duplicate must be KNOWN as one, or the archive it sits in is
+        // opened, read and charged again on every sync inside the fetch window. Registered under the
+        // `:dubbel` key PHASE 0 already folds back. Members only: for a loose attachment, what a
+        // byte-hash hit on an unfinished document means is F-10's question, not this one.
+        if (attachment.fromArchive) {
+          const { error: dupRegErr } = await supabase
+            .from('email_skipped_attachments')
+            .upsert(
+              {
+                user_id: userId,
+                source_message_id: `${wmKey}:dubbel`,
+                filename: attachment.filename,
+                reason: 'dit bestand staat al in je administratie',
+              },
+              { onConflict: 'user_id,source_message_id', ignoreDuplicates: true }
+            )
+          if (dupRegErr) { errors++; continue }
+        }
         duplicate++
         completedKeys.add(wmKey) // [watermark] duplicate = already complete
         continue
@@ -4466,31 +4616,34 @@ export async function syncUserEmails(
           errors++
           continue
         }
-        const reminderDocId = reminderKept
-        let filedReason = 'herinnering — bewaard in je bestanden, niet als factuur geboekt'
-        if (reminderDocId) {
-          try {
-            const filed = await fileReminder({
-              pipeline: supabase, userId, documentId: reminderDocId, path: 'email',
-              facts: {
-                isReminder: true,
-                reminderOfInvoiceNumber: classification.reminderOfInvoiceNumber ?? null,
-                invoiceNumber: classification.invoiceNumber ?? null,
-                vendor: classification.vendor ?? null,
-                totalIncBtw: classification.totalIncBtw ?? classification.amount ?? null,
-                invoiceDate: classification.invoiceDate ?? null,
-              },
-            })
-            filedReason = filed.placement.reason
-          } catch (e) {
-            console.error('[HERINNERING-NOOIT] kon herinnering niet aan zijn factuur koppelen', e)
-          }
-        } else {
+        // [ARCHIEF-WAAR] A reminder that was not stored, or not registered, is not filed. It used to
+        // get the "bewaard in je bestanden" row and complete anyway — over a file that existed nowhere.
+        if (!keptDurably(reminderKept)) {
           reportHandledFailure({
             tag: 'HERINNERING-NOOIT', severity: 'data-integrity',
-            message: 'a payment reminder could not be saved as a document — it now exists nowhere the owner can see',
+            message: 'a payment reminder could not be saved as a document — held for the next sync',
             context: { userId, filename: attachment.filename },
           })
+          errors++
+          continue
+        }
+        const reminderDocId = reminderKept.documentId
+        let filedReason = 'herinnering — bewaard in je bestanden, niet als factuur geboekt'
+        try {
+          const filed = await fileReminder({
+            pipeline: supabase, userId, documentId: reminderDocId, path: 'email',
+            facts: {
+              isReminder: true,
+              reminderOfInvoiceNumber: classification.reminderOfInvoiceNumber ?? null,
+              invoiceNumber: classification.invoiceNumber ?? null,
+              vendor: classification.vendor ?? null,
+              totalIncBtw: classification.totalIncBtw ?? classification.amount ?? null,
+              invoiceDate: classification.invoiceDate ?? null,
+            },
+          })
+          filedReason = filed.placement.reason
+        } catch (e) {
+          console.error('[HERINNERING-NOOIT] kon herinnering niet aan zijn factuur koppelen', e)
         }
         // saveKeptAttachment wrote its own registry row with the bare reason; overwrite it with
         // the sentence that names the invoice, so "waar is die herinnering" is answerable.
@@ -5059,6 +5212,54 @@ export async function syncUserEmails(
     }
   }
 
+  // ── [ARCHIEF-WAAR] An archive is complete when what was IN it is ──────────────────────────────
+  //
+  // Decided here, after PHASE 2, from what actually happened — never from the fact that someone
+  // tried to open it. Three ways an archive is done:
+  //   · refused whole (corrupt, empty, too big, too many files) AND that refusal is on record, with
+  //     the owner's way out in its reason. A poison zip must not freeze the mailbox, and it does not
+  //     have to: the refusal row IS its outcome, and the owner can see and act on it;
+  //   · every member is handled — known before this run, or completed in it — and every refusal of
+  //     a single member is on record;
+  // and nothing else. A member that failed, was held, did not get a place, or could not be looked up
+  // leaves the archive open: its key stays out of completedKeys, the watermark stays behind the
+  // mail, and the next sync opens the zip again and finishes only what is still unfinished.
+  for (const run of archiveRuns) {
+    let refusalsOnRecord = true
+    for (const r of run.refusals) {
+      // Not ignoreDuplicates: a whole-archive refusal shares its key with the old "we cannot read a
+      // .zip" row, and must REPLACE that reason — the old one is no longer true.
+      const { error: refErr } = await supabase
+        .from('email_skipped_attachments')
+        .upsert(
+          { user_id: userId, source_message_id: r.key, filename: r.filename, reason: r.reason.slice(0, 200) },
+          { onConflict: 'user_id,source_message_id' },
+        )
+      if (refErr) {
+        refusalsOnRecord = false
+        console.error('[ARCHIEF-WAAR] archive refusal not written — archive stays open', { key: r.key, error: refErr.message })
+      }
+    }
+    if (!refusalsOnRecord || run.registryUnknown || run.unreached > 0) continue
+    if (run.refusedWhole) { completedKeys.add(run.key); continue }
+    const allMembersDone = run.memberKeys.every((k) => knownKeys.has(k) || completedKeys.has(k))
+    if (!allMembersDone) continue
+    completedKeys.add(run.key)
+    // [OVERSLAG-VERJAART] The archive's old "cannot read this type" row is false now — but only now,
+    // with every member on record. Deleted here and nowhere earlier: an archive that fails to open
+    // must keep a row, and it does — its refusal just replaced this one under the same key.
+    if (run.refusals.some((r) => r.whole)) continue
+    const { error: staleErr } = await createPipelineClient()
+      .from('email_skipped_attachments')
+      .delete()
+      .eq('user_id', userId)
+      .eq('source_message_id', run.key)
+    if (staleErr) {
+      // Only the panel's wording is at stake: the members are on record under their own keys.
+      console.error('[OVERSLAG-VERJAART] verouderde overslagregel opruimen mislukt (niet-fataal)', staleErr.message)
+    }
+  }
+
   // [POISON-PILL] Clear the failure counter for every attachment that completed this run (saved,
   // duplicate, terminal skip, or given up) — a flaky file that finally succeeded must not carry a
   // stale count toward a future give-up. Failed-this-round attachments keep their (just-incremented)
@@ -5448,7 +5649,11 @@ async function loadBookableReaders(): Promise<Parameters<typeof judgeKeepable>[2
     planSheet: (bytes) => ingest.planSpreadsheetIngest(xlsx.sheetBytesToMatrix(bytes)),
     readPdfText: async (bytes) => {
       const unpdf = await import('unpdf')
-      const doc = await unpdf.getDocumentProxy(bytes)
+      // [ARCHIEF-WAAR] A plain Uint8Array copy, never the Buffer the sync holds. pdf.js refuses a
+      // Node Buffer outright ("Please provide binary data as `Uint8Array`, rather than `Buffer`"),
+      // judgeKeepable read that refusal as "not a till closing", and so no till PDF that arrived by
+      // mail was ever kept. /api/documents/reprocess and ai.ts already pass this shape.
+      const doc = await unpdf.getDocumentProxy(new Uint8Array(bytes))
       return ((await unpdf.extractText(doc, { mergePages: true })).text ?? '').trim()
     },
     looksLikeDailySales: (text) => dagomzet.looksLikeDailySalesReport(text),

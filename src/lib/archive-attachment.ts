@@ -52,7 +52,24 @@ export interface ArchiveEntry {
 /** Wat er met een archief moet gebeuren. */
 export type ArchiveVerdict =
   | { take: true }
-  | { take: false; reason: string };
+  /**
+   * `silent` marks the refusals that are archive chrome, not documents (a `__MACOSX/` shadow copy,
+   * `.DS_Store`). They are refused like any other entry, but nobody is told: a panel line per
+   * shadow file is exactly the noise that makes the owner stop reading the panel.
+   */
+  | { take: false; reason: string; silent?: boolean };
+
+/**
+ * [ARCHIEF-WAAR] The MIME the mail walkers give a zip they admit. The value is only a routing tag
+ * inside the sync — nothing reads a zip as a document — so one fixed string is enough.
+ */
+export const ARCHIVE_MIME = "application/zip";
+
+/**
+ * [ARCHIEF-WAAR] The owner's way out, appended to every refusal that is about a real file. A
+ * refusal that only says "no" leaves the owner with a file they know exists and nowhere to put it.
+ */
+const ZELF_UITPAKKEN = "pak het zelf uit en voeg de bestanden toe bij Uploaden";
 
 /**
  * Plafonds. Ruim genoeg voor een dagafsluiting (één PDF van een paar honderd kB) en krap genoeg
@@ -60,7 +77,11 @@ export type ArchiveVerdict =
  */
 export const MAX_ENTRIES = 25;
 export const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
-export const MAX_ENTRY_BYTES = 15 * 1024 * 1024;
+/**
+ * [ARCHIEF-WAAR] The same 10 MB a single mail attachment may be. An envelope may not be a way to
+ * reach the reader with a file the mail door would have refused on its own.
+ */
+export const MAX_ENTRY_BYTES = 10 * 1024 * 1024;
 
 /**
  * De extensies die de intake sowieso kan lezen. Alles daarbuiten heeft binnenin niets te zoeken.
@@ -96,25 +117,31 @@ export function isOpenableArchive(filename: string | null | undefined): boolean 
 export function judgeEntry(entry: ArchiveEntry): ArchiveVerdict {
   const naam = entry.filename.trim();
   if (!naam) return { take: false, reason: "een bestand zonder naam in het archief" };
-  if (SYSTEEMROMMEL.test(naam)) return { take: false, reason: "systeembestand uit het archief" };
-  if (naam.endsWith("/")) return { take: false, reason: "een map, geen bestand" };
+  if (SYSTEEMROMMEL.test(naam)) return { take: false, reason: "systeembestand uit het archief", silent: true };
+  if (naam.endsWith("/")) return { take: false, reason: "een map, geen bestand", silent: true };
   if (ARCHIEF.test(naam)) {
-    return { take: false, reason: `${naam}: een archief in een archief pakken we niet uit` };
+    return { take: false, reason: `een archief in een archief pakken we niet uit — ${ZELF_UITPAKKEN}` };
   }
   if (!LEESBAAR.test(naam)) {
-    return { take: false, reason: `${naam}: dit bestandstype kunnen wij niet lezen` };
+    return {
+      take: false,
+      reason: "dit bestandstype kunnen wij niet lezen — bewaar het als PDF of maak er een foto van en voeg die toe bij Uploaden",
+    };
   }
   if (entry.bytes > MAX_ENTRY_BYTES) {
-    return { take: false, reason: `${naam}: te groot om uit te pakken (meer dan 15 MB)` };
+    return {
+      take: false,
+      reason: "te groot om automatisch te lezen (meer dan 10 MB) — splits de PDF of maak er een foto van en voeg die toe bij Uploaden",
+    };
   }
-  if (entry.bytes <= 0) return { take: false, reason: `${naam}: leeg bestand` };
+  if (entry.bytes <= 0) return { take: false, reason: "leeg bestand — vraag de afzender het opnieuw te sturen" };
   return { take: true };
 }
 
 /** Het resultaat van één archief: wat eruit mag, en wat er is geweigerd en waarom. */
 export interface ArchivePlan {
   take: ArchiveEntry[];
-  skipped: Array<{ filename: string; reason: string }>;
+  skipped: Array<{ filename: string; reason: string; silent?: boolean }>;
   /** Gezet wanneer het HELE archief is geweigerd; dan is `take` altijd leeg. */
   refusedWhole?: string;
 }
@@ -127,27 +154,32 @@ export interface ArchivePlan {
  * een administratie opleveren waarvan niemand weet welk deel er is.
  */
 export function planArchive(entries: readonly ArchiveEntry[]): ArchivePlan {
-  if (entries.length === 0) return { take: [], skipped: [], refusedWhole: "het archief is leeg" };
+  if (entries.length === 0) {
+    return { take: [], skipped: [], refusedWhole: "het archief is leeg — vraag de afzender het opnieuw te sturen" };
+  }
   if (entries.length > MAX_ENTRIES) {
     return {
       take: [], skipped: [],
-      refusedWhole: `het archief bevat ${entries.length} bestanden (meer dan ${MAX_ENTRIES}) — te veel om automatisch te verwerken`,
+      refusedWhole: `het archief bevat ${entries.length} bestanden (meer dan ${MAX_ENTRIES}), te veel om automatisch te verwerken — ${ZELF_UITPAKKEN}`,
     };
   }
   const totaal = entries.reduce((s, e) => s + Math.max(0, e.bytes), 0);
   if (totaal > MAX_TOTAL_BYTES) {
     return {
       take: [], skipped: [],
-      refusedWhole: "het archief is uitgepakt groter dan 25 MB — te groot om automatisch te verwerken",
+      refusedWhole: `het archief is uitgepakt groter dan 25 MB — ${ZELF_UITPAKKEN}`,
     };
   }
 
   const take: ArchiveEntry[] = [];
-  const skipped: Array<{ filename: string; reason: string }> = [];
+  const skipped: Array<{ filename: string; reason: string; silent?: boolean }> = [];
   for (const e of entries) {
     const oordeel = judgeEntry(e);
     if (oordeel.take) take.push(e);
-    else skipped.push({ filename: e.filename, reason: oordeel.reason });
+    else skipped.push({ filename: e.filename, reason: oordeel.reason, ...(oordeel.silent ? { silent: true } : {}) });
   }
   return { take, skipped };
 }
+
+/** [ARCHIEF-WAAR] Shared with archive-expand.ts, so every refusal names the same way out. */
+export const ARCHIVE_OWNER_ACTION = ZELF_UITPAKKEN;

@@ -2235,9 +2235,16 @@ test("[DOORGESTUURD] a failure that will never succeed does not freeze the mailb
 
   // And the MIME reader may never be reimplemented next to the one that already exists: the
   // question "which types can we read" must have exactly one answer.
+  // [ARCHIEF-WAAR] The injected rule is resolveAttachmentMime now: normalizeAttachmentMime plus the
+  // one thing a walker must also admit — an archive the sync opens. Still ONE rule, used by both
+  // walkers and by this door, so a zip inside a forward is admitted exactly like a loose one.
   assert.match(
-    src, /extractMimeAttachments\(raw, \{ normalizeMime: normalizeAttachmentMime \}\)/,
+    src, /extractMimeAttachments\(raw, \{ normalizeMime: resolveAttachmentMime \}\)/,
     "the type rule is injected, never copied",
+  );
+  assert.match(
+    src, /export function resolveAttachmentMime\([^)]*\)[^{]*\{\s*return normalizeAttachmentMime\(mimeType, filename\) \?\? \(isOpenableArchive\(filename\) \? ARCHIVE_MIME : null\)/,
+    "the injected rule must still BE normalizeAttachmentMime, extended only by archive admission",
   );
 });
 
@@ -2570,10 +2577,18 @@ test("[E-FACTUUR-XML] a free read never spends the monthly AI allowance", () => 
   // Counted together, the owner pays quota for something free — and worse, a real invoice that DOES
   // need reading gets pushed out of the allowance by one that never used it.
   const src = code("src/lib/email-integration.ts");
+  // [ARCHIEF-WAAR] "Costs a read" is now one predicate over the MIME types the model is actually
+  // sent (plus: not a till closing the local reader recognised). An e-invoice XML is not among them,
+  // so it stays free — asserted on the set itself, which is where the next drift would happen.
   assert.match(
-    src, /const aiCandidates = batchCandidates\.filter\(\(a\) => !isEInvoiceXmlMime\(a\.mimeType\)\)/,
+    src, /const aiCandidates = batchCandidates\.filter\(\(a\) => costsModelRead\(a\)\)/,
     "only the reads that cost something may be counted",
   );
+  const mimes = src.match(/const MODEL_READ_MIMES = new Set\(\[([^\]]*)\]\)/)?.[1];
+  assert.ok(mimes, "the set of model-read types is gone — re-point this gate");
+  assert.doesNotMatch(mimes!, /xml/i, "an e-invoice XML is read mechanically and must never count as a model read");
+  assert.match(src, /const costsModelRead = \(a: GmailAttachment\): boolean =>\s*MODEL_READ_MIMES\.has\(a\.mimeType\)/,
+    "the cost predicate must be derived from the model-read types");
   assert.match(
     src, /wanted: aiCandidates\.length/,
     "…and the reservation must ask for that number, not the batch size",
@@ -2585,7 +2600,7 @@ test("[E-FACTUUR-XML] a free read never spends the monthly AI allowance", () => 
     "a slice counts an XML as a place and still pushes a real invoice out",
   );
   assert.match(
-    src, /if \(isEInvoiceXmlMime\(a\.mimeType\)\) return true[\s\S]{0,120}?if \(aiBudget <= 0\) return false/,
+    src, /if \(!costsModelRead\(a\)\) return true[\s\S]{0,120}?if \(aiBudget <= 0\) return false/,
     "free reads always pass; paid ones stop at the grant",
   );
 });
@@ -3746,7 +3761,9 @@ test("[BIJLAGE-TERUGWEG] the panel's remedy is one the pipeline can actually hon
     sync,
     // Window widened from 400 to 1400 when [OVERSLAG-VERJAART] put its reasoning between the query
     // and the add. Only the distance changed; the fact this pins did not.
-    /from\('email_skipped_attachments'\)[\s\S]{0,1400}?knownKeys\.add/,
+    // [ARCHIEF-WAAR] The fold moved into readKnownKeys, which fills the set it is handed; PHASE 0
+    // hands it knownKeys. Both halves are pinned so the premise cannot hold on one alone.
+    /from\('email_skipped_attachments'\)[\s\S]{0,1400}?into\.add/,
     "PHASE 0 still folds the skip registry into knownKeys — the reason a backfill cannot reach a " +
       "listed attachment. If this is gone, re-read the panel's wording below",
   );
@@ -3764,8 +3781,10 @@ test("[BIJLAGE-TERUGWEG] the panel's remedy is one the pipeline can actually hon
   assert.equal(wissers.length, 1,
     "the skip registry is cleared in more than one place (or in none). Exactly one clear is " +
       "allowed: the [OVERSLAG-VERJAART] cleanup that runs after an archive was unpacked");
-  assert.match(sync, /if \(uitgepakt\.consumedKeys\.length > 0\) \{[\s\S]{0,600}?\.delete\(\)/,
-    "the one permitted clear is no longer the consumed-archive cleanup, so some other code path " +
+  assert.match(sync, /readKnownKeys\(allKeys, knownKeys\)/,
+    "PHASE 0 no longer reads the registry into knownKeys");
+  assert.match(sync, /completedKeys\.add\(run\.key\)\s*if \(run\.refusals\.some\(\(r\) => r\.whole\)\) continue\s*const \{ error: staleErr \} = await createPipelineClient\(\)\s*\.from\('email_skipped_attachments'\)\s*\.delete\(\)/,
+    "the one permitted clear is no longer the completed-archive cleanup, so some other code path " +
       "is erasing the record of what was skipped");
   assert.match(code("src/lib/i18n/messages.ts"), /'ink\.email\.echteFactuur':[\s\S]{0,400}?behalve als het een bestandstype is dat wij inmiddels wél kunnen openen/,
     "the panel still promises flatly that a listed attachment is never fetched again. Since an " +
@@ -20259,7 +20278,9 @@ test("[DUBBEL-STORM] een geblokkeerd duplicaat wordt niet elke twee uur opnieuw 
     "PHASE 0 zoekt de dubbel-skiprijen niet meer — elke geblokkeerde dubbel kost weer een modellezing per sync");
   // 2. …en het gevonden id wordt ONTdaan van het suffix vóór hij in knownKeys landt, want de
   //    vergelijking verderop is op de kale sleutel (`${messageId}:${filename}`).
-  assert.match(sync, /knownKeys\.add\(id\.endsWith\(':dubbel'\) \? id\.slice\(0, -':dubbel'\.length\) : id\)/,
+  // [ARCHIEF-WAAR] The fold lives in readKnownKeys now (`into` is the set it fills — knownKeys for
+  // the fetched attachments, the member set for an archive), so both are judged by the same line.
+  assert.match(sync, /into\.add\(id\.endsWith\(':dubbel'\) \? id\.slice\(0, -':dubbel'\.length\) : id\)/,
     "de gesuffixte rij wordt gevonden maar niet teruggebracht naar de kale sleutel — knownKeys mist hem alsnog");
   // 3. De schrijfkant houdt zijn suffix (dat was de afspraak van [DUBBEL-ZICHTBAAR]): verandert
   //    die vorm, dan bewaakt de lookup hierboven niets meer.
@@ -20783,7 +20804,9 @@ test("[LEES] a file the app cannot read SAYS SO, and everything it read stays co
   // 2. The vanishing-attachment failure ALARMS: a mail attachment that lands in neither
   //    bestanden nor the skipped panel is an invoice that silently never happened.
   const mailSync = code("src/lib/email-integration.ts");
-  assert.match(mailSync, /message: 'unreadable e-mail attachment could not be SAVED — it now exists nowhere the owner can see',/,
+  // [ARCHIEF-WAAR] The sentence changed because the fact did: a failed save no longer lets the
+  // attachment go — it is held and fetched again — so the alarm says that instead of "nowhere".
+  assert.match(mailSync, /message: 'unreadable e-mail attachment could not be SAVED — it is held for the next sync',/,
     "the save failure reaches the alarm channel");
   assert.match(mailSync, /message: 'skip-registry upsert failed — an unread attachment is missing from the skipped panel',/,
     "…and so does the registry half");
@@ -27262,151 +27285,159 @@ test("[GEEN-REGELS] no column headers are drawn over rows that do not exist", ()
   assert.ok(zin > 0 && kop > zin, "the explanation belongs where the table head was, not after it");
 });
 
-// ── [ARCHIEF-OPEN] ────────────────────────────────────────────────────────────────────────────
+// ── [ARCHIEF-OPEN] → [ARCHIEF-WAAR] ──────────────────────────────────────────────────────────
 //
 // The e-mail door skipped every archive it received: 410 skipped attachments in production, 40 of
 // them archives, and 29 of those the daily till-closing zip. That zip is the CASH side of the card
-// income — without it daily_turnover has zero days in Q1 and Q3 while € 253.439 of pos_income
-// arrives, falls through as untaxed omzet, and blocks the quarter. So the zip is now replaced by
-// its contents BEFORE classification: one path, one reader, one set of duplicate gates.
+// income — without it daily_turnover has zero days while the card income arrives, falls through as
+// untaxed omzet, and blocks the quarter. [ARCHIEF-OPEN] opened it.
 //
-// The dangerous half is the watermark, and it is dangerous in a way that has no symptom on the
-// screen. The completeness check below iterates the ORIGINALLY FETCHED attachments and demands
-// every key back; the zip is no longer among the classified ones, so its key can never be returned
-// by that loop. The message then reads as unfinished forever, the watermark never advances, and
-// the sync re-fetches the same batch on every run — starving every mailbox behind it. Proven by
-// removing the consumedKeys line: archive-expand.test.ts goes red on two tests.
-//
-// Three halves, and all three are load-bearing:
-//   1. classification must run over the EXPANDED list (else the whole feature does nothing);
-//   2. every archive touched must return its own key (else the watermark freezes);
-//   3. a refused archive must land in `unread` with its reason (else we rebuild the silent skip
-//      this task exists to remove — see [NO-SILENT-EMPTY]).
+// It also marked the zip complete the moment it was TOUCHED — before one member was read, and
+// even when it could not be opened at all. The gates that stood here pinned exactly that line
+// ("every archive touched must return its own key"), because the alternative then was a frozen
+// watermark. [ARCHIEF-WAAR] removes both halves of the dilemma: an archive is complete when every
+// member has a durable outcome, and a refusal (corrupt, too big, unsupported) IS a durable outcome,
+// written with the owner's way out — so a poison zip completes by being refused, not by being
+// forgotten. These gates now pin that, and the provider-level proof is
+// tests/render/email-archive-sync.test.tsx.
 test("[ARCHIEF-OPEN] an unpacked archive is classified, accounted for, and never silently dropped", () => {
   const src = code("src/lib/email-integration.ts");
 
-  // 1 — the classifier is handed what came OUT of the archives, not the raw fetch.
-  assert.match(src, /const uitgepakt = await expandArchives\(freshAttachments\)/,
-    "the archives are no longer expanded before classification — every zip is skipped again");
+  // 1 — archives are opened BEFORE the batch is cut, and what reaches the classifier is members.
+  const planAt = src.indexOf("for (const a of freshAll) {");
+  const openAt = src.indexOf("const opened = await openArchive(a)");
+  const pushAt = src.indexOf("batchCandidates.push(m)");
+  assert.ok(planAt > -1 && openAt > planAt && pushAt > openAt,
+    "archives are no longer opened in the planning walk — members never reach the batch, and every " +
+      "zip is skipped again");
+  assert.match(src, /const attachmentsToClassify = freshAttachments/,
+    "classification no longer reads the planned batch (members included)");
   assert.match(
     src, /const classified: Classified\[\] = await mapConcurrent\(\s*attachmentsToClassify,/,
-    "classification reads the original attachment list again, so expanding the archives changes " +
-      "nothing: the zip still reaches the reader as a zip and is still refused",
+    "classification reads something other than the planned batch",
   );
 
-  // 2 — the watermark gets its keys back. This is the one that has no visible symptom.
-  assert.match(src, /for \(const k of uitgepakt\.consumedKeys\) completedKeys\.add\(k\)/,
-    "the keys of the archives that were replaced by their contents are not returned to " +
-      "completedKeys. The completeness check iterates the fetched attachments, so those keys can " +
-      "never come back on their own: the message reads as unfinished forever, the watermark " +
-      "stops advancing, and the sync re-fetches the same batch on every run");
-  // …and it happens BEFORE the check that reads the set, not after it.
-  const vullen = src.indexOf("uitgepakt.consumedKeys");
-  const lezen = src.indexOf("completedKeys.has(key)");
-  assert.ok(vullen > 0 && lezen > vullen,
-    "the archive keys are added AFTER the completeness check reads the set — which is the same " +
-      "as not adding them at all on this run");
+  // 2 — the archive key is completed in exactly one place, AFTER PHASE 2, from member outcomes.
+  assert.doesNotMatch(src, /consumedKeys/,
+    "an archive is completed for having been touched again — the watermark walks past mail whose " +
+      "contents exist nowhere");
+  const loopAt = src.indexOf("for (const run of archiveRuns) {");
+  const walkAt = src.indexOf("completedKeys.has(key)");
+  assert.ok(loopAt > -1, "[ARCHIEF-WAAR] the completion step moved — re-point this gate");
+  assert.ok(walkAt > loopAt, "the archive completion step runs AFTER the watermark reads the set");
+  const adds = [...src.matchAll(/completedKeys\.add\(run\.key\)/g)].map((m) => m.index!);
+  assert.equal(adds.length, 2, "an archive key is completed in exactly two branches: refused whole, or all members done");
+  const guardAt = src.indexOf("if (!refusalsOnRecord || run.registryUnknown || run.unreached > 0) continue", loopAt);
+  assert.ok(guardAt > loopAt, "the guard that keeps an archive open on an unwritten refusal, an unread registry or an unreached member is gone");
+  for (const at of adds) assert.ok(at > guardAt, "an archive key is completed before the guard that may hold it");
+  assert.match(src, /const allMembersDone = run\.memberKeys\.every\(\(k\) => knownKeys\.has\(k\) \|\| completedKeys\.has\(k\)\)\s*if \(!allMembersDone\) continue\s*completedKeys\.add\(run\.key\)/,
+    "the archive is completed without every member being known or completed");
 
-  // 3 — a refusal is spoken, not swallowed. Condition AND push in one match on purpose: written
-  // separately, this assertion survived `if (false) {` around the push it was checking for —
-  // proven, not guessed. An unreachable refusal reads exactly like the silent skip it replaced.
+  // 3 — a refusal is WRITTEN, and an unwritten one holds the archive. Replacing (not ignoring) the
+  // existing row is deliberate: the whole-archive refusal shares its key with the stale ".zip" row.
   assert.match(
-    src, /if \(uitgepakt\.skipped\.length > 0\) \{\s*unread\.push\(\.\.\.uitgepakt\.skipped\.map\(/,
-    "a refused archive no longer reaches the unread panel — either the push is gone or the " +
-      "condition in front of it no longer tests what was skipped, and a refusal that cannot be " +
-      "reached is the same silent skip this task was opened to remove",
+    src,
+    /for \(const r of run\.refusals\) \{\s*const \{ error: refErr \} = await supabase\s*\.from\('email_skipped_attachments'\)\s*\.upsert\([\s\S]{0,200}?\{ onConflict: 'user_id,source_message_id' \},?\s*\)\s*if \(refErr\) \{\s*refusalsOnRecord = false/,
+    "a refusal is no longer written with its error checked — an archive can complete on a refusal " +
+      "that exists nowhere, which is the silent skip this task was opened to remove",
   );
-  assert.match(src, /kind: 'unreadable-format' as const/,
-    "the refused archive lost the kind the panel groups it under, so it lands in no group at all");
 });
 
-// Opening the envelope is only half of it. What came OUT of the till-closing zip is a Z-report:
-// no supplier, no invoice number, nothing to pay — so a CORRECT classifier answers "not an
-// invoice", and that branch registers a skip and DROPS THE BYTES. Unpacked and then thrown away is
-// the same € 253.439 of unrated omzet as never unpacking it, with more steps.
+// What came OUT of the till-closing zip is a Z-report: no supplier, no invoice number, nothing to
+// pay. [ARCHIEF-WAAR] moved the keep question in front of the model: the deterministic reader
+// answers it from the real bytes, a recognised closing is never sent to the model, never reserved
+// against the allowance, and can never become a purchase invoice.
 test("[ARCHIEF-OPEN] a not-an-invoice file a reader could book is kept, not dropped", () => {
   const src = code("src/lib/email-integration.ts");
 
-  // The question is asked BEFORE the drop, and it is asked of the bytes.
-  const vraag = src.indexOf("judgeKeepable(");
-  const wegwerpen = src.indexOf("createPipelineClient()\n          .from('email_skipped_attachments')");
-  assert.ok(vraag > 0, "the keep question is gone — every till closing is discarded again");
-  assert.match(src, /const houden = await judgeKeepable\(\s*attachment\.filename,\s*Buffer\.from\(attachment\.data, 'base64'\),/,
+  assert.match(src, /const verdict = await judgeKeepable\(a\.filename, Buffer\.from\(a\.data, 'base64'\), await loadBookableReaders\(\)\)/,
     "judgeKeepable is no longer handed the real bytes, so it can only judge by filename — which " +
       "is the one thing it exists not to do: keep on the name and the next till brand is dropped");
+  const judgeAt = src.indexOf("const verdict = await judgeKeepable(");
+  const phase1At = src.indexOf("const classified: Classified[] = await mapConcurrent(");
+  assert.ok(judgeAt > -1 && phase1At > judgeAt, "the till question must be answered before any model read");
+  assert.match(src, /const till = tillKeep\.get\(`\$\{attachment\.messageId\}:\$\{attachment\.filename\}`\)\s*if \(till\) \{\s*return \{/,
+    "a recognised till closing is sent to the model again");
+  assert.match(src, /const costsModelRead = \(a: GmailAttachment\): boolean =>\s*MODEL_READ_MIMES\.has\(a\.mimeType\) && !tillKeep\.has\(/,
+    "a recognised till closing is charged against the owner's allowance for a read that never happens");
 
-  // Kept means kept UNDER ITS OWN KIND. Storing it as could_not_read would drop it into the
-  // "Overgeslagen bij import" panel (which counts SKIPPED_DOC_TYPES) and tell the owner we failed
-  // to read a file we read fine.
-  assert.match(src, /await saveKeptAttachment\(attachment, houden\.reason, houden\.kind\)/,
-    "a recognised kassa/grootboek file is stored without its own kind — it then reads as " +
-      "'could not read' in the skipped panel, over a file the app read perfectly");
-
-  // And the watermark still closes, exactly as on every other branch here.
-  assert.match(src, /keptForBooking\+\+\s*\n\s*skipped\+\+\s*\n\s*completedKeys\.add\(wmKey\)/,
-    "the kept file does not close its watermark key and is not counted into `skipped` — the " +
-      "first freezes the sync, the second breaks the balance check that proves nothing was lost");
+  // Kept UNDER ITS OWN KIND, and only complete when durable.
+  assert.match(src, /const kept = await saveKeptAttachment\(attachment, houden\.reason, houden\.kind\)/,
+    "a recognised kassa/grootboek file is stored without its own kind");
+  assert.match(src, /if \(!keptDurably\(kept\)\) \{ errors\+\+; continue \}\s*keptForBooking\+\+\s*skipped\+\+\s*completedKeys\.add\(wmKey\)/,
+    "the kept till file completes without being durably stored AND registered");
 });
 
-// Three defects found by walking my own wiring after the tests were green, none of which any gate
-// or test noticed. They share one shape: the archive step changes an INVARIANT the surrounding
-// code was written against, and the surrounding code keeps computing the old thing quietly.
+// Three invariants around an opened archive, each of which broke once without any gate noticing.
 test("[ARCHIEF-OPEN] opening an archive does not break the three invariants around it", () => {
   const src = code("src/lib/email-integration.ts");
 
-  // 1. COST. PHASE 0's known-key filter ran before the zip was opened, so it never saw the entries
-  // inside — their keys did not exist yet. Without a second pass the same till closing is sent to
-  // Claude on every sync while its message stays in the fetch window: paid for, rate-limited
-  // against, and thrown away at the duplicate gate each time.
-  assert.match(
-    src,
-    /const attachmentsToClassify = uitgepakt\.attachments\.filter\(\s*\(a\) => !knownKeys\.has\(`\$\{a\.messageId\}:\$\{a\.filename\}`\),/,
-    "the files that came out of an archive are no longer checked against the already-handled " +
-      "keys, so every sync re-reads the same till closing through the model for as long as the " +
-      "message stays in the fetch window",
-  );
+  // 1. COST. A member already handled costs nothing: it is looked up under its own key, with the
+  // same reader PHASE 0 uses, BEFORE it can take a batch place or a reservation.
+  assert.match(src, /if \(!\(await readKnownKeys\(run\.memberKeys, memberKnown\)\)\) \{[\s\S]{0,200}?run\.registryUnknown = true/,
+    "the member lookup no longer treats a failed read as UNKNOWN");
+  assert.match(src, /if \(memberKnown\.has\(k\)\) \{ knownKeys\.add\(k\); continue \}/,
+    "a member already handled is read through the model again on every sync inside the window");
 
-  // 2. RETRY. "The next sync retries it" is true for an attachment that holds the watermark and
-  // FALSE for an unpacked one: its parent is complete unconditionally, so the mark walks past and
-  // the zip is never fetched again. Keeping the bytes on the spot is the only honest answer.
-  assert.match(
-    src,
-    // [OPSLAG-DEUR] widened: the call may now sit behind the storage check, which is a STRONGER
-    // form of this very invariant — bytes that cannot be kept because the disk is full make the
-    // branch HOLD instead of complete, so the zip is fetched again rather than lost. The thing that
-    // must never return is completing the message without keeping the bytes, asserted just below.
-    /if \(attachment\.fromArchive\) \{[\s\S]{0,200}?saveKeptAttachment\(attachment, 'could_not_read'\)/,
-    "a file unpacked from an archive whose read failed is left to a retry that cannot happen — " +
-      "the watermark has already passed its message, so the document is gone with no row " +
-      "anywhere saying so",
-  );
-
-  // …and the other half of the same promise: the mark may only pass once the bytes are SOMEWHERE.
-  // This branch completes its message unconditionally, so a keep that silently did nothing would
-  // retire the file with no row anywhere — the exact loss this gate is named for.
-  {
-    const at = src.indexOf("if (attachment.fromArchive) {");
-    assert.ok(at > -1, "[ARCHIEF-OPEN] the archive branch moved — re-point this gate");
-    const branch = src.slice(at, at + 700);
-    const fullAt = branch.indexOf("=== STORAGE_FULL");
-    const doneAt = branch.indexOf("completedKeys.add(wmKey)");
-    assert.ok(fullAt > -1, "[ARCHIEF-OPEN] an archive member that could not be STORED must hold");
-    assert.ok(doneAt > -1, "[ARCHIEF-OPEN] the branch's completion marker moved — re-point this gate");
-    assert.ok(
-      fullAt < doneAt,
-      "[ARCHIEF-OPEN] the full-disk hold must come BEFORE the message is marked complete, or the " +
-        "mark walks past a zip whose contents were never stored",
-    );
-  }
+  // 2. RETRY. A member that failed is retried for real, because its archive stays open. The special
+  // branch that kept a failed member on the spot (because no retry would come) is gone for good.
+  assert.doesNotMatch(src, /if \(attachment\.fromArchive\) \{[\s\S]{0,200}?saveKeptAttachment\(attachment, 'could_not_read'\)/,
+    "a failed member is kept-and-completed on the spot again, which only made sense while the " +
+      "archive was completed unconditionally");
+  assert.match(src, /const gaveUp = await recordFailedAttempt\(attachment, 'classify_failed'\)/,
+    "a failed member no longer goes through the poison-pill bound like any attachment");
   assert.match(code("src/lib/archive-expand.ts"), /fromArchive: true,/,
-    "the unpacked files no longer carry fromArchive, so the branch above can never run");
+    "the unpacked files no longer carry fromArchive");
 
-  // 3. THE BALANCE. One zip fetched, three documents bucketed: against the fetched count that
-  // reads 3 ≠ 1 and the screen says "even controleren" after a perfectly normal sync — a false
-  // alarm on the one sentence whose whole job is to be believed when it reports a gap.
+  // 3. THE BALANCE counts documents walked, not envelopes fetched.
   assert.match(src, /const processedThisBatch = attachmentsToClassify\.length/,
-    "the balance check counts fetched attachments again instead of the documents PHASE 2 walked, " +
-      "so any sync containing an archive reports itself as unbalanced");
+    "the balance check counts fetched attachments again instead of the documents PHASE 2 walked");
+});
+
+// [ARCHIEF-WAAR] The rest of the F-11 contract, each line a defect that existed.
+test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the reader gets a Uint8Array", () => {
+  const src = code("src/lib/email-integration.ts");
+
+  // Admission. Both walkers resolve the type through ONE rule that knows a zip, and the pre-filter
+  // keeps it. A zip mislabelled octet-stream (Gmail) or x-zip-compressed (Graph) is admitted by name.
+  assert.equal((src.match(/const mimeType = resolveAttachmentMime\(rawMime, filename\)/g) ?? []).length, 2,
+    "one of the two provider walkers no longer admits a zip by name");
+  assert.match(src, /if \(att\.mimeType === ARCHIVE_MIME\) return KEEP/,
+    "the pre-filter drops a zip before it reaches the archive step");
+
+  // A keep is three answers, never null — and "kept" means stored AND registered.
+  const saver = src.slice(src.indexOf("const saveKeptAttachment = async ("), src.indexOf("const keptDurably = "));
+  assert.ok(saver.length > 200, "[ARCHIEF-WAAR] saveKeptAttachment moved — re-point this gate");
+  assert.doesNotMatch(saver, /return null/, "a failed keep answers null again, which four callers read as done");
+  assert.match(saver, /if \(dupErr\) return NOT_STORED/, "a failed duplicate probe is read as 'no duplicate'");
+  assert.match(saver, /registered = !regErr/, "the keep's registry write is no longer checked");
+  assert.match(src, /const keptDurably = \(r: KeepResult\)[^=]*=>[\s\S]{0,120}?registered/,
+    "a keep the next sync cannot see counts as done");
+
+  // A failed registry read is UNKNOWN, never empty.
+  assert.match(src, /if \(existingErr\) return false/, "a failed invoice-key read is treated as empty");
+  assert.match(src, /if \(skippedErr\) return false/, "a failed registry read is treated as empty");
+
+  // The till PDF reaches pdf.js as a Uint8Array. A Buffer is REFUSED by pdf.js, the throw is
+  // swallowed as "no text", and every till closing then goes to the model as a stranger.
+  assert.match(src, /getDocumentProxy\(new Uint8Array\(bytes\)\)/,
+    "the till reader is handed a Buffer again — pdf.js refuses it and no till closing is recognised");
+
+  // The types charged as a model read are exactly the types verifyInvoiceFromPdf sends to a model.
+  const ai = code("src/lib/ai.ts");
+  const fnAt = ai.indexOf("export async function verifyInvoiceFromPdf(");
+  const from = ai.indexOf("if (isEInvoiceXmlMime(mimeType)) {", fnAt);
+  const to = ai.indexOf("Bestandstype niet ondersteund", from);
+  assert.ok(fnAt > -1 && from > fnAt && to > from, "[ARCHIEF-WAAR] the reader's type dispatch moved — re-point this gate");
+  const sent = new Set([...ai.slice(from, to).matchAll(/mimeType === '([^']+)'/g)].map((m) => m[1]));
+  const charged = new Set([...(src.match(/const MODEL_READ_MIMES = new Set\(\[([^\]]*)\]\)/)?.[1] ?? "").matchAll(/'([^']+)'/g)].map((m) => m[1]));
+  assert.ok(sent.size >= 2, "[ARCHIEF-WAAR] found no model-read types in the reader — re-point this gate");
+  assert.deepEqual(charged, sent,
+    "the sync charges the allowance for a different set of types than the reader sends to the model");
+
+  // Counted bytes, not declared ones.
+  assert.match(code("src/lib/archive-expand.ts"), /const read = await readMemberBounded\(f, Math\.min\(limits\.entryBytes, remaining\)\)/,
+    "members are inflated without counting the real bytes — a zip that lies about its size reaches memory");
 });
 
 test("[ARCHIEF-OPEN] the keep question is answered by the SAME readers that would book it", () => {
@@ -27787,18 +27818,18 @@ test("[OVERSLAG-VERJAART] a stale skip is decided by today's reader, not by yest
   assert.match(src, /\.select\('source_message_id, filename'\)/,
     "the filename is no longer read, so the check above cannot ask the reader anything");
 
-  // The skip row goes once the archive is genuinely consumed: it claimed the format was
-  // unreadable, and that claim is now false.
-  assert.match(src, /if \(uitgepakt\.consumedKeys\.length > 0\) \{[\s\S]{0,600}?\.from\('email_skipped_attachments'\)\s*\.delete\(\)/,
-    "a consumed archive keeps its 'could not read this type' row, so the same zip is re-fetched " +
-      "and re-unpacked on every sync for as long as its message stays in the window");
-  // …and only AFTER it is consumed. Deleting on sight would drop the row for an archive that then
-  // failed to open, and the owner would have neither the file nor the record of it.
-  const consumed = src.indexOf("for (const k of uitgepakt.consumedKeys) completedKeys.add(k)");
-  const deleted = src.indexOf("email_skipped_attachments", consumed);
-  assert.ok(consumed > 0 && deleted > consumed,
-    "the skip row is cleared before the archive is known to be consumed — then a zip that fails " +
-      "to open loses both its contents and the record that it was ever seen");
+  // The skip row goes once the archive is genuinely HANDLED: it claimed the format was unreadable,
+  // and that claim is now false. [ARCHIEF-WAAR] "handled" means every member durable — not "opened".
+  assert.match(src, /completedKeys\.add\(run\.key\)\s*if \(run\.refusals\.some\(\(r\) => r\.whole\)\) continue\s*const \{ error: staleErr \} = await createPipelineClient\(\)\s*\.from\('email_skipped_attachments'\)\s*\.delete\(\)/,
+    "a handled archive keeps its 'could not read this type' row, so the panel keeps saying a zip " +
+      "that was read could not be");
+  // …and only AFTER every member is on record. Deleting on sight would drop the row for an archive
+  // that then failed, and the owner would have neither the file nor the record of it.
+  const done = src.indexOf("const allMembersDone = run.memberKeys.every(");
+  const deleted = src.indexOf("const { error: staleErr }", done);
+  assert.ok(done > 0 && deleted > done,
+    "the skip row is cleared before the archive is known to be handled — then a zip that fails " +
+      "loses both its contents and the record that it was ever seen");
 });
 
 // ── [NUL-POST] The untaxed part of an invoice, the way every Dutch package books it ───────────
@@ -36251,10 +36282,15 @@ test("[OPSLAG-DEUR] every documents write measures the allowance, or says why no
     /const STORAGE_FULL = 'storage_full' as const/,
     "[OPSLAG-DEUR] a full disk must be distinguishable from a failure to keep",
   );
+  // [ARCHIEF-WAAR] Four callers now: the fifth was the archive-member branch that kept a failed
+  // member on the spot, and it is gone — a member retries through recordFailedAttempt like any
+  // attachment, which is one of the four. The count is tied to the callers so it cannot drift.
+  const keepCallers = (sync.match(/await saveKeptAttachment\(/g) ?? []).length;
+  assert.equal(keepCallers, 4, "[OPSLAG-DEUR] the saveKeptAttachment callers changed — re-count this gate");
   assert.equal(
     (sync.match(/=== STORAGE_FULL/g) ?? []).length,
-    5,
-    "[OPSLAG-DEUR] all five saveKeptAttachment callers must decide what a full disk means. A caller " +
+    keepCallers,
+    "[OPSLAG-DEUR] every saveKeptAttachment caller must decide what a full disk means. A caller " +
       "that ignores it retires the attachment and lets the mark walk past mail we never stored.",
   );
   // And the hold has to be visible. A held sync has no errors to show for it and would otherwise
