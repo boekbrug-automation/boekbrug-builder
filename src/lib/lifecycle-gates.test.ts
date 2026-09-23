@@ -27411,6 +27411,8 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
   assert.doesNotMatch(saver, /return null/, "a failed keep answers null again, which four callers read as done");
   assert.match(saver, /if \(dupErr\) return NOT_STORED/, "a failed duplicate probe is read as 'no duplicate'");
   assert.match(saver, /registered = !regErr/, "the keep's registry write is no longer checked");
+  assert.match(saver, /const \{ error: regErr \} = await supabase\s*\.from\('email_skipped_attachments'\)\s*\.upsert\(\s*\{\s*user_id: userId,\s*source_message_id: `\$\{att\.messageId\}:\$\{att\.filename\}`/,
+    "a kept file is no longer registered under its own key — the next sync reads it through the model again");
   assert.match(src, /const keptDurably = \(r: KeepResult\)[^=]*=>[\s\S]{0,120}?registered/,
     "a keep the next sync cannot see counts as done");
 
