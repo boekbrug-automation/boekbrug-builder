@@ -796,3 +796,17 @@ test("[ARCHIEF-WAAR] a cleanup that fails is surfaced, and the member still stay
   assert.deepEqual(regKeys(), []);
   assert.equal(watermark(), WM_START);
 });
+
+test("[ARCHIEF-WAAR] an archive whose directory hides an entry is refused durably and does not freeze the mailbox", async () => {
+  seedAccount("gmail");
+  const buf = await zip({ "a.pdf": await otherPdf("hidden-a"), "b.pdf": await otherPdf("hidden-b") });
+  const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  buf.writeUInt16LE(1, eocd + 8);
+  buf.writeUInt16LE(1, eocd + 10);
+  mailbox = [{ id: "h1", at: NOW - 3 * DAY, atts: [{ name: "stil.zip", bytes: buf }] }];
+  await sync();
+  assert.equal(modelCalls, 0, "nothing from an archive we cannot fully account for is read");
+  assert.deepEqual(regKeys(), ["h1:stil.zip"], "refused under the archive's own key");
+  assert.match(registry()[0].reason, /afzender/);
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+});

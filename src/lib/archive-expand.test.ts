@@ -267,3 +267,81 @@ test("[ARCHIEF-WAAR] a member whose compressed bytes are broken asks the sender 
   assert.ok(bad, "fixture: the broken member is refused");
   assert.match(bad.reason, /afzender/);
 });
+
+// ── [ARCHIEF-WAAR] review round 2 — duplicate copies and the archive's ceilings ───────────────
+
+/** A real zip whose central directory lists `copies` entries under ONE name, all with `body`. */
+async function sameNameZip(copies: number, body: string | ((i: number) => string)): Promise<Buffer> {
+  const files: Record<string, string> = {};
+  for (let i = 1; i <= copies; i++) files[`c${i}.pdf`] = typeof body === "function" ? body(i) : body;
+  let buf = await zipBytes(files);
+  for (let i = 2; i <= copies; i++) buf = renameEntry(buf, `c${i}.pdf`, "c1.pdf");
+  return buf;
+}
+
+test("[ARCHIEF-WAAR] more raw entries than the ceiling is refused, even when JSZip merges them into one", async () => {
+  // Four directory records, one name: JSZip shows ONE file, so a count taken after the merge passes.
+  const buf = await sameNameZip(4, "%PDF same");
+  const r = await openArchive(attachment("veel.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 1 << 20, maxEntries: 3 });
+  assert.equal(r.refusedWhole, true, "the ceiling is on what the archive holds, not on what JSZip shows");
+  assert.equal(r.members.length, 0);
+  assert.match(r.refusals[0].reason, /meer dan 3/);
+});
+
+test("[ARCHIEF-WAAR] identical copies whose COMBINED inflated size passes the budget are refused", async () => {
+  // Three identical 4 KB copies against a 10 KB archive budget: each copy fits the per-entry ceiling,
+  // together they do not. Comparing them may not be a way around the archive-wide ceiling.
+  const buf = await sameNameZip(3, "x".repeat(4096));
+  const r = await openArchive(attachment("groot.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r.refusedWhole, true);
+  assert.equal(r.members.length, 0);
+  assert.match(r.refusals[0].reason, /groter dan/);
+});
+
+test("[ARCHIEF-WAAR] identical copies that UNDER-DECLARE their size are stopped by the counted budget", async () => {
+  // The same three 4 KB copies, but every header claims 100 bytes. The declared-size pre-filter
+  // passes them; only the bytes actually inflated during the comparison can stop this.
+  const buf = await sameNameZip(3, "x".repeat(4096));
+  const LOCAL = Buffer.from([0x50, 0x4b, 0x03, 0x04]), CENTRAL = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+  let patched = 0;
+  for (let i = buf.indexOf(LOCAL); i !== -1; i = buf.indexOf(LOCAL, i + 4)) { buf.writeUInt32LE(100, i + 22); patched++; }
+  for (let i = buf.indexOf(CENTRAL); i !== -1; i = buf.indexOf(CENTRAL, i + 4)) { buf.writeUInt32LE(100, i + 24); patched++; }
+  assert.equal(patched, 6, "fixture: three local headers and three directory records under-declare");
+  const r = await openArchive(attachment("liegt.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r.refusedWhole, true, "comparing copies may not be a way around the archive-wide ceiling");
+  assert.equal(r.members.length, 0);
+  assert.match(r.refusals[0].reason, /groter dan/);
+});
+
+test("[ARCHIEF-WAAR] permitted identical copies within both ceilings still resolve to ONE document", async () => {
+  const buf = await sameNameZip(2, "x".repeat(4096));
+  const r = await openArchive(attachment("twee.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r.refusedWhole, false);
+  assert.equal(r.members.length, 1);
+  assert.equal(r.members[0].size, 4096);
+});
+
+test("[ARCHIEF-WAAR] differing copies are still refused under the budget", async () => {
+  const buf = await sameNameZip(3, (i) => `%PDF copy ${i}`);
+  const r = await openArchive(attachment("drie.zip", buf.toString("base64")),
+    { entryBytes: 8192, totalBytes: 10_240, maxEntries: 25 });
+  assert.equal(r.refusedWhole, true);
+  assert.match(r.refusals[0].reason, /dezelfde naam/);
+});
+
+test("[ARCHIEF-WAAR] a directory that under-counts its own entries is refused whole", async () => {
+  // Two records, an end record claiming one. JSZip reads one and never sees the second — a file
+  // smuggled past every check. The walk must end exactly where the directory says it ends.
+  const buf = await zipBytes({ "a.pdf": "%PDF a", "b.pdf": "%PDF b" });
+  const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  buf.writeUInt16LE(1, eocd + 8);
+  buf.writeUInt16LE(1, eocd + 10);
+  const r = await openArchive(attachment("stil.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, true, "an inconsistent directory proves nothing and is refused");
+  assert.equal(r.members.length, 0);
+  assert.match(r.refusals[0].reason, /afzender/, "with an action the owner can take");
+});

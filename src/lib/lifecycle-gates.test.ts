@@ -27442,8 +27442,22 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
   assert.match(expand, /memberKey: key,/, "members no longer carry their key");
   assert.match(expand, /const directory = readCentralDirectory\(raw\);?\s*if \(!directory\) return wholeRefusal\(KAPOT\)/,
     "the archive's own directory is no longer read — two entries at one path collapse into one again");
-  assert.match(expand, /if \(!first \|\| copies\.some\(\(c\) => !c \|\| !c\.equals\(first\)\)\) return wholeRefusal\(ZELFDE_NAAM\)/,
-    "entries at one path with different (or unreadable) bytes are no longer refused");
+  assert.match(expand, /else if \(copy\.hash !== firstHash\) return wholeRefusal\(ZELFDE_NAAM\)/,
+    "entries at one path with different bytes are no longer refused");
+
+  // [ARCHIEF-WAAR] review round 2 — the ceilings hold over the RAW records, before any comparison.
+  const countAt = expand.indexOf("if (rawFiles.length > limits.maxEntries) {");
+  const compareAt = expand.indexOf("fingerprintRawEntry(raw, e, directory.shift,");
+  assert.ok(countAt > -1 && compareAt > countAt,
+    "the entry ceiling is counted after JSZip merged the names (or after comparing copies) — 26 copies of one name pass it");
+  assert.match(expand, /Math\.min\(limits\.entryBytes, remaining\)\);?\s*if \(!copy\.ok\) \{\s*if \(copy\.reason === "too_big" && remaining < limits\.entryBytes\) return wholeRefusal\(TE_GROOT_GEHEEL\)/,
+    "comparing copies no longer draws on the archive's byte budget");
+  assert.match(expand, /let totalRead = extraCopies;?/,
+    "the bytes inflated to compare copies are no longer on the archive's account");
+  assert.match(expand, /hash: createHash\("sha256"\)\.update\(out\)\.digest\("hex"\)/,
+    "copies are compared by retaining their bytes again — memory grows with the number of copies");
+  assert.match(expand, /if \(pos !== recordStart\) return null;?/,
+    "a directory whose records do not end where it says it ends is accepted — an under-counted entry is invisible");
   assert.match(src, /const keptDurably = \(r: KeepResult\)[^=]*=>[\s\S]{0,120}?registered/,
     "a keep the next sync cannot see counts as done");
 

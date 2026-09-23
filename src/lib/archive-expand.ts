@@ -21,11 +21,13 @@
 // is decided by the sync, from what actually happened to each member.
 
 import JSZip from "jszip";
+import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import {
   judgeEntry,
   planArchive,
   isOpenableArchive,
+  MAX_ENTRIES,
   MAX_ENTRY_BYTES,
   MAX_TOTAL_BYTES,
   ARCHIVE_OWNER_ACTION,
@@ -152,6 +154,8 @@ interface RawEntry {
   name: string;
   method: number;
   compressedSize: number;
+  /** As DECLARED by the directory — a pre-filter only; the counted bytes are what hold. */
+  declaredSize: number;
   localHeaderOffset: number;
 }
 
@@ -162,6 +166,10 @@ interface RawEntry {
  * shows up as one — the other copy is simply not there to ask about. The central directory still
  * lists both. Returns null when the directory cannot be walked; the caller then refuses the archive,
  * because a name check that did not run has not proven anything.
+ *
+ * [ARCHIEF-WAAR] "Walked" means ACCOUNTED FOR: the records must end exactly where the directory
+ * says it ends. An end record that under-counts its entries is read by JSZip as far as the count
+ * goes and no further, so a record past the count is a file nothing downstream ever sees.
  */
 function readCentralDirectory(buf: Buffer): { entries: RawEntry[]; shift: number } | null {
   const EOCD = 0x06054b50, CENTRAL = 0x02014b50, Z64_LOCATOR = 0x07064b50, Z64_EOCD = 0x06064b50;
@@ -202,26 +210,41 @@ function readCentralDirectory(buf: Buffer): { entries: RawEntry[]; shift: number
       name: raw.toString(utf8 ? "utf8" : "latin1"),
       method: buf.readUInt16LE(pos + 10),
       compressedSize: buf.readUInt32LE(pos + 20),
+      declaredSize: buf.readUInt32LE(pos + 24),
       localHeaderOffset: buf.readUInt32LE(pos + 42),
     });
     pos += 46 + nameLen + extraLen + commentLen;
   }
+  if (pos !== recordStart) return null; // records left over, or the count overran the directory
   return { entries, shift };
 }
 
-/** Inflate one raw entry, bounded. Null when it cannot be read within `limit`. */
-function readRawEntry(buf: Buffer, e: RawEntry, shift: number, limit: number): Buffer | null {
+/**
+ * Inflate one raw entry, bounded by `limit`, and keep only its fingerprint. The inflated bytes are
+ * dropped before this returns, so comparing N copies holds one copy in memory, never N.
+ */
+function fingerprintRawEntry(
+  buf: Buffer, e: RawEntry, shift: number, limit: number,
+): { ok: true; bytes: number; hash: string } | { ok: false; reason: "too_big" | "unreadable" } {
   try {
     const at = e.localHeaderOffset + shift;
-    if (at < 0 || at + 30 > buf.length || buf.readUInt32LE(at) !== 0x04034b50) return null;
+    if (at < 0 || at + 30 > buf.length || buf.readUInt32LE(at) !== 0x04034b50) return { ok: false, reason: "unreadable" };
     const start = at + 30 + buf.readUInt16LE(at + 26) + buf.readUInt16LE(at + 28);
     const data = buf.subarray(start, start + e.compressedSize);
-    if (data.length !== e.compressedSize) return null;
-    if (e.method === 0) return data.length <= limit ? Buffer.from(data) : null;
-    if (e.method === 8) return inflateRawSync(data, { maxOutputLength: limit });
-    return null;
-  } catch {
-    return null; // a broken stream, or more than `limit` bytes: either way not comparable
+    if (data.length !== e.compressedSize) return { ok: false, reason: "unreadable" };
+    let out: Buffer;
+    if (e.method === 0) {
+      if (data.length > limit) return { ok: false, reason: "too_big" };
+      out = data;
+    } else if (e.method === 8) {
+      out = inflateRawSync(data, { maxOutputLength: limit });
+    } else {
+      return { ok: false, reason: "unreadable" };
+    }
+    return { ok: true, bytes: out.length, hash: createHash("sha256").update(out).digest("hex") };
+  } catch (err) {
+    // zlib refuses to produce more than `limit` with a RangeError; anything else is a broken stream.
+    return { ok: false, reason: err instanceof RangeError ? "too_big" : "unreadable" };
   }
 }
 
@@ -289,8 +312,10 @@ const TE_GROOT_GEHEEL = `het archief is uitgepakt groter dan 25 MB — ${ARCHIVE
 export interface ArchiveLimits {
   entryBytes: number;
   totalBytes: number;
+  /** Raw directory records (directories excluded) — counted BEFORE JSZip merges any names. */
+  maxEntries?: number;
 }
-const DEFAULT_LIMITS: ArchiveLimits = { entryBytes: MAX_ENTRY_BYTES, totalBytes: MAX_TOTAL_BYTES };
+const DEFAULT_LIMITS: ArchiveLimits = { entryBytes: MAX_ENTRY_BYTES, totalBytes: MAX_TOTAL_BYTES, maxEntries: MAX_ENTRIES };
 
 /**
  * [ARCHIEF-WAAR] Open ONE zip and report every member and every refusal, each under its own key.
@@ -301,8 +326,9 @@ const DEFAULT_LIMITS: ArchiveLimits = { entryBytes: MAX_ENTRY_BYTES, totalBytes:
  */
 export async function openArchive<T extends ExpandableAttachment>(
   att: T,
-  limits: ArchiveLimits = DEFAULT_LIMITS,
+  given: ArchiveLimits = DEFAULT_LIMITS,
 ): Promise<OpenedArchive<T>> {
+  const limits = { ...DEFAULT_LIMITS, ...given } as Required<ArchiveLimits>;
   const archiveKey = `${att.messageId}:${att.filename}`;
   const wholeRefusal = (reason: string): OpenedArchive<T> => ({
     archiveKey,
@@ -326,19 +352,53 @@ export async function openArchive<T extends ExpandableAttachment>(
   // and guessing which copy is "the" invoice is not ours to do.
   const directory = readCentralDirectory(raw);
   if (!directory) return wholeRefusal(KAPOT);
+  const rawFiles = directory.entries.filter((e) => !e.name.endsWith("/") && !e.name.endsWith("\\"));
+
+  // [ARCHIEF-WAAR] The ceilings apply to what the archive HOLDS, before anything is inflated.
+  // planArchive below counts what JSZip shows, and JSZip has already merged every entry that shares
+  // a name — 26 copies of one name are one file to it. So the count and the declared total are taken
+  // here, over the raw records; the counted bytes further down are what hold against a zip that lies.
+  if (rawFiles.length > limits.maxEntries) {
+    return wholeRefusal(
+      `het archief bevat ${rawFiles.length} bestanden (meer dan ${limits.maxEntries}), te veel om automatisch te verwerken — ${ARCHIVE_OWNER_ACTION}`,
+    );
+  }
+  if (rawFiles.reduce((sum, e) => sum + e.declaredSize, 0) > limits.totalBytes) return wholeRefusal(TE_GROOT_GEHEEL);
+
+  // Nothing JSZip sees may be missing from the directory we checked. After the walk above this
+  // cannot happen by construction; asserted anyway, because the member loop trusts JSZip's list.
+  const onRecord = new Set(rawFiles.map((e) => normalizeMemberPath(e.name)));
+  for (const f of Object.values(zip.files)) {
+    if (!f.dir && !onRecord.has(normalizeMemberPath(f.name))) return wholeRefusal(KAPOT);
+  }
+
   const groups = new Map<string, RawEntry[]>();
-  for (const e of directory.entries) {
-    if (e.name.endsWith("/") || e.name.endsWith("\\")) continue;
+  for (const e of rawFiles) {
     const verdict = judgeEntry({ filename: e.name, bytes: 1 });
     if (!verdict.take && verdict.silent) continue; // archive chrome is never a document
     const key = normalizeMemberPath(e.name);
     groups.set(key, [...(groups.get(key) ?? []), e]);
   }
+  // Every copy that is inflated to be compared is inflated FOR REAL, so every copy counts against
+  // the archive's budget — comparing may not become a way around the ceiling. One copy is held at a
+  // time (fingerprintRawEntry keeps a hash, not the bytes), so memory does not grow with the count.
+  let compared = 0;
+  let extraCopies = 0;
   for (const group of groups.values()) {
     if (group.length < 2) continue;
-    const copies = group.map((e) => readRawEntry(raw, e, directory.shift, limits.entryBytes));
-    const first = copies[0];
-    if (!first || copies.some((c) => !c || !c.equals(first))) return wholeRefusal(ZELFDE_NAAM);
+    let firstHash: string | null = null;
+    for (const e of group) {
+      const remaining = limits.totalBytes - compared;
+      const copy = fingerprintRawEntry(raw, e, directory.shift, Math.min(limits.entryBytes, remaining));
+      if (!copy.ok) {
+        if (copy.reason === "too_big" && remaining < limits.entryBytes) return wholeRefusal(TE_GROOT_GEHEEL);
+        return wholeRefusal(ZELFDE_NAAM); // a copy that cannot be compared cannot be told apart
+      }
+      compared += copy.bytes;
+      if (firstHash === null) firstHash = copy.hash;
+      else if (copy.hash !== firstHash) return wholeRefusal(ZELFDE_NAAM);
+      else extraCopies += copy.bytes;
+    }
   }
 
   const files = Object.values(zip.files).filter((f) => !f.dir);
@@ -370,7 +430,9 @@ export async function openArchive<T extends ExpandableAttachment>(
   }
 
   const members: T[] = [];
-  let totalRead = 0;
+  // The extra identical copies were inflated above and stay on the archive's account; the copy that
+  // speaks for its group is read again below and counted there.
+  let totalRead = extraCopies;
   for (const wanted of plan.take) {
     const f = files.find((x) => x.name === wanted.filename);
     if (!f) continue;
