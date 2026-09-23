@@ -37439,6 +37439,87 @@ test("[ONTVANGEN-DRAIN] the door filter is in the statement, not an afterthought
     "[ONTVANGEN-DRAIN] a 'done' marker outside the document row is a second truth that will lie")
 })
 
+test("[ONTVANGEN-DRAIN] the pass asks for the mode the documents it selects are waiting for", () => {
+  // ── WHAT THIS PINS, AND WHAT IT COST ──
+  //
+  // The drain sent `mode: "retry_skipped"`. That is the mode behind the "Lees opnieuw" button, and
+  // mayResume("retry_skipped", …) consults SKIPPED_DOC_TYPES — 'could_not_read' and
+  // 'unsupported_type'. The drain selects 'wacht_op_lezen' and 'wacht_op_limiet', and NEITHER is in
+  // that list. So every candidate came back `not_waiting`: the recovery pass selected the backlog,
+  // walked it document by document, and processed none of it, while the cron log read `picked: 25`.
+  //
+  // Asserted here as well as in the behavioural tests because this is a ONE-WORD regression in a
+  // file whose tests can all be satisfied with an injected `run` that accepts anything.
+  const drain = codeFile("src/lib/intake-drain.ts")
+  const start = drain.indexOf("export async function runIntakeDrain")
+  assert.notEqual(start, -1, "[GATE-VENSTER] the drain loop is not where this gate expects it")
+  // Cut on REAL CODE, never on a comment: code() strips comments, so a marker inside one is not in
+  // the string being sliced and indexOf answers -1 — which would run this window to end of file.
+  const end = drain.indexOf("const notices = await runUnreadableNotices(deps)", start)
+  assert.notEqual(end, -1, "[GATE-VENSTER] the drain loop's closing marker is gone")
+  const loop = drain.slice(start, end)
+  assert.ok(loop.length > 100, "the drain-loop window is empty — the slice found nothing")
+
+  assert.match(loop, /mode: "fresh_intake"/,
+    "[ONTVANGEN-DRAIN] the drain's candidates wait on their FIRST reading — fresh_intake is the only mode that resumes them")
+  assert.doesNotMatch(loop, /mode: "retry_skipped"/,
+    "[ONTVANGEN-DRAIN] retry_skipped refuses every state this selector picks; the pass would process nothing")
+  assert.match(loop, /trigger: "drain"/,
+    "[ONTVANGEN-DRAIN] provenance is the caller's to state, and the audit rows carry it")
+})
+
+test("[ONTVANGEN-DRAIN] a document its owner threw away is filtered at selection AND re-checked at execution", () => {
+  // Two guards, because they answer two different moments. A pass holds up to DRAIN_BATCH documents
+  // and walks them one at a time with a model call each; an owner emptying their incoming folder
+  // halfway through is an ordinary event. Without the second guard the run would read and book
+  // every document it was already holding.
+  const drain = codeFile("src/lib/intake-drain.ts")
+  const readerStart = drain.indexOf("export async function selectDrainCandidates")
+  assert.notEqual(readerStart, -1, "[GATE-VENSTER] the reader selector moved")
+  const readerEnd = drain.indexOf("export const NOTICE_BATCH", readerStart)
+  assert.notEqual(readerEnd, -1, "[GATE-VENSTER] the reader selector's closing marker is gone")
+  const reader = drain.slice(readerStart, readerEnd)
+  assert.match(reader, /\.eq\("trashed", false\)/,
+    "[ONTVANGEN-DRAIN] reading a document the owner threw away spends a model call nobody is waiting for")
+
+  // And the execution boundary re-reads it under the claim, out of the row itself.
+  const load = codeFile("src/lib/stored-document.ts")
+  assert.match(load, /"trashed, "/,
+    "[ONTVANGEN-DRAIN] the loader cannot judge a column it does not select")
+  assert.match(load, /if \(row\.trashed === true\) return \{ kind: "gone" \}/,
+    "[ONTVANGEN-DRAIN] trash between the selection and the run must not become a booked invoice")
+})
+
+test("[NO-SILENT-EMPTY] neither of the drain's two scans may answer a failure with an empty list", () => {
+  // The launch invariant, at the only layer a source gate can hold it: "a failed attempt to read
+  // the backlog must never be reported as an empty, healthy backlog." The reader half returned
+  // `[]` for BOTH a returned error and a thrown read, under a comment saying a failed read is not
+  // an empty work list. The comment was right and the code was not.
+  const drain = codeFile("src/lib/intake-drain.ts")
+  assert.match(drain, /export type DrainScan[\s\S]{0,200}kind: "unavailable"/,
+    "[NO-SILENT-EMPTY] the reader scan must be able to SAY it could not look")
+  assert.match(drain, /export type ReaderReport[\s\S]{0,200}kind: "unavailable"/,
+    "[NO-SILENT-EMPTY] and the pass must be able to carry that up, instead of picked: 0")
+
+  const selectStart = drain.indexOf("export async function selectDrainCandidates")
+  const selectEnd = drain.indexOf("export const NOTICE_BATCH", selectStart)
+  assert.notEqual(selectEnd, -1, "[GATE-VENSTER] the reader selector's closing marker is gone")
+  const select = drain.slice(selectStart, selectEnd)
+  assert.equal((select.match(/kind: "unavailable"/g) ?? []).length, 2,
+    "[NO-SILENT-EMPTY] both failure shapes — a returned error and a throw — must answer unavailable")
+  assert.doesNotMatch(select, /return \[\]/,
+    "[NO-SILENT-EMPTY] an empty array is a measurement, and a failed read has not earned one")
+
+  // The door: a degraded half must reach the heartbeat as a FAILED run, and must name which half.
+  const door = codeFile("src/app/api/cron/intake-drain/route.ts")
+  assert.match(door, /report\.reader\.kind === "unavailable"/,
+    "[NO-SILENT-EMPTY] the route must read the reader half, not only the notice half")
+  assert.match(door, /report\.notices\.kind === "unavailable"/)
+  assert.match(door, /reader unavailable/,
+    "[NO-SILENT-EMPTY] an operator needs to know WHICH backlog was not measured")
+  assert.match(door, /notices unavailable/)
+})
+
 test("[ONTVANGEN-DRAIN] the cron door is closed by default, and scheduled behind that door", () => {
   const door = codeFile("src/app/api/cron/intake-drain/route.ts")
   assert.match(door, /timingSafeEqualStr\(auth, `Bearer \$\{secret\}`\)/,
@@ -37462,12 +37543,29 @@ test("[ONTVANGEN-DRAIN] the cron door is closed by default, and scheduled behind
 
   // The heartbeat row is written AFTER the gate. Before it, an unauthorised probe would mark the
   // cron as alive on the strength of somebody knocking.
-  const gate = door.indexOf("status: 401")
-  const beat = door.indexOf("beginCronRun(")
+  //
+  // ⚠️ This looked for `beginCronRun(` — the literal CALL — and it stopped being the call the day
+  // the door was seamed for its route test: the heartbeat is injectable now, so the invocation
+  // reads `begin(client(), …)` and the identifier survives only in the import and the deps type.
+  // indexOf then answered -1, and `-1 > gate` is false, so the gate failed — loudly, which is the
+  // good outcome of the two. A gate that had compared the other way round would have PASSED on -1
+  // and stopped watching the thing it was written for. So: find the argument list, which is what
+  // actually identifies this heartbeat, and assert it was found before comparing anything.
+  const gate = door.lastIndexOf("status: 401")
+  const beat = door.indexOf('"intake-drain", new Date().toISOString()')
+  assert.notEqual(beat, -1,
+    "[GATE-VENSTER] the heartbeat call is not where this gate can see it — find it before trusting an order")
+  assert.notEqual(gate, -1, "[GATE-VENSTER] the unauthorised refusal is gone from this door")
   assert.ok(beat > gate,
     "[ONTVANGEN-DRAIN] the heartbeat is written before the door is closed — a probe would fake a run")
-  assert.match(door, /finishCronRun\([\s\S]{0,120}ok: false/,
-    "[ONTVANGEN-DRAIN] a failed pass must be recorded as failed, or silence and failure look alike")
+  // Same correction as the heartbeat-order assertion above: the writer is injected now, so
+  // `finishCronRun(` is no longer the call. What identifies a FAILED record is the record itself,
+  // and there are two of them — a degraded round, and a pass that could not run at all. Both are
+  // asserted, because a door that recorded only one of them would be silent about the other.
+  assert.match(door, /ok: false, error: degraded\.join/,
+    "[ONTVANGEN-DRAIN] a degraded pass must be recorded as failed, or silence and failure look alike")
+  assert.match(door, /cronRunId, \{ ok: false, error: message \}/,
+    "[ONTVANGEN-DRAIN] a pass that could not run at all must be recorded as failed too")
 })
 
 // ── [ONTVANGEN-VLAG] Two roads, and the one that works today is the default ───────────────────

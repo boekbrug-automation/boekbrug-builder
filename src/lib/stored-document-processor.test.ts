@@ -28,7 +28,8 @@ import assert from "node:assert/strict"
 
 import { processStoredDocument } from "./stored-document-processor"
 import { autoSettlementKey } from "./settlement-key"
-import { autoFinishedEventKey } from "./stored-document"
+import { autoFinishedEventKey, type ProcessMode } from "./stored-document"
+import type { BackgroundTrigger } from "./intake-provenance"
 import { DOC_TYPE_WACHT_OP_LEZEN } from "./skipped-import"
 import { selectDrainCandidates, runIntakeDrain } from "./intake-drain"
 import { STORED_DOCUMENT_CLAIM_TTL_MS } from "./stored-document-claim"
@@ -305,15 +306,36 @@ function freshWorld(): World {
     ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN, ai_processed: false,
     content_hash: "abc123", invoice_id: null, intake_ai_counted_period: null, year: null,
     intake_retry_after: null, created_at: "2026-09-18T09:00:00Z",
+    // [ONTVANGEN-DRAIN] The reader selector filters on this, and loadStoredDocument re-reads it at
+    // the execution boundary. A world without the column would let both guards look satisfied.
+    trashed: false,
   })
   w.blobs.set(PATH, "%PDF-1.4 de bon")
   return w
 }
 
+/**
+ * [ONTVANGEN-DRAIN] `mode` and `trigger` are PARAMETERS, and that is the whole point of this seam.
+ *
+ * They used to be hard-coded `"fresh_intake"` / `"drain"` here, and runOnceAs below threw away
+ * everything the caller passed except the two ids. So the drain-to-processor test called this
+ * helper, the helper substituted the mode it wished for, and the assertion "the drain walks the
+ * same road" was made about a road the drain does not take. Production sent `retry_skipped`, which
+ * mayResume() refuses for every state the drain selects — so the test was green over a pass that
+ * processed nothing at all.
+ *
+ * A default is kept because thirty-odd crash tests want the fresh road and should not have to say
+ * so. What may never come back is the hard-coded value in runOnceAs.
+ */
+function runOnce(
+  world: World,
+  crashAfter: Step | null,
+  over: { mode?: ProcessMode; trigger?: BackgroundTrigger } = {},
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function runOnce(world: World, crashAfter: Step | null): Promise<any> {
+): Promise<any> {
   return processStoredDocument({
-    documentId: DOCUMENT, ownerId: OWNER, mode: "fresh_intake", trigger: "drain",
+    documentId: DOCUMENT, ownerId: OWNER,
+    mode: over.mode ?? "fresh_intake", trigger: over.trigger ?? "drain",
     deps: {
       pipeline: world,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -340,12 +362,23 @@ function runOnce(world: World, crashAfter: Step | null): Promise<any> {
   })
 }
 
-/** The same run, addressed the way the drain addresses it. */
+/**
+ * The same run, addressed EXACTLY the way the drain addresses it.
+ *
+ * Every field the drain supplies is forwarded — the ids it selected, and the mode and trigger it
+ * chose. Nothing is substituted here. That is what makes a regression to `retry_skipped` visible:
+ * the real mayResume() then answers `not_waiting`, no invoice is written, and the tally below goes
+ * red instead of a fake mode quietly rescuing the run.
+ */
+function runOnceAs(
+  world: World,
+  crashAfter: Step | null,
+  args: { documentId: string; ownerId: string; mode: ProcessMode; trigger: BackgroundTrigger },
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function runOnceAs(world: World, crashAfter: Step | null, args: { documentId: string; ownerId: string }): Promise<any> {
+): Promise<any> {
   assert.equal(args.documentId, DOCUMENT)
   assert.equal(args.ownerId, OWNER)
-  return runOnce(world, crashAfter)
+  return runOnce(world, crashAfter, { mode: args.mode, trigger: args.trigger })
 }
 
 /** Everything the owner's list asks to be at most one of. */
@@ -552,15 +585,18 @@ test("[ONTVANGEN-CUTOVER] the browser dies, the kick never starts, and the drain
   assert.equal(world.invoices.length, 0)
   assert.equal(world.readerCalls, 0)
 
-  // Later, the drain comes past. It is a different trigger and a different mode, and it walks the
-  // same road.
-  const picked = await selectDrainCandidates({ pipeline: world, now: new Date() })
-  assert.deepEqual(picked.map((c) => c.documentId), [DOCUMENT],
+  // Later, the drain comes past. It chooses its own mode and its own trigger, and this test now
+  // forwards BOTH of them to the real processor — which is what makes it able to fail. With the
+  // drain sending `retry_skipped`, mayResume() refuses this document and the tally below is zero.
+  const scan = await selectDrainCandidates({ pipeline: world, now: new Date() })
+  assert.equal(scan.kind, "ok", "[NO-SILENT-EMPTY] the scan itself must have succeeded")
+  assert.deepEqual(scan.kind === "ok" ? scan.candidates.map((c) => c.documentId) : [], [DOCUMENT],
     "a document whose kick never ran must be visible to the drain")
 
   await runIntakeDrain({
     pipeline: world, now: new Date(),
-    run: (async (args: { documentId: string; ownerId: string }) =>
+    // Every argument the drain chose, forwarded verbatim — see runOnceAs.
+    run: (async (args: { documentId: string; ownerId: string; mode: ProcessMode; trigger: BackgroundTrigger }) =>
       runOnceAs(world, null, args)),
   })
 

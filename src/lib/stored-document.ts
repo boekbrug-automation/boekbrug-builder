@@ -93,6 +93,11 @@ export type StoredDocumentLoad =
 const COLUMNS =
   "id, user_id, file_url, file_name, file_type, folder_id, source, ai_doc_type, content_hash, " +
   "intake_paid_method, intake_paid_date, duplicate_decision, duplicate_candidate_invoice_id, " +
+  // [ONTVANGEN-DRAIN] `trashed` is read at the EXECUTION boundary, not only at selection. The
+  // drain filters on it when it picks, but a pass is not instant: the owner can empty their
+  // incoming folder in the seconds between the select and the claim, and every waiting document
+  // this run holds would still be read and booked. This is the same row, re-read under the claim.
+  "trashed, " +
   "intake_retry_after"
 
 type Row = {
@@ -109,6 +114,7 @@ type Row = {
   intake_paid_date?: string | null
   duplicate_decision?: string | null
   duplicate_candidate_invoice_id?: string | null
+  trashed?: boolean | null
   intake_retry_after?: string | null
 }
 
@@ -207,6 +213,16 @@ export async function loadStoredDocument(
   }
 
   if (!row) return { kind: "gone" }
+  // [ONTVANGEN-DRAIN] Thrown away between the selection and this moment.
+  //
+  // `gone` rather than a state of its own, and deliberately: the caller's contract for `gone` is
+  // already "the row is not there, or is not this owner's — never retry", and that is exactly what
+  // a trashed document is to every road that reaches here. The drain leaves it, the after-receive
+  // kick leaves it, and "Lees opnieuw" cannot offer it because the panel no longer lists it.
+  //
+  // Checked BEFORE resumeVerdict, because the question is not what this document is waiting for.
+  // It is whether anyone is still waiting.
+  if (row.trashed === true) return { kind: "gone" }
   const verdict = resumeVerdict(mode, row.ai_doc_type, row.intake_retry_after, now)
   if (verdict === "not_waiting") return { kind: "not_waiting", state: row.ai_doc_type ?? "" }
   if (verdict === "paused") return { kind: "paused", until: row.intake_retry_after ?? null }

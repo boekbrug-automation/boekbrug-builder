@@ -33,7 +33,31 @@ import { createPipelineClient } from "@/lib/supabase-pipeline";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+/**
+ * The three outside reaches, injectable — and nothing else.
+ *
+ * [READINESS-DEGRADE] is the precedent and the reason: what this door decides on a degraded pass
+ * cannot be asserted from the source alone, and a decision that only exists inside an `if` in a
+ * route is a decision no test can reach. Production passes none of these.
+ */
+export interface DrainRouteDeps {
+  runDrain?: typeof runIntakeDrain;
+  begin?: typeof beginCronRun;
+  finish?: typeof finishCronRun;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client?: () => any;
+}
+
 export async function GET(req: NextRequest) {
+  return drainResponse(req);
+}
+
+/** The whole door, seamed. GET is this function with the real world behind it. */
+export async function drainResponse(req: NextRequest, deps: DrainRouteDeps = {}): Promise<NextResponse> {
+  const runDrain = deps.runDrain ?? runIntakeDrain;
+  const begin = deps.begin ?? beginCronRun;
+  const finish = deps.finish ?? finishCronRun;
+  const client = deps.client ?? createPipelineClient;
   const secret = process.env.CRON_SECRET;
   const auth = req.headers.get("authorization");
   if (!secret) {
@@ -52,24 +76,32 @@ export async function GET(req: NextRequest) {
   // The row is what makes this job's silence readable. A drain that does nothing looks exactly
   // like a drain that never ran — and once the flag is on, the difference between those two is a
   // document the owner was told we had. CRON_JOBS carries the matching entry.
-  const cronRunId = await beginCronRun(createPipelineClient(), "intake-drain", new Date().toISOString());
+  const cronRunId = await begin(client(), "intake-drain", new Date().toISOString());
   try {
-    const report = await runIntakeDrain();
-    // [NO-SILENT-EMPTY] A notices pass that could not READ its work list is a degraded run, and
-    // the heartbeat is the one place a human looks to find that out. Recording ok:true over it
-    // would launder the distinction NoticeReport was reshaped to preserve, one layer further up:
-    // the row would say the drain ran cleanly, while nobody measured the backlog it owed.
-    const notices = report.notices;
-    await finishCronRun(createPipelineClient(), cronRunId, notices.kind === "unavailable"
-      ? { ok: false, error: `notices unavailable: ${notices.error}`, result: report }
-      : { ok: true, result: report });
-    return NextResponse.json({ ok: notices.kind !== "unavailable", ...report });
+    const report = await runDrain();
+    // [NO-SILENT-EMPTY] A pass that could not READ one of its two work lists is a degraded run,
+    // and the heartbeat is the one place a human looks to find that out. Recording ok:true over it
+    // would launder the distinction both report types were shaped to preserve, one layer further
+    // up: the row would say the drain ran cleanly, while nobody measured the backlog it owed.
+    //
+    // BOTH halves are named, and named SEPARATELY. They are two statements against the same table
+    // and they fail apart — a reader scan can time out while the notice scan answers, and an
+    // operator reading "degraded" needs to know which backlog was not measured, because only one
+    // of the two costs an owner a document they were told we had.
+    const degraded: string[] = [];
+    if (report.reader.kind === "unavailable") degraded.push(`reader unavailable: ${report.reader.error}`);
+    if (report.notices.kind === "unavailable") degraded.push(`notices unavailable: ${report.notices.error}`);
+    const ok = degraded.length === 0;
+    await finish(client(), cronRunId, ok
+      ? { ok: true, result: report }
+      : { ok: false, error: degraded.join("; "), result: report });
+    return NextResponse.json({ ok, ...report });
   } catch (e) {
     // runIntakeDrain isolates each document, so reaching here means the SELECT itself failed. The
     // documents are untouched and still waiting; the next pass reads them again.
     const message = e instanceof Error ? e.message : String(e);
     console.error("[ONTVANGEN-DRAIN] the pass could not run", { error: message });
-    await finishCronRun(createPipelineClient(), cronRunId, { ok: false, error: message });
+    await finish(client(), cronRunId, { ok: false, error: message });
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }

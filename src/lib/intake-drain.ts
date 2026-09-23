@@ -72,14 +72,30 @@ export interface DrainDeps {
 }
 
 /**
+ * [NO-SILENT-EMPTY] What the reader scan FOUND, or that it could not find out.
+ *
+ * The same shape, and for the same reason, as NoticeScan below. A bare array cannot tell "no
+ * document is waiting" apart from "we could not read the list of waiting documents", and the
+ * second one then reports itself as a clean pass with nothing to do — on the one surface whose
+ * entire purpose is that a received document is never lost quietly.
+ *
+ * This half was left behind when the notice half was reshaped: the comment above the reader's
+ * error branch already said a failed read is not an empty work list, and the code still returned
+ * `[]`. The comment was right and the code was not.
+ */
+export type DrainScan =
+  | { kind: "ok"; candidates: DrainCandidate[] }
+  | { kind: "unavailable"; error: string }
+
+/**
  * Which documents this pass may pick up.
  *
  * Owner-blind on purpose: the drain is a system pass, not a user action, and it walks every
- * account. What it is NOT blind to is the door a document came in through, or the state it waits
- * in — both are filters in the statement, because a filter applied afterwards is a filter that
- * fetched the rows anyway.
+ * account. What it is NOT blind to is the door a document came in through, the state it waits
+ * in, or whether the owner has thrown it away — all three are filters in the statement, because a
+ * filter applied afterwards is a filter that fetched the rows anyway.
  */
-export async function selectDrainCandidates(deps: DrainDeps = {}): Promise<DrainCandidate[]> {
+export async function selectDrainCandidates(deps: DrainDeps = {}): Promise<DrainScan> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pipeline: any = deps.pipeline ?? createPipelineClient()
   const now = deps.now ?? new Date()
@@ -90,6 +106,11 @@ export async function selectDrainCandidates(deps: DrainDeps = {}): Promise<Drain
       .select("id, user_id, ai_doc_type, intake_retry_after")
       .in("source", [...INTAKE_SOURCES])
       .in("ai_doc_type", [DOC_TYPE_WACHT_OP_LEZEN, DOC_TYPE_WACHT_OP_LIMIET])
+      // The owner threw it away. Reading it now would spend an AI call on a document nobody is
+      // waiting for and book an invoice into an administration its owner has already tidied — and
+      // it would do that every fifteen minutes, because trashing does not change ai_doc_type.
+      // The notice selector has carried this predicate since it was written; the reader did not.
+      .eq("trashed", false)
       // Oldest first, and by id after that: a deterministic order means a pass that keeps running
       // out of time keeps starting with the SAME documents, which is how a backlog drains rather
       // than churns. `created_at` is when the owner handed it over, so the longest wait goes first.
@@ -97,8 +118,10 @@ export async function selectDrainCandidates(deps: DrainDeps = {}): Promise<Drain
       .order("id", { ascending: true })
       .limit(DRAIN_BATCH * 2)
     if (error) {
+      // [NO-SILENT-EMPTY] Not an empty list. The documents stay exactly as they were — nothing is
+      // lost — but nothing may be reported as measured either.
       console.error("[ONTVANGEN-DRAIN] could not read the waiting documents", { error: error.message })
-      return []
+      return { kind: "unavailable", error: String(error.message ?? "read failed") }
     }
     const rows = (data ?? []) as Array<{
       id: string; user_id: string; ai_doc_type: string | null; intake_retry_after: string | null
@@ -115,14 +138,18 @@ export async function selectDrainCandidates(deps: DrainDeps = {}): Promise<Drain
       // and the next month both set the date, and guessing "now" would re-run a refused read.
       return Number.isFinite(until) && until <= now.getTime()
     })
-    return eligible.slice(0, DRAIN_BATCH).map((r) => ({
-      documentId: r.id, ownerId: r.user_id, state: (r.ai_doc_type ?? "").trim(),
-    }))
+    return {
+      kind: "ok",
+      candidates: eligible.slice(0, DRAIN_BATCH).map((r) => ({
+        documentId: r.id, ownerId: r.user_id, state: (r.ai_doc_type ?? "").trim(),
+      })),
+    }
   } catch (e) {
+    // [NO-SILENT-EMPTY] A throw tells us even less than an error does. Same answer, same reason.
     console.error("[ONTVANGEN-DRAIN] the candidate read threw", {
       error: e instanceof Error ? e.message : String(e),
     })
-    return []
+    return { kind: "unavailable", error: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -282,10 +309,27 @@ export async function runUnreadableNotices(deps: DrainDeps = {}): Promise<Notice
   return { kind: "scanned", picked: scan.candidates.length, outcomes }
 }
 
+/**
+ * [NO-SILENT-EMPTY] What one reader pass did — or that it could not find out what there was to do.
+ *
+ * Deliberately the same union as NoticeReport, because it answers the same question about the same
+ * kind of work. `picked: 0` is a CLAIM — "we looked, and nothing was waiting" — and a pass whose
+ * scan failed has not earned it. The shape is what stops it being made.
+ */
+export type ReaderReport =
+  | { kind: "scanned"; picked: number; outcomes: Record<string, number> }
+  | { kind: "unavailable"; error: string }
+
+/**
+ * What one drain pass did, in two halves that are reported apart.
+ *
+ * Apart, because they fail apart: the reader scan and the notice scan are two statements against
+ * the same table, and one can time out while the other answers. Folding them into a single `ok`
+ * would mean a healthy notice pass vouching for a reader pass that never measured its backlog.
+ */
 export interface DrainReport {
-  picked: number
-  /** Counted by what processStoredDocument answered, purely so a human can read the log. */
-  outcomes: Record<string, number>
+  /** What the AI reader pass did, or that its work list was unreadable. */
+  reader: ReaderReport
   /** [UPLOAD-TRUTH-1] What the notice pass did, counted apart: it reads no file and spends nothing. */
   notices: NoticeReport
 }
@@ -312,7 +356,14 @@ export interface DrainReport {
  */
 export async function runIntakeDrain(deps: DrainDeps = {}): Promise<DrainReport> {
   const run = deps.run ?? processStoredDocument
-  const candidates = await selectDrainCandidates(deps)
+  const scan = await selectDrainCandidates(deps)
+  // [NO-SILENT-EMPTY] A pass that could not read its work list reports exactly that, and does not
+  // go on to call the notice pass's outcome the whole truth about this run. The notice half still
+  // runs: it is a different statement with a different failure, and it owes its own answer.
+  if (scan.kind === "unavailable") {
+    return { reader: { kind: "unavailable", error: scan.error }, notices: await runUnreadableNotices(deps) }
+  }
+  const candidates = scan.candidates
   const outcomes: Record<string, number> = {}
 
   for (const c of candidates) {
@@ -321,7 +372,20 @@ export async function runIntakeDrain(deps: DrainDeps = {}): Promise<DrainReport>
       result = await run({
         documentId: c.documentId,
         ownerId: c.ownerId,
-        mode: "retry_skipped",
+        // [ONTVANGEN-DRAIN] `fresh_intake`, and this is the correction the whole batch turns on.
+        //
+        // It was `retry_skipped`, which is the mode behind the "Lees opnieuw" button —
+        // mayResume("retry_skipped", …) consults SKIPPED_DOC_TYPES, and that list holds
+        // 'unsupported_type' and the terminal unreadable state and NOTHING this selector picks.
+        // So every candidate the drain handed over came back `not_waiting`: the recovery pass
+        // selected the backlog, walked it, and processed none of it, while the cron log read
+        // `picked: 25` and looked like work.
+        //
+        // `fresh_intake` is what these documents are owed — the FIRST reading of a document that
+        // came through the handoff, whether the kick ran hours ago or never. mayResume covers
+        // both waiting states for it, and resumeVerdict keeps the retry-date rule for the paused
+        // one: `wacht_op_limiet` before its date still answers `paused`, untouched and unpaid.
+        mode: "fresh_intake",
         trigger: "drain",
       })
     } catch (e) {
@@ -342,5 +406,5 @@ export async function runIntakeDrain(deps: DrainDeps = {}): Promise<DrainReport>
   // second thing to forget, and because the promise it keeps is the same promise.
   const notices = await runUnreadableNotices(deps)
 
-  return { picked: candidates.length, outcomes, notices }
+  return { reader: { kind: "scanned", picked: candidates.length, outcomes }, notices }
 }

@@ -15,11 +15,15 @@ import assert from "node:assert/strict"
 import {
   selectDrainCandidates, runIntakeDrain, DRAIN_BATCH,
   selectUnreadableNoticeCandidates, NOTICE_BATCH,
+  type DrainCandidate, type DrainScan, type DrainReport,
 } from "./intake-drain"
 import {
   DOC_TYPE_WACHT_OP_LEZEN, DOC_TYPE_WACHT_OP_LIMIET, DOC_TYPE_WACHT_OP_BESLUIT,
   DOC_TYPE_COULD_NOT_READ,
 } from "./skipped-import"
+// The REAL gate and the REAL loader. Imported rather than restated, so a test cannot agree with
+// the drain while both disagree with the processor that actually refuses the work.
+import { resumeVerdict, loadStoredDocument, type ProcessMode } from "./stored-document"
 
 const OWNER = "11111111-1111-1111-1111-111111111111"
 const NOW = new Date("2026-09-18T10:00:00Z")
@@ -50,6 +54,8 @@ function matches(row: Row, preds: Pred[]): boolean {
 class Fake {
   rows: Row[] = []
   selectError: { message: string } | null = null
+  /** Set to make the read THROW rather than answer with an error — a different failure, same truth. */
+  throwOnSelect: Error | null = null
   updateError: { message: string } | null = null
   /** The (column, values) pairs the SELECT filtered on — proof the filters are in the statement. */
   filters: Array<[string, unknown]> = []
@@ -87,6 +93,7 @@ class Fake {
 
     const run = () => {
       if (patch === null) {
+        if (self.throwOnSelect) throw self.throwOnSelect
         if (self.selectError) return { data: null, error: self.selectError }
         // Rows come back in the order they were GIVEN. The fake does not sort: a fake that sorts
         // proves its own ordering, not the statement's.
@@ -112,6 +119,12 @@ class Fake {
       },
       order: (column: string, opts?: unknown) => { self.orders.push([column, opts]); return q },
       limit: (n: number) => { cap = n; return q },
+      // loadStoredDocument reads ONE row this way. Modelled so the trash guard can be tested
+      // against the real loader rather than against a second copy of its rule.
+      maybeSingle: async () => {
+        const { data, error } = run() as { data: Row[] | null; error: unknown }
+        return { data: (data ?? [])[0] ?? null, error }
+      },
       then: <A, B>(ok?: (v: { data: Row[] | null; error: unknown }) => A | PromiseLike<A>, bad?: (e: unknown) => B) =>
         Promise.resolve().then(run).then(ok as never, bad as never),
     }
@@ -126,9 +139,30 @@ function doc(over: Row = {}): Row {
     source: "camera",
     ai_doc_type: DOC_TYPE_WACHT_OP_LEZEN,
     intake_retry_after: null,
+    // [ONTVANGEN-DRAIN] The Fake applies whatever predicates the statement asks for, so a fixture
+    // without this column is invisible to a selector that filters on it. Default: not thrown away.
+    trashed: false,
     created_at: "2026-09-18T09:00:00Z",
     ...over,
   }
+}
+
+/**
+ * The candidates of a scan that MUST have succeeded.
+ *
+ * A helper rather than `(scan as …).candidates`, because the assertion is the point: a selector
+ * that regressed to `unavailable` would otherwise read as "picked nothing" in every test below,
+ * which is precisely the confusion this batch exists to remove.
+ */
+function picked(scan: DrainScan): DrainCandidate[] {
+  assert.equal(scan.kind, "ok", `the scan was ${scan.kind}, so nothing below is measuring selection`)
+  return scan.kind === "ok" ? scan.candidates : []
+}
+
+/** The reader half of a report that MUST have scanned. Same reasoning as picked(). */
+function readerOf(report: DrainReport): { picked: number; outcomes: Record<string, number> } {
+  assert.equal(report.reader.kind, "scanned", "the reader pass did not scan")
+  return report.reader.kind === "scanned" ? report.reader : { picked: -1, outcomes: {} }
 }
 
 // ── What is picked up, and what is not ────────────────────────────────────────────────────────
@@ -136,9 +170,9 @@ function doc(over: Row = {}): Row {
 test("[ONTVANGEN-DRAIN] a document waiting on US is picked up", async () => {
   const db = new Fake()
   db.rows = [doc({ id: "a" })]
-  const picked = await selectDrainCandidates({ pipeline: db, now: NOW })
-  assert.deepEqual(picked.map((c) => c.documentId), ["a"])
-  assert.equal(picked[0].ownerId, OWNER)
+  const got = picked(await selectDrainCandidates({ pipeline: db, now: NOW }))
+  assert.deepEqual(got.map((c) => c.documentId), ["a"])
+  assert.equal(got[0].ownerId, OWNER)
 })
 
 test("[ONTVANGEN-DRAIN] a document waiting on the OWNER is never picked up", async () => {
@@ -146,7 +180,7 @@ test("[ONTVANGEN-DRAIN] a document waiting on the OWNER is never picked up", asy
   // for the same AI read of the same document and get the same question back.
   const db = new Fake()
   db.rows = [doc({ id: "a", ai_doc_type: DOC_TYPE_WACHT_OP_BESLUIT })]
-  assert.deepEqual(await selectDrainCandidates({ pipeline: db, now: NOW }), [])
+  assert.deepEqual(picked(await selectDrainCandidates({ pipeline: db, now: NOW })), [])
 })
 
 test("[ONTVANGEN-DRAIN] a paused document waits for its date, and then goes", async () => {
@@ -156,19 +190,19 @@ test("[ONTVANGEN-DRAIN] a paused document waits for its date, and then goes", as
     intake_retry_after: "2026-10-01T00:00:00Z",
   })]
   assert.deepEqual(
-    (await selectDrainCandidates({ pipeline: db, now: NOW })).map((c) => c.documentId), [],
+    picked(await selectDrainCandidates({ pipeline: db, now: NOW })).map((c) => c.documentId), [],
     "before the date, asking again asks the same question of the same full month",
   )
   const later = new Date("2026-10-01T00:00:01Z")
   assert.deepEqual(
-    (await selectDrainCandidates({ pipeline: db, now: later })).map((c) => c.documentId), ["nog-niet"],
+    picked(await selectDrainCandidates({ pipeline: db, now: later })).map((c) => c.documentId), ["nog-niet"],
   )
 })
 
 test("[ONTVANGEN-DRAIN] a paused document with no date is left alone rather than guessed at", async () => {
   const db = new Fake()
   db.rows = [doc({ id: "a", ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: null })]
-  assert.deepEqual(await selectDrainCandidates({ pipeline: db, now: NOW }), [])
+  assert.deepEqual(picked(await selectDrainCandidates({ pipeline: db, now: NOW })), [])
 })
 
 test("[ONTVANGEN-DRAIN] an e-mail attachment is never selected — source is a FILTER", async () => {
@@ -176,8 +210,8 @@ test("[ONTVANGEN-DRAIN] an e-mail attachment is never selected — source is a F
   // one of them to the intake processor on every single pass, get wrong_door back, and repeat.
   const db = new Fake()
   db.rows = [doc({ id: "mail", source: "email" }), doc({ id: "foto", source: "camera" })]
-  const picked = await selectDrainCandidates({ pipeline: db, now: NOW })
-  assert.deepEqual(picked.map((c) => c.documentId), ["foto"])
+  const got = picked(await selectDrainCandidates({ pipeline: db, now: NOW }))
+  assert.deepEqual(got.map((c) => c.documentId), ["foto"])
   // And it is in the STATEMENT, not a filter applied after fetching them anyway.
   assert.ok(
     db.filters.some(([c, v]) => c === "source" && Array.isArray(v) && v.includes("camera") && v.includes("upload")),
@@ -197,30 +231,63 @@ test("[ONTVANGEN-DRAIN] a finished or skipped document is not work", async () =>
     doc({ id: "onleesbaar", ai_doc_type: DOC_TYPE_COULD_NOT_READ }),
     doc({ id: "overig", ai_doc_type: "other" }),
   ]
-  assert.deepEqual(await selectDrainCandidates({ pipeline: db, now: NOW }), [])
+  assert.deepEqual(picked(await selectDrainCandidates({ pipeline: db, now: NOW })), [])
 })
 
 test("[ONTVANGEN-DRAIN] oldest first, and bounded", async () => {
   const db = new Fake()
   db.rows = Array.from({ length: DRAIN_BATCH + 10 }, (_, i) =>
     doc({ id: `d-${String(i).padStart(3, "0")}`, created_at: `2026-09-${String(i + 1).padStart(2, "0")}T09:00:00Z` }))
-  const picked = await selectDrainCandidates({ pipeline: db, now: NOW })
-  assert.equal(picked.length, DRAIN_BATCH, "a pass that tries to finish everything finishes nothing")
-  assert.equal(picked[0].documentId, "d-000", "the longest wait goes first")
+  const got = picked(await selectDrainCandidates({ pipeline: db, now: NOW }))
+  assert.equal(got.length, DRAIN_BATCH, "a pass that tries to finish everything finishes nothing")
+  assert.equal(got[0].documentId, "d-000", "the longest wait goes first")
   // …and the order is what the STATEMENT asked for. The fake no longer sorts, so without this the
   // assertion above would only be reporting the order the fixture happened to be written in.
   assert.deepEqual(db.orders, [
     ["created_at", { ascending: true, nullsFirst: true }],
     ["id", { ascending: true }],
   ], "deterministic order, or a backlog churns instead of draining")
-  assert.equal(picked[DRAIN_BATCH - 1].documentId, `d-${String(DRAIN_BATCH - 1).padStart(3, "0")}`)
+  assert.equal(got[DRAIN_BATCH - 1].documentId, `d-${String(DRAIN_BATCH - 1).padStart(3, "0")}`)
 })
 
-test("[ONTVANGEN-DRAIN] a read that fails picks nothing, rather than guessing", async () => {
+test("[NO-SILENT-EMPTY] a failed reader read is not an empty work list", async () => {
+  // This test used to assert `[]`, which is the defect written down as a requirement: a timeout
+  // and a genuinely empty backlog answered the same thing, and the pass above then reported
+  // `picked: 0` over documents nobody had measured.
   const db = new Fake()
   db.rows = [doc()]
   db.selectError = { message: "statement timeout" }
-  assert.deepEqual(await selectDrainCandidates({ pipeline: db, now: NOW }), [])
+  const scan = await selectDrainCandidates({ pipeline: db, now: NOW })
+  assert.equal(scan.kind, "unavailable", "a read that failed must never read as a measured zero")
+  assert.match(scan.kind === "unavailable" ? scan.error : "", /statement timeout/,
+    "and it must carry WHY, or the heartbeat cannot say what was wrong")
+})
+
+test("[NO-SILENT-EMPTY] a reader read that THREW is unavailable too", async () => {
+  // A throw tells us strictly less than an error does. The old code caught it and returned `[]`,
+  // which is the more confident of the two answers.
+  const db = new Fake()
+  db.rows = [doc()]
+  db.throwOnSelect = new Error("socket hang up")
+  const scan = await selectDrainCandidates({ pipeline: db, now: NOW })
+  assert.equal(scan.kind, "unavailable")
+  assert.match(scan.kind === "unavailable" ? scan.error : "", /socket hang up/)
+})
+
+test("[NO-SILENT-EMPTY] a genuinely empty backlog still reports a measured zero", async () => {
+  // The other half, and the reason `unavailable` is a separate arm rather than a pessimistic
+  // default: a pass that looked and found nothing has earned `picked: 0`, and must keep saying so.
+  const db = new Fake()
+  db.rows = []
+  const scan = await selectDrainCandidates({ pipeline: db, now: NOW })
+  assert.equal(scan.kind, "ok")
+  assert.deepEqual(picked(scan), [])
+
+  const report = await runIntakeDrain({ pipeline: db, now: NOW, run: (async () => ({ kind: "gone" as const })) })
+  assert.equal(report.reader.kind, "scanned",
+    "an honest zero is a zero, and must not be degraded into 'unavailable' by caution")
+  assert.equal(readerOf(report).picked, 0)
+  assert.deepEqual(readerOf(report).outcomes, {})
 })
 
 // ── The pass itself ───────────────────────────────────────────────────────────────────────────
@@ -238,12 +305,21 @@ test("[ONTVANGEN-DRAIN] each document is its own run, and one failure does not s
     }),
   })
   assert.deepEqual(seen, ["a", "b", "c"], "the batch continues past the one that threw")
-  assert.equal(report.picked, 3)
-  assert.equal(report.outcomes.processed, 2)
-  assert.equal(report.outcomes.threw, 1)
+  const reader = readerOf(report)
+  assert.equal(reader.picked, 3)
+  assert.equal(reader.outcomes.processed, 2)
+  assert.equal(reader.outcomes.threw, 1)
 })
 
-test("[ONTVANGEN-DRAIN] the drain asks for a retry of a skipped document, from the drain", async () => {
+test("[ONTVANGEN-DRAIN] the drain asks for the intake pass these documents are waiting for", async () => {
+  // ── THE DEFECT THIS PINS ──
+  //
+  // This assertion used to read `assert.equal(seen[0].mode, "retry_skipped")` — the test wrote the
+  // bug down as the requirement. `retry_skipped` is the mode behind the "Lees opnieuw" button, and
+  // mayResume("retry_skipped", …) consults SKIPPED_DOC_TYPES, which holds the terminal unreadable
+  // states and NOTHING this selector picks. Every candidate the drain handed over came back
+  // `not_waiting`. The recovery pass processed nothing, on any document, ever — while the cron log
+  // showed `picked: 25` and read like work being done.
   const db = new Fake()
   db.rows = [doc({ id: "a" })]
   const seen: Array<Record<string, unknown>> = []
@@ -254,9 +330,95 @@ test("[ONTVANGEN-DRAIN] the drain asks for a retry of a skipped document, from t
       return { kind: "gone" as const }
     }),
   })
-  assert.equal(seen[0].mode, "retry_skipped")
+  assert.equal(seen[0].mode, "fresh_intake",
+    "these documents are waiting on their FIRST reading; retry_skipped refuses every one of them")
   assert.equal(seen[0].trigger, "drain")
   assert.ok(!("source" in seen[0]), "source is receive identity and comes off the row")
+})
+
+test("[ONTVANGEN-DRAIN] the mode the drain sends is one the REAL gate accepts", async () => {
+  // The assertion above pins a string. This one pins the CONSEQUENCE, by putting the production
+  // rule between the drain and its outcome: resumeVerdict is imported, not restated, so the two
+  // cannot drift into agreeing with each other while disagreeing with the processor.
+  //
+  // With mode `retry_skipped` every verdict below is "not_waiting" and `processed` is 0 — which is
+  // exactly what production did.
+  const db = new Fake()
+  db.rows = [
+    doc({ id: "wacht" }),
+    doc({ id: "gepauzeerd-voorbij", ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: "2026-09-18T09:00:00Z" }),
+  ]
+  const verdicts: string[] = []
+  const report = await runIntakeDrain({
+    pipeline: db, now: NOW,
+    run: (async (args: { documentId: string; mode: ProcessMode }) => {
+      const row = db.rows.find((r) => r.id === args.documentId)!
+      // The real rule, applied to the real row, with the mode the drain really chose.
+      const verdict = resumeVerdict(args.mode, row.ai_doc_type as string, row.intake_retry_after as string | null, NOW)
+      verdicts.push(verdict)
+      if (verdict === "not_waiting") return { kind: "not_waiting" as const, state: String(row.ai_doc_type) }
+      if (verdict === "paused") return { kind: "paused" as const, until: String(row.intake_retry_after) }
+      return { kind: "processed" as const, outcome: { kind: "json" as const, status: 200, body: {} } }
+    }),
+  })
+  assert.deepEqual(verdicts, ["resume", "resume"],
+    "a drain whose mode the gate refuses is a recovery pass that recovers nothing")
+  assert.equal(readerOf(report).outcomes.processed, 2)
+  assert.equal(readerOf(report).outcomes.not_waiting, undefined)
+})
+
+test("[ONTVANGEN-DRAIN] a paused document past its date is resumed; before it, it is left paused", async () => {
+  // The retry-date rule is not the selector's alone. resumeVerdict applies it again at the
+  // execution boundary under `fresh_intake`, and it must keep applying it: a document selected a
+  // second before its date, or woken by a plan change that moved the date forward, must still cost
+  // nothing. Both halves are asserted against the REAL rule.
+  const row = { ai: DOC_TYPE_WACHT_OP_LIMIET, until: "2026-09-18T12:00:00Z" }
+  assert.equal(resumeVerdict("fresh_intake", row.ai, row.until, NOW), "paused",
+    "before the date, the month's allowance still says no and asking again buys the same refusal")
+  assert.equal(resumeVerdict("fresh_intake", row.ai, row.until, new Date("2026-09-18T12:00:01Z")), "resume")
+
+  // And the selector agrees with it, so the two gates cannot disagree about the same document.
+  const db = new Fake()
+  db.rows = [doc({ id: "p", ai_doc_type: DOC_TYPE_WACHT_OP_LIMIET, intake_retry_after: row.until })]
+  assert.deepEqual(picked(await selectDrainCandidates({ pipeline: db, now: NOW })).map((c) => c.documentId), [])
+  assert.deepEqual(
+    picked(await selectDrainCandidates({ pipeline: db, now: new Date("2026-09-18T12:00:01Z") })).map((c) => c.documentId),
+    ["p"],
+  )
+})
+
+// ── Trash safety: at selection, and at execution ──────────────────────────────────────────────
+
+test("[ONTVANGEN-DRAIN] a trashed document is never selected, and the filter is in the STATEMENT", async () => {
+  const db = new Fake()
+  db.rows = [doc({ id: "weg", trashed: true }), doc({ id: "blijft", trashed: false })]
+  const got = picked(await selectDrainCandidates({ pipeline: db, now: NOW }))
+  assert.deepEqual(got.map((c) => c.documentId), ["blijft"],
+    "reading a document the owner threw away spends a model call nobody is waiting for")
+  assert.ok(
+    db.preds.some((p) => p.op === "eq" && p.column === "trashed" && p.value === false),
+    "the trash filter must be part of the query, not a check applied after fetching the rows anyway",
+  )
+})
+
+test("[ONTVANGEN-DRAIN] trash BETWEEN the selection and the run does not become a booked invoice", async () => {
+  // The selection is not the execution. A pass holds up to DRAIN_BATCH documents and walks them one
+  // at a time, each with its own model call — so an owner emptying their incoming folder halfway
+  // through is an ordinary event, not a race to dismiss. The guard is loadStoredDocument re-reading
+  // `trashed` under the claim, and the real function is what this test calls.
+  const db = new Fake()
+  db.rows = [doc({ id: "eerst" }), doc({ id: "daarna" })]
+  const got = picked(await selectDrainCandidates({ pipeline: db, now: NOW }))
+  assert.deepEqual(got.map((c) => c.documentId), ["eerst", "daarna"], "both were eligible when we looked")
+
+  // The owner empties the folder while the first document is being worked on.
+  for (const r of db.rows) r.trashed = true
+
+  for (const c of got) {
+    const load = await loadStoredDocument(c.documentId, c.ownerId, "fresh_intake", { pipeline: db as never }, NOW)
+    assert.equal(load.kind, "gone",
+      "a document its owner threw away is gone to this pass — never read, never booked")
+  }
 })
 
 test("[ONTVANGEN-DRAIN] the pass writes no 'done' state of its own", async () => {
@@ -415,6 +577,10 @@ test("[UPLOAD-TRUTH-1] terminal unreadable documents are never handed to the rea
   assert.equal(readerCalls, 0, "the reader loop was offered nothing — no paid re-read of a finished document")
   assert.deepEqual(delivered, ["a", "b"], "both owed owners were told")
   assert.deepEqual(report.notices, { kind: "scanned", picked: 2, outcomes: { delivered: 2 } })
+  // [NO-SILENT-EMPTY] And the reader half MEASURED its zero rather than failing into one. Without
+  // this the test would still pass if the reader scan had collapsed — the notice pass would be
+  // vouching for a backlog nobody read, which is the flattening this batch removes.
+  assert.deepEqual(readerOf(report), { kind: "scanned", picked: 0, outcomes: {} })
 })
 
 test("[UPLOAD-TRUTH-1] one notice that throws does not stop the rest of the pass", async () => {
