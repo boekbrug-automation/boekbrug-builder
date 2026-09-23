@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import JSZip from "jszip";
-import { openArchive, archiveMemberName, readMemberBounded, type ExpandableAttachment } from "./archive-expand";
+import { openArchive, archiveMemberName, archiveMemberKey, readMemberBounded, type ExpandableAttachment } from "./archive-expand";
 import { ARCHIVE_OWNER_ACTION, MAX_ENTRY_BYTES } from "./archive-attachment";
 
 async function zipBytes(files: Record<string, string | Uint8Array>, compress = true): Promise<Buffer> {
@@ -49,7 +49,7 @@ test("[ARCHIEF-WAAR] two members with the same basename stay two keys", async ()
   assert.equal(r.members.length, 2);
   const names = r.members.map((m) => m.filename).sort();
   assert.deepEqual(names, ["dag — winkel-a/dagafsluiting.pdf", "dag — winkel-b/dagafsluiting.pdf"]);
-  const keys = new Set(r.members.map((m) => `${m.messageId}:${m.filename}`));
+  const keys = new Set(r.members.map((m) => m.memberKey));
   assert.equal(keys.size, 2, "one key per member, never shared");
   const bodies = r.members.map((m) => Buffer.from(m.data, "base64").toString()).sort();
   assert.deepEqual(bodies, ["%PDF A", "%PDF B"]);
@@ -75,7 +75,7 @@ test("[ARCHIEF-WAAR] archive chrome is dropped silently, an unsupported file is 
   assert.equal(r.refusals.length, 1, "chrome is not a document; the exe is");
   const [refusal] = r.refusals;
   assert.equal(refusal.whole, false);
-  assert.equal(refusal.key, "m1:dag — readme.exe", "a member refusal is keyed like a member");
+  assert.equal(refusal.key, archiveMemberKey("m1", "dag.zip", "readme.exe"), "a member refusal is keyed like a member");
   assert.equal(refusal.filename, "dag — readme.exe");
   assert.match(refusal.reason, /Uploaden/, "the reason tells the owner what to do");
 });
@@ -88,8 +88,10 @@ test("[ARCHIEF-WAAR] a corrupt archive is refused WHOLE, under the archive's own
   assert.equal(r.refusals.length, 1);
   assert.equal(r.refusals[0].key, "msg-2:stuk.zip");
   assert.equal(r.refusals[0].whole, true);
-  assert.match(r.refusals[0].reason, /beschadigd|wachtwoord/);
-  assert.ok(r.refusals[0].reason.includes(ARCHIVE_OWNER_ACTION));
+  assert.match(r.refusals[0].reason, /beschadigd/);
+  // [ARCHIEF-WAAR] review: a broken zip cannot be unpacked by the owner either — the action is a
+  // sound copy from the sender (see the review-round tests below).
+  assert.match(r.refusals[0].reason, /afzender/);
 });
 
 test("[ARCHIEF-OPEN] een archief in een archief blijft dicht, en zegt dat", async () => {
@@ -183,4 +185,85 @@ test("[ARCHIEF-OPEN] een gewone PDF-, afbeelding- en xml-member houdt zijn type"
   assert.equal(byName["dag — bon.jpg"], "image/jpeg");
   assert.equal(byName["dag — ubl.xml"], "application/xml");
   assert.equal(byName["dag — sheet.xlsx"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+});
+
+// ── [ARCHIEF-WAAR] review round 1 ─────────────────────────────────────────────────────────────
+
+/** Rewrite every occurrence of one entry name inside a real zip (same length), in both headers. */
+function renameEntry(buf: Buffer, from: string, to: string): Buffer {
+  assert.equal(from.length, to.length, "fixture: same-length rename keeps every offset valid");
+  const out = Buffer.from(buf);
+  const a = Buffer.from(from), b = Buffer.from(to);
+  let i = 0, n = 0;
+  while ((i = out.indexOf(a, i)) !== -1) { b.copy(out, i); i += a.length; n++; }
+  assert.equal(n, 2, "fixture: renamed in the local header and in the central directory");
+  return out;
+}
+
+test("[ARCHIEF-WAAR] two entries with the SAME path are refused whole — one of them would be invisible", async () => {
+  // JSZip keeps one entry per name, so the other copy would be silently dropped.
+  const buf = renameEntry(await zipBytes({ "invoice.pdf": "%PDF one", "invoicf.pdf": "%PDF two" }), "invoicf.pdf", "invoice.pdf");
+  const r = await openArchive(attachment("twee.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, true);
+  assert.equal(r.members.length, 0);
+  assert.equal(r.refusals[0].key, "m1:twee.zip");
+  assert.match(r.refusals[0].reason, /dezelfde naam/);
+  assert.match(r.refusals[0].reason, /afzender/);
+});
+
+test("[ARCHIEF-WAAR] two paths that normalise to one name, with DIFFERENT bytes, are refused whole", async () => {
+  // `map\b.pdf` and `map/b.pdf` are two entries to JSZip and one key to us.
+  const buf = renameEntry(await zipBytes({ "map/b.pdf": "%PDF one", "mapXb.pdf": "%PDF two" }), "mapXb.pdf", "map\\b.pdf");
+  const r = await openArchive(attachment("pad.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, true, "two different documents may not share one key");
+  assert.equal(r.members.length, 0);
+  assert.match(r.refusals[0].reason, /dezelfde naam/);
+});
+
+test("[ARCHIEF-WAAR] two paths that normalise to one name, with IDENTICAL bytes, are one document", async () => {
+  // A backslash spelling: JSZip keeps `a\b.pdf` and `a/b.pdf` apart, so only OUR normalisation
+  // can see they are one path.
+  const buf = renameEntry(await zipBytes({ "a/b.pdf": "%PDF same", "aXb.pdf": "%PDF same" }), "aXb.pdf", "a\\b.pdf");
+  const r = await openArchive(attachment("pad.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, false);
+  assert.equal(r.members.length, 1, "the same bytes under two spellings of one path are one document");
+  assert.equal(r.members[0].filename, "pad — a/b.pdf");
+});
+
+test("[ARCHIEF-WAAR] a member key cannot be produced by a loose attachment or by another archive", async () => {
+  const one = await openArchive(attachment("bundle.zip", await zipB64({ "invoice.pdf": "%PDF 1" })));
+  const two = await openArchive(attachment("a.zip", await zipB64({ "b — c.pdf": "%PDF 2" })));
+  const three = await openArchive(attachment("a — b.zip", await zipB64({ "c.pdf": "%PDF 3" })));
+  const key = (m: { memberKey?: string }) => m.memberKey;
+  assert.ok(key(one.members[0]), "a member carries its own key");
+  assert.notEqual(key(one.members[0]), "m1:bundle — invoice.pdf", "not the key a loose 'bundle — invoice.pdf' has");
+  assert.notEqual(key(two.members[0]), key(three.members[0]), "not the key of another archive's member");
+  assert.equal(two.members[0].filename, three.members[0].filename, "fixture: the display names DO collide");
+});
+
+test("[ARCHIEF-WAAR] a corrupt archive asks the sender for a sound copy; a locked one keeps the manual path", async () => {
+  const corrupt = await openArchive(attachment("stuk.zip", Buffer.from("dit is geen zip").toString("base64")));
+  assert.match(corrupt.refusals[0].reason, /beschadigd/);
+  assert.match(corrupt.refusals[0].reason, /afzender/, "the one action that can work on a broken file");
+  assert.doesNotMatch(corrupt.refusals[0].reason, /pak het zelf uit/, "unpacking a broken zip fails for the owner too");
+
+  const locked = await zipBytes({ "a.pdf": "%PDF" });
+  locked.writeUInt16LE(locked.readUInt16LE(6) | 1, 6); // general-purpose flag bit 0: encrypted
+  const cd = locked.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  locked.writeUInt16LE(locked.readUInt16LE(cd + 8) | 1, cd + 8);
+  const r = await openArchive(attachment("slot.zip", locked.toString("base64")));
+  assert.equal(r.refusedWhole, true);
+  assert.match(r.refusals[0].reason, /wachtwoord/);
+  assert.ok(r.refusals[0].reason.includes(ARCHIVE_OWNER_ACTION), "a locked zip CAN be unpacked by whoever has the password");
+});
+
+test("[ARCHIEF-WAAR] a member whose compressed bytes are broken asks the sender for a sound copy", async () => {
+  const buf = await zipBytes({ "a.pdf": "x".repeat(4000), "b.pdf": "%PDF fine" });
+  // Overwrite a.pdf's compressed data (right after its local header) with an invalid deflate block.
+  const nameLen = buf.readUInt16LE(26), extraLen = buf.readUInt16LE(28);
+  buf.fill(0xff, 30 + nameLen + extraLen, 30 + nameLen + extraLen + 8);
+  const r = await openArchive(attachment("half.zip", buf.toString("base64")));
+  const bad = r.refusals.find((x) => x.filename.endsWith("a.pdf"));
+  assert.ok(bad, "fixture: the broken member is refused");
+  assert.match(bad.reason, /afzender/);
 });

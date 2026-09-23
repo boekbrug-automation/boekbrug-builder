@@ -21,7 +21,9 @@
 // is decided by the sync, from what actually happened to each member.
 
 import JSZip from "jszip";
+import { inflateRawSync } from "node:zlib";
 import {
+  judgeEntry,
   planArchive,
   isOpenableArchive,
   MAX_ENTRY_BYTES,
@@ -42,6 +44,11 @@ export interface ExpandableAttachment {
   fromArchive?: boolean;
   /** The `${messageId}:${filename}` key of the archive a member came out of. */
   archiveKey?: string;
+  /**
+   * [ARCHIEF-WAAR] The registry key of a member — see archiveMemberKey. Set on everything that comes
+   * out of an archive; a loose attachment has none and keeps `${messageId}:${filename}`.
+   */
+  memberKey?: string;
 }
 
 /**
@@ -90,17 +97,132 @@ function mimeFor(filename: string): string {
 }
 
 /**
- * [ARCHIEF-WAAR] The name a member is known by — to the owner, and as its registry key.
+ * [ARCHIEF-WAAR] The one spelling of a path inside an archive.
  *
- * The FULL path inside the archive, not the basename. Two till exports that both put a
- * `dagafsluiting.pdf` in different folders of one zip are two documents; keyed on the basename they
- * were one key, and the second was counted as already handled the moment the first was. Readable
- * to the owner too: the envelope's name, then where in it the file sat.
+ * A zip may spell one location several ways: `map\b.pdf`, `map//b.pdf`, `./map/b.pdf`,
+ * `/map/b.pdf`, `x/../map/b.pdf`, or the same letters in two Unicode forms. JSZip itself folds some
+ * of these onto one entry when it loads the archive (and then keeps only the last), others it keeps
+ * apart. This rule folds ALL of them, so it is at least as strict as JSZip's: two entries that JSZip
+ * merges always land in the same group here, and a group with more than one entry is examined
+ * instead of silently losing one.
+ */
+export function normalizeMemberPath(entryPath: string): string {
+  const out: string[] = [];
+  for (const seg of entryPath.normalize("NFC").replace(/\\/g, "/").split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") { out.pop(); continue; }
+    out.push(seg);
+  }
+  return out.join("/");
+}
+
+/**
+ * [ARCHIEF-WAAR] The name a member is SHOWN by: the envelope's name, then where in it the file sat.
+ * The full path, not the basename — two `dagafsluiting.pdf` in different folders are two documents.
+ * This is a display name only. It is NOT the registry key: see archiveMemberKey.
  */
 export function archiveMemberName(archiveFilename: string, entryPath: string): string {
   const base = archiveFilename.replace(/\.zip$/i, "");
-  const path = entryPath.replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/^\/+/, "");
-  return `${base} — ${path}`;
+  return `${base} — ${normalizeMemberPath(entryPath)}`;
+}
+
+/**
+ * [ARCHIEF-WAAR] The registry key of a member.
+ *
+ * A loose attachment is keyed `${messageId}:${filename}`, and the provider decides the filename —
+ * so any key built the same way from a member's display name can be produced by a loose attachment
+ * too: a loose `bundle — invoice.pdf` and `bundle.zip`'s `invoice.pdf` were one key, and the member
+ * was skipped as "already handled" the moment the loose file was. Two archives in one message
+ * collided the same way (`a.zip` → `b — c.pdf`, `a — b.zip` → `c.pdf`).
+ *
+ * So a member key lives in its own namespace and encodes its three parts without ambiguity:
+ *   · it starts with `zip:[` — a loose key starts with the provider's message id (hex for Gmail,
+ *     base64url for Graph), which never is `zip`;
+ *   · the rest is JSON of [messageId, archive filename, normalised path] — JSON of a string array is
+ *     injective, so no two different (message, archive, path) triples share a key, whatever the
+ *     names contain.
+ * The `:dubbel` suffix stays unambiguous: a member key ends in `"]`, never in `:dubbel`.
+ */
+export function archiveMemberKey(messageId: string, archiveFilename: string, entryPath: string): string {
+  return `zip:${JSON.stringify([messageId, archiveFilename, normalizeMemberPath(entryPath)])}`;
+}
+
+/** One record of the zip's own central directory, read without JSZip. */
+interface RawEntry {
+  name: string;
+  method: number;
+  compressedSize: number;
+  localHeaderOffset: number;
+}
+
+/**
+ * [ARCHIEF-WAAR] Read the central directory ourselves.
+ *
+ * JSZip exposes one entry per (JSZip-normalised) name, so an archive holding two entries at one path
+ * shows up as one — the other copy is simply not there to ask about. The central directory still
+ * lists both. Returns null when the directory cannot be walked; the caller then refuses the archive,
+ * because a name check that did not run has not proven anything.
+ */
+function readCentralDirectory(buf: Buffer): { entries: RawEntry[]; shift: number } | null {
+  const EOCD = 0x06054b50, CENTRAL = 0x02014b50, Z64_LOCATOR = 0x07064b50, Z64_EOCD = 0x06064b50;
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
+    if (buf.readUInt32LE(i) === EOCD && i + 22 + buf.readUInt16LE(i + 20) === buf.length) { eocd = i; break; }
+  }
+  if (eocd < 0) return null;
+  let count = buf.readUInt16LE(eocd + 10);
+  let cdSize = buf.readUInt32LE(eocd + 12);
+  let cdOffset = buf.readUInt32LE(eocd + 16);
+  let recordStart = eocd;
+  if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+    const loc = eocd - 20;
+    if (loc < 0 || buf.readUInt32LE(loc) !== Z64_LOCATOR) return null;
+    const z = loc - 56;
+    if (z < 0 || buf.readUInt32LE(z) !== Z64_EOCD) return null;
+    count = Number(buf.readBigUInt64LE(z + 32));
+    cdSize = Number(buf.readBigUInt64LE(z + 40));
+    cdOffset = Number(buf.readBigUInt64LE(z + 48));
+    recordStart = z;
+  }
+  // The directory ends where the end record begins. Bytes prepended to the archive (a self-extractor
+  // stub, a mail gateway's banner) shift every stored offset by the same amount.
+  const cdStart = recordStart - cdSize;
+  if (cdStart < 0) return null;
+  const shift = cdStart - cdOffset;
+  const entries: RawEntry[] = [];
+  let pos = cdStart;
+  for (let n = 0; n < count; n++) {
+    if (pos + 46 > buf.length || buf.readUInt32LE(pos) !== CENTRAL) return null;
+    const nameLen = buf.readUInt16LE(pos + 28);
+    const extraLen = buf.readUInt16LE(pos + 30);
+    const commentLen = buf.readUInt16LE(pos + 32);
+    const utf8 = (buf.readUInt16LE(pos + 8) & 0x0800) !== 0;
+    const raw = buf.subarray(pos + 46, pos + 46 + nameLen);
+    entries.push({
+      name: raw.toString(utf8 ? "utf8" : "latin1"),
+      method: buf.readUInt16LE(pos + 10),
+      compressedSize: buf.readUInt32LE(pos + 20),
+      localHeaderOffset: buf.readUInt32LE(pos + 42),
+    });
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+  return { entries, shift };
+}
+
+/** Inflate one raw entry, bounded. Null when it cannot be read within `limit`. */
+function readRawEntry(buf: Buffer, e: RawEntry, shift: number, limit: number): Buffer | null {
+  try {
+    const at = e.localHeaderOffset + shift;
+    if (at < 0 || at + 30 > buf.length || buf.readUInt32LE(at) !== 0x04034b50) return null;
+    const start = at + 30 + buf.readUInt16LE(at + 26) + buf.readUInt16LE(at + 28);
+    const data = buf.subarray(start, start + e.compressedSize);
+    if (data.length !== e.compressedSize) return null;
+    if (e.method === 0) return data.length <= limit ? Buffer.from(data) : null;
+    if (e.method === 8) return inflateRawSync(data, { maxOutputLength: limit });
+    return null;
+  } catch {
+    return null; // a broken stream, or more than `limit` bytes: either way not comparable
+  }
 }
 
 /** What reading one member's bytes produced. */
@@ -150,8 +272,17 @@ export function readMemberBounded(entry: JSZip.JSZipObject, limit: number): Prom
 /** Refusal sentences for what can only be learned while reading the bytes. */
 const TE_GROOT_ECHT =
   "te groot om automatisch te lezen (meer dan 10 MB) — splits de PDF of maak er een foto van en voeg die toe bij Uploaden";
-const NIET_TE_LEZEN = `dit bestand kon niet uit het archief worden gelezen — ${ARCHIVE_OWNER_ACTION}`;
-const KAPOT = `het archief kon niet worden geopend (beschadigd of met een wachtwoord beveiligd) — ${ARCHIVE_OWNER_ACTION}`;
+// [ARCHIEF-WAAR] A broken file cannot be unpacked by the owner either, so "pak het zelf uit" sends
+// them to a step that fails. What CAN work is a sound copy from whoever sent it. A locked archive is
+// different: it is intact, and whoever has the password can unpack it — that path stays.
+const NIET_TE_LEZEN =
+  "dit bestand in het archief is beschadigd — vraag de afzender om een nieuwe kopie; lukt uitpakken bij jou wel, voeg het dan toe bij Uploaden";
+const KAPOT =
+  "het archief is beschadigd en kon niet worden geopend — vraag de afzender om een nieuwe kopie, of om de bestanden los mee te sturen";
+const VERGRENDELD =
+  `het archief is beveiligd met een wachtwoord — heb je het wachtwoord, ${ARCHIVE_OWNER_ACTION}; anders: vraag de afzender de bestanden zonder wachtwoord te sturen`;
+const ZELFDE_NAAM =
+  "het archief bevat twee verschillende bestanden met dezelfde naam — vraag de afzender ze met een eigen naam, of los, mee te sturen";
 const TE_GROOT_GEHEEL = `het archief is uitgepakt groter dan 25 MB — ${ARCHIVE_OWNER_ACTION}`;
 
 /** Ceilings, injectable so a test can prove them without building a 25 MB fixture. */
@@ -180,11 +311,34 @@ export async function openArchive<T extends ExpandableAttachment>(
     refusedWhole: true,
   });
 
+  const raw = toBuffer(att.data);
   let zip: JSZip;
   try {
-    zip = await JSZip.loadAsync(toBuffer(att.data));
-  } catch {
-    return wholeRefusal(KAPOT);
+    zip = await JSZip.loadAsync(raw);
+  } catch (e) {
+    return wholeRefusal(/encrypt/i.test(e instanceof Error ? e.message : "") ? VERGRENDELD : KAPOT);
+  }
+
+  // [ARCHIEF-WAAR] Two entries at one path. Grouped on OUR normalised path over the directory's own
+  // names — JSZip has already merged some of them, and the copy it dropped is not in `zip.files`.
+  // A group is one document only when every entry in it has the same bytes; anything else, or
+  // anything that cannot be compared, refuses the archive: two documents may not share one key,
+  // and guessing which copy is "the" invoice is not ours to do.
+  const directory = readCentralDirectory(raw);
+  if (!directory) return wholeRefusal(KAPOT);
+  const groups = new Map<string, RawEntry[]>();
+  for (const e of directory.entries) {
+    if (e.name.endsWith("/") || e.name.endsWith("\\")) continue;
+    const verdict = judgeEntry({ filename: e.name, bytes: 1 });
+    if (!verdict.take && verdict.silent) continue; // archive chrome is never a document
+    const key = normalizeMemberPath(e.name);
+    groups.set(key, [...(groups.get(key) ?? []), e]);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const copies = group.map((e) => readRawEntry(raw, e, directory.shift, limits.entryBytes));
+    const first = copies[0];
+    if (!first || copies.some((c) => !c || !c.equals(first))) return wholeRefusal(ZELFDE_NAAM);
   }
 
   const files = Object.values(zip.files).filter((f) => !f.dir);
@@ -198,11 +352,21 @@ export async function openArchive<T extends ExpandableAttachment>(
   const plan = planArchive(entries);
   if (plan.refusedWhole) return wholeRefusal(plan.refusedWhole);
 
+  // One outcome per normalised path: a group that survived the check above is the same bytes under
+  // two spellings, and it is one document — the first spelling speaks for it.
+  const seen = new Set<string>();
   const refusals: ArchiveRefusal[] = [];
   for (const s of plan.skipped) {
     if (s.silent) continue; // archive chrome (__MACOSX, .DS_Store): refused, but not a document
-    const naam = archiveMemberName(att.filename, s.filename);
-    refusals.push({ key: `${att.messageId}:${naam}`, filename: naam, reason: s.reason, whole: false });
+    const path = normalizeMemberPath(s.filename);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    refusals.push({
+      key: archiveMemberKey(att.messageId, att.filename, path),
+      filename: archiveMemberName(att.filename, path),
+      reason: s.reason,
+      whole: false,
+    });
   }
 
   const members: T[] = [];
@@ -210,8 +374,11 @@ export async function openArchive<T extends ExpandableAttachment>(
   for (const wanted of plan.take) {
     const f = files.find((x) => x.name === wanted.filename);
     if (!f) continue;
-    const naam = archiveMemberName(att.filename, f.name);
-    const key = `${att.messageId}:${naam}`;
+    const path = normalizeMemberPath(f.name);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const naam = archiveMemberName(att.filename, path);
+    const key = archiveMemberKey(att.messageId, att.filename, path);
     const remaining = limits.totalBytes - totalRead;
     const read = await readMemberBounded(f, Math.min(limits.entryBytes, remaining));
     if (!read.ok) {
@@ -229,6 +396,7 @@ export async function openArchive<T extends ExpandableAttachment>(
       ...att,
       fromArchive: true,
       archiveKey,
+      memberKey: key,
       filename: naam,
       mimeType: mimeFor(f.name),
       data: read.bytes.toString("base64"),

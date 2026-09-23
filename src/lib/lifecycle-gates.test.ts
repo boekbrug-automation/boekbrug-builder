@@ -27356,7 +27356,7 @@ test("[ARCHIEF-OPEN] a not-an-invoice file a reader could book is kept, not drop
   const judgeAt = src.indexOf("const verdict = await judgeKeepable(");
   const phase1At = src.indexOf("const classified: Classified[] = await mapConcurrent(");
   assert.ok(judgeAt > -1 && phase1At > judgeAt, "the till question must be answered before any model read");
-  assert.match(src, /const till = tillKeep\.get\(`\$\{attachment\.messageId\}:\$\{attachment\.filename\}`\)\s*if \(till\) \{\s*return \{/,
+  assert.match(src, /const till = tillKeep\.get\(attachmentKey\(attachment\)\)\s*if \(till\) \{\s*return \{/,
     "a recognised till closing is sent to the model again");
   assert.match(src, /const costsModelRead = \(a: GmailAttachment\): boolean =>\s*MODEL_READ_MIMES\.has\(a\.mimeType\) && !tillKeep\.has\(/,
     "a recognised till closing is charged against the owner's allowance for a read that never happens");
@@ -27411,8 +27411,39 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
   assert.doesNotMatch(saver, /return null/, "a failed keep answers null again, which four callers read as done");
   assert.match(saver, /if \(dupErr\) return NOT_STORED/, "a failed duplicate probe is read as 'no duplicate'");
   assert.match(saver, /registered = !regErr/, "the keep's registry write is no longer checked");
-  assert.match(saver, /const \{ error: regErr \} = await supabase\s*\.from\('email_skipped_attachments'\)\s*\.upsert\(\s*\{\s*user_id: userId,\s*source_message_id: `\$\{att\.messageId\}:\$\{att\.filename\}`/,
+  assert.match(saver, /const \{ error: regErr \} = await supabase\s*\.from\('email_skipped_attachments'\)\s*\.upsert\(\s*\{\s*user_id: userId,\s*source_message_id: attachmentKey\(att\)/,
     "a kept file is no longer registered under its own key — the next sync reads it through the model again");
+
+  // [ARCHIEF-WAAR] review round 1 — the interval between a stored file and its row.
+  const folderAt = saver.indexOf("await resolveImportTarget(");
+  const uploadAt = saver.indexOf(".upload(storagePath");
+  assert.ok(folderAt > -1 && uploadAt > folderAt,
+    "the folder is resolved AFTER the upload again — a folders failure then leaves a stored file with no row");
+  assert.match(saver, /if \(docErr \|\| !insertedId\) \{[\s\S]{0,300}?await removeOrphan\(/,
+    "a failed row write no longer removes the uploaded file");
+  assert.match(saver, /\} catch \(e\) \{\s*await removeOrphan\(/,
+    "a throw after the upload no longer removes the uploaded file");
+  assert.match(saver, /const \{ error \} = await supabase\.storage\.from\('documents'\)\.remove\(\[storagePath\]\)\s*if \(error\) removeErr = error\.message/,
+    "the removal's own result is not read — a cleanup that failed would pass as done");
+  assert.match(saver, /if \(removeErr\) \{\s*reportHandledFailure\(\{\s*tag: 'ARCHIEF-WAAR', severity: 'data-integrity',/,
+    "a failed cleanup is not surfaced on the alarm channel");
+
+  // [ARCHIEF-WAAR] review round 1 — one key per attachment, derived in ONE place. A key built from
+  // the display name is how a loose file and a member (or two archives' members) became one.
+  const hand = src.match(/`\$\{(\w+)\.messageId\}:\$\{\1\.filename\}`/g) ?? [];
+  assert.equal(hand.length, 3,
+    "a key is built by hand again instead of through attachmentKey() — only the helper itself and " +
+      "the two statement/oversized refs (which are never members) may spell it out");
+  assert.match(src, /export function attachmentKey\([^)]*\): string \{\s*return a\.memberKey \?\? `\$\{a\.messageId\}:\$\{a\.filename\}`/,
+    "attachmentKey no longer prefers the member's own key");
+  const expand = code("src/lib/archive-expand.ts");
+  assert.match(expand, /return `zip:\$\{JSON\.stringify\(\[messageId, archiveFilename, normalizeMemberPath\(entryPath\)\]\)\}`/,
+    "the member key left its own namespace, or stopped encoding its parts unambiguously");
+  assert.match(expand, /memberKey: key,/, "members no longer carry their key");
+  assert.match(expand, /const directory = readCentralDirectory\(raw\);?\s*if \(!directory\) return wholeRefusal\(KAPOT\)/,
+    "the archive's own directory is no longer read — two entries at one path collapse into one again");
+  assert.match(expand, /if \(!first \|\| copies\.some\(\(c\) => !c \|\| !c\.equals\(first\)\)\) return wholeRefusal\(ZELFDE_NAAM\)/,
+    "entries at one path with different (or unreadable) bytes are no longer refused");
   assert.match(src, /const keptDurably = \(r: KeepResult\)[^=]*=>[\s\S]{0,120}?registered/,
     "a keep the next sync cannot see counts as done");
 

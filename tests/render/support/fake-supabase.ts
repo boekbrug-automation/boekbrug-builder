@@ -37,10 +37,12 @@ export class FakeDb {
   unknownFilters: string[] = [];
   /** `${user}|${period}|${metric}` → count, the fair_use counter. */
   usage = new Map<string, number>();
-  /** Return true to make this call answer { error }. */
-  fault: (c: FaultCall) => boolean = () => false;
+  /** Return true to make this call answer { error }; "throw" to make it reject instead. */
+  fault: (c: FaultCall) => boolean | "throw" = () => false;
   /** Return true to make this storage upload fail. */
   storageFault: (path: string) => boolean = () => false;
+  /** Return true to make this storage removal fail (the object stays). */
+  removeFault: (path: string) => boolean = () => false;
 
   t(name: string): Row[] { return (this.tables[name] ??= []); }
 
@@ -60,6 +62,7 @@ export class FakeDb {
             return { data: { path }, error: null };
           },
           remove: async (paths: string[]) => {
+            if (paths.some((p) => db.removeFault(p))) return { data: null, error: { message: "injected remove failure" } };
             for (const p of paths) db.storage.delete(`${bucket}/${p}`);
             return { data: [], error: null };
           },
@@ -211,7 +214,9 @@ class Query implements PromiseLike<any> {
   }
 
   private run(): any {
-    if (this.db.fault({ table: this.table, op: this.op, payload: this.payload, filters: this.filterNames })) {
+    const injected = this.db.fault({ table: this.table, op: this.op, payload: this.payload, filters: this.filterNames });
+    if (injected === "throw") throw new Error(`injected ${this.op} exception on ${this.table}`);
+    if (injected) {
       return { data: null, error: { code: "XX000", message: `injected ${this.op} failure on ${this.table}` }, count: null };
     }
     const tbl = this.db.t(this.table);

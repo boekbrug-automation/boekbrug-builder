@@ -45,12 +45,16 @@ let currentPeriod: () => string;
 let limitForPlan: (key: string, plan: string) => number;
 let runIntakeDrain: (deps: any) => Promise<any>;
 let computeContentHash: (buf: Buffer) => string;
+let archiveMemberKey: (messageId: string, archiveFilename: string, entryPath: string) => string;
+/** The registry key of member `path` of `archive` in message `id`. */
+const mk = (id: string, archive: string, path: string) => archiveMemberKey(id, archive, path);
 before(async () => {
   ({ textToPdf } = await import(u("lib/text-to-pdf.ts")) as any);
   ({ syncUserEmails } = await import(u("lib/email-integration.ts")) as any);
   ({ currentPeriod, limitForPlan } = await import(u("lib/fair-use-usage.ts")) as any);
   ({ runIntakeDrain } = await import(u("lib/intake-drain.ts")) as any);
   ({ computeContentHash } = await import(u("lib/content-hash.ts")) as any);
+  ({ archiveMemberKey } = await import(u("lib/archive-expand.ts")) as any);
 });
 
 // ── fixtures ───────────────────────────────────────────────────────────────────────────────────
@@ -293,7 +297,7 @@ test("[ARCHIEF-WAAR] Gmail: a till zip is kept for booking, read by NO model, bo
   assert.equal(docs[0].file_name, "Jouw dagafsluiting - 1 — dagafsluiting.pdf");
   assert.equal(db.t("invoices").length, 0, "a till closing never becomes a purchase invoice");
   assert.equal(db.t("daily_turnover").length, 0, "the sync books no turnover — [ZELF-EERST]");
-  assert.deepEqual(regKeys(), ["g1:Jouw dagafsluiting - 1 — dagafsluiting.pdf"], "the member is registered; the archive has no stale row");
+  assert.deepEqual(regKeys(), [mk("g1", "Jouw dagafsluiting - 1.zip", "dagafsluiting.pdf")], "the member is registered; the archive has no stale row");
   assert.equal(watermark(), iso(NOW - 3 * DAY), "the mail is complete, so the mark passes it");
   assert.deepEqual(unknownUrls, []);
 });
@@ -316,12 +320,12 @@ test("[ARCHIEF-WAAR] Gmail: every member ends durable, and a second identical sy
   assert.equal(modelCalls, 2, "the two non-till PDFs are read, once each; the till is not");
   assert.equal(db.reservedUnits(), 2, "one fair-use unit per member that is READ — not one per zip");
   assert.deepEqual(regKeys(), [
-    "g2:bundel — dagafsluiting.pdf",
-    "g2:bundel — readme.exe",
-    "g2:bundel — winkel-a/factuur.pdf",
-    "g2:bundel — winkel-b/factuur.pdf",
-  ], "every member has a durable outcome under its own full-path key; chrome is silent");
-  const exe = registry().find((x) => x.source_message_id.endsWith("readme.exe"))!;
+    mk("g2", "bundel.zip", "dagafsluiting.pdf"),
+    mk("g2", "bundel.zip", "readme.exe"),
+    mk("g2", "bundel.zip", "winkel-a/factuur.pdf"),
+    mk("g2", "bundel.zip", "winkel-b/factuur.pdf"),
+  ].sort(), "every member has a durable outcome under its own full-path key; chrome is silent");
+  const exe = registry().find((x) => x.source_message_id === mk("g2", "bundel.zip", "readme.exe"))!;
   assert.match(exe.reason, /Uploaden/, "an unsupported member is refused with a usable manual path");
   assert.equal(db.t("invoices").length, 0);
   assert.equal(db.t("daily_turnover").length, 0);
@@ -343,7 +347,7 @@ test("[ARCHIEF-WAAR] Outlook: a zip WITHOUT contentBytes is fetched by $value an
   const r = await sync();
   assert.equal(r.errors, 0);
   assert.equal(db.t("documents").length, 1, "the member was reached through $value");
-  assert.deepEqual(regKeys(), ["o1:dag — dagafsluiting.pdf"]);
+  assert.deepEqual(regKeys(), [mk("o1", "dag.zip", "dagafsluiting.pdf")]);
   assert.equal(modelCalls, 0);
   assert.equal(watermark(), iso(NOW - 2 * DAY));
 });
@@ -355,7 +359,7 @@ test("[ARCHIEF-WAAR] Outlook: a zip inside a FORWARDED message is admitted and o
   const r = await sync();
   assert.equal(r.errors, 0);
   assert.equal(db.t("documents").length, 1, "the till closing inside the forwarded zip was kept");
-  assert.deepEqual(regKeys(), ["o2:dag — dagafsluiting.pdf"]);
+  assert.deepEqual(regKeys(), [mk("o2", "dag.zip", "dagafsluiting.pdf")]);
   assert.equal(db.t("invoices").length, 0);
 });
 
@@ -364,7 +368,7 @@ test("[ARCHIEF-WAAR] Outlook: a zip WITH inline contentBytes goes the same way",
   mailbox = [{ id: "o3", at: NOW - 2 * DAY, atts: [{ name: "b.zip", inline: true, bytes: await zip({ "x.pdf": await otherPdf("X") }) }] }];
   await sync();
   assert.equal(modelCalls, 1);
-  assert.deepEqual(regKeys(), ["o3:b — x.pdf"]);
+  assert.deepEqual(regKeys(), [mk("o3", "b.zip", "x.pdf")]);
 });
 
 for (const [left, reads] of [[0, 0], [1, 1], [5, 3]] as const) {
@@ -454,8 +458,11 @@ test("[ARCHIEF-WAAR] a corrupt zip is refused durably, with a way out — and do
   await sync();
   const row = registry().find((x) => x.source_message_id === "c1:stuk.zip");
   assert.ok(row, "the archive's own key carries the refusal");
-  assert.match(row.reason, /beschadigd|wachtwoord/);
-  assert.match(row.reason, /Uploaden/, "and names what the owner can do");
+  assert.match(row.reason, /beschadigd/);
+  // A broken zip cannot be unpacked by the owner either — "pak het zelf uit" would send them to a
+  // step that fails. The action they CAN take is to ask the sender for a sound copy.
+  assert.match(row.reason, /afzender/, "and names an action the owner can actually take");
+  assert.doesNotMatch(row.reason, /pak het zelf uit/, "not an action that fails on a broken file");
   assert.equal(watermark(), iso(NOW - 3 * DAY), "newer mail is not starved by the broken one");
   const s = snapshot();
   await sync();
@@ -468,7 +475,7 @@ test("[ARCHIEF-WAAR] a zip that lies about its size is stopped by the counted by
   await sync();
   assert.equal(modelCalls, 0);
   assert.equal(db.t("documents").length, 0, "nothing past the ceiling was stored");
-  const row = registry().find((x) => x.source_message_id === "l1:bom — bom.pdf");
+  const row = registry().find((x) => x.source_message_id === mk("l1", "bom.zip", "bom.pdf"));
   assert.ok(row);
   assert.match(row.reason, /te groot/);
   assert.equal(watermark(), iso(NOW - 3 * DAY), "a refused member is a durable outcome");
@@ -493,7 +500,7 @@ test("[ARCHIEF-WAAR] storage upload failure → not kept, not registered, not co
   db.storageFault = () => false;
   await sync();
   assert.equal(db.t("documents").length, 1);
-  assert.deepEqual(regKeys(), ["s1:dag — dagafsluiting.pdf"]);
+  assert.deepEqual(regKeys(), [mk("s1", "dag.zip", "dagafsluiting.pdf")]);
   assert.equal(watermark(), iso(NOW - 3 * DAY));
 });
 
@@ -520,7 +527,7 @@ test("[ARCHIEF-WAAR] registry write failure → the keep is not known, so it is 
   const calls = modelCalls;
   await sync();
   assert.equal(db.t("documents").length, 1, "the retry reuses the stored file (byte-hash), no second copy");
-  assert.deepEqual(regKeys(), ["s3:dag — dagafsluiting.pdf"]);
+  assert.deepEqual(regKeys(), [mk("s3", "dag.zip", "dagafsluiting.pdf")]);
   assert.equal(modelCalls, calls);
   assert.equal(watermark(), iso(NOW - 3 * DAY));
 });
@@ -581,7 +588,7 @@ test("[ARCHIEF-WAAR] a member kept as unreadable reaches no reader through the U
   const unread = db.t("documents").filter((d) => d.ai_doc_type === "could_not_read");
   assert.equal(unread.length, 1, "the member is kept as could_not_read, owner-visible");
   assert.equal(unread[0].source, "email");
-  assert.deepEqual(regKeys(), ["u1:z — a.pdf"], "and registered, so the next sync knows it");
+  assert.deepEqual(regKeys(), [mk("u1", "z.zip", "a.pdf")], "and registered, so the next sync knows it");
   assert.equal(watermark(), iso(NOW - 3 * DAY), "a durable give-up lets the mail progress");
 
   const calls = modelCalls;
@@ -609,7 +616,7 @@ test("[ARCHIEF-WAAR] the legacy 'cannot read .zip' row gives way once the archiv
     reason: ".zip-bestanden kunnen wij niet lezen", created_at: "2026-08-10T00:00:00Z",
   });
   await sync();
-  assert.deepEqual(regKeys(), ["v1:dag — dagafsluiting.pdf"], "the stale archive row is gone, the member row is there");
+  assert.deepEqual(regKeys(), [mk("v1", "dag.zip", "dagafsluiting.pdf")], "the stale archive row is gone, the member row is there");
   assert.equal(db.t("documents").length, 1);
   assert.equal(watermark(), iso(NOW - 3 * DAY));
 });
@@ -645,11 +652,147 @@ test("[ARCHIEF-WAAR] a member proven a duplicate by its bytes is known as one, a
   // An invoice verdict can take the reader more than one call (its own second pass); the number
   // that matters is the one below — nothing at all on the next sync.
   assert.ok(modelCalls >= 1);
-  assert.deepEqual(regKeys(), ["d1:z — a.pdf:dubbel"], "the member is on record as a duplicate");
+  assert.deepEqual(regKeys(), [`${mk("d1", "z.zip", "a.pdf")}:dubbel`], "the member is on record as a duplicate");
   assert.equal(db.t("documents").length, 1, "no second copy of the bytes");
   assert.equal(db.t("invoices").length, 0, "and no second invoice");
   assert.equal(watermark(), iso(NOW - 3 * DAY), "a proven duplicate is a durable outcome");
   const s = snapshot();
   await sync();
   assert.deepEqual(snapshot(), s, "the next sync knows it through the :dubbel fold — zero reads, zero rows");
+});
+
+// ── [ARCHIEF-WAAR] review round 1 ─────────────────────────────────────────────────────────────
+
+/** Rewrite every occurrence of one entry name inside a real zip (same length), in both headers. */
+function renameEntry(buf: Buffer, from: string, to: string): Buffer {
+  assert.equal(from.length, to.length, "fixture: same-length rename keeps every offset valid");
+  const out = Buffer.from(buf);
+  const a = Buffer.from(from), b = Buffer.from(to);
+  let i = 0, n = 0;
+  while ((i = out.indexOf(a, i)) !== -1) { b.copy(out, i); i += a.length; n++; }
+  assert.equal(n, 2, "fixture: renamed in the local header and in the central directory");
+  return out;
+}
+
+test("[ARCHIEF-WAAR] a loose 'bundle — invoice.pdf' and bundle.zip's invoice.pdf keep separate outcomes", async () => {
+  seedAccount("gmail");
+  mailbox = [{ id: "k1", at: NOW - 3 * DAY, atts: [
+    { name: "bundle — invoice.pdf", bytes: await otherPdf("loose-1"), mime: "application/pdf" },
+    { name: "bundle.zip", bytes: await zip({ "invoice.pdf": await otherPdf("member-1") }) },
+  ] }];
+  await sync();
+  assert.equal(modelCalls, 2, "both documents are read");
+  const rows = registry();
+  assert.equal(rows.length, 2, "each has its own durable outcome — one row may not stand for both");
+  assert.equal(new Set(rows.map((r) => r.source_message_id)).size, 2);
+  assert.ok(rows.some((r) => r.source_message_id === "k1:bundle — invoice.pdf"), "the loose key is unchanged");
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+  const s = snapshot();
+  await sync();
+  assert.deepEqual(snapshot(), s, "and both are known next time");
+});
+
+test("[ARCHIEF-WAAR] a member is not skipped because a LOOSE attachment of the same display name is known", async () => {
+  seedAccount("gmail");
+  // The loose attachment was handled on an earlier sync.
+  db.t("email_skipped_attachments").push({
+    user_id: U, source_message_id: "k2:bundle — invoice.pdf", filename: "bundle — invoice.pdf",
+    reason: "geen factuur (eerder)", created_at: "2026-09-01T00:00:00Z",
+  });
+  mailbox = [{ id: "k2", at: NOW - 3 * DAY, atts: [
+    { name: "bundle — invoice.pdf", bytes: await otherPdf("loose-2"), mime: "application/pdf" },
+    { name: "bundle.zip", bytes: await zip({ "invoice.pdf": await otherPdf("member-2") }) },
+  ] }];
+  await sync();
+  assert.equal(modelCalls, 1, "the member is read — it was never handled");
+  assert.equal(registry().length, 2, "and gets its own row next to the loose one");
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+});
+
+test("[ARCHIEF-WAAR] two kept till closings, one loose and one in a zip, with the same display name are two documents", async () => {
+  seedAccount("gmail");
+  mailbox = [{ id: "k3", at: NOW - 3 * DAY, atts: [
+    { name: "dag — dagafsluiting.pdf", bytes: await tillPdf(iso(NOW - 4 * DAY).slice(0, 10), 100), mime: "application/pdf" },
+    { name: "dag.zip", bytes: await zip({ "dagafsluiting.pdf": await tillPdf(iso(NOW - 3 * DAY).slice(0, 10), 200) }) },
+  ] }];
+  await sync();
+  assert.equal(db.t("documents").length, 2, "both closings are stored");
+  assert.equal(registry().length, 2, "and both are registered, each under its own key");
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+});
+
+test("[ARCHIEF-WAAR] members of two archives in one message never share a key", async () => {
+  seedAccount("gmail");
+  mailbox = [{ id: "k4", at: NOW - 3 * DAY, atts: [
+    { name: "a.zip", bytes: await zip({ "b — c.pdf": await otherPdf("arch-1") }) },
+    { name: "a — b.zip", bytes: await zip({ "c.pdf": await otherPdf("arch-2") }) },
+  ] }];
+  await sync();
+  assert.equal(modelCalls, 2, "both members are read");
+  assert.equal(registry().length, 2, "each on record under its own key");
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+});
+
+test("[ARCHIEF-WAAR] a zip with two entries of the same path is refused whole, durably, with an action", async () => {
+  seedAccount("gmail");
+  const twin = renameEntry(await zip({ "invoice.pdf": await otherPdf("twin-a"), "invoicf.pdf": await otherPdf("twin-b") }),
+    "invoicf.pdf", "invoice.pdf");
+  mailbox = [{ id: "k5", at: NOW - 3 * DAY, atts: [{ name: "twee.zip", bytes: twin }] }];
+  await sync();
+  assert.equal(modelCalls, 0, "neither copy is read: which one is which cannot be told");
+  const rows = registry();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].source_message_id, "k5:twee.zip", "refused under the archive's own key");
+  assert.match(rows[0].reason, /dezelfde naam/);
+  assert.match(rows[0].reason, /afzender/, "with an action the owner can take");
+  assert.equal(watermark(), iso(NOW - 3 * DAY), "a durable refusal does not freeze the mailbox");
+});
+
+// ── the interval between a stored file and its row ────────────────────────────────────────────
+
+test("[ARCHIEF-WAAR] a folders failure during a keep leaves no orphan file, holds the member, and the retry completes", async () => {
+  seedAccount("gmail");
+  await tillMail("f1");
+  db.fault = (c) => c.table === "folders";
+  const r = await sync();
+  assert.ok(r.errors > 0, "the failure is counted");
+  assert.equal(db.storage.size, 0, "no file left in storage without a row pointing at it");
+  assert.equal(db.t("documents").length, 0);
+  assert.deepEqual(regKeys(), [], "not registered — the member is unresolved");
+  assert.equal(watermark(), WM_START, "and the mail stays open");
+  db.fault = () => false;
+  await sync();
+  assert.equal(db.storage.size, 1, "exactly one stored file after the retry");
+  assert.equal(db.t("documents").length, 1);
+  assert.equal(registry().length, 1);
+  assert.equal(watermark(), iso(NOW - 3 * DAY));
+});
+
+test("[ARCHIEF-WAAR] a keep that throws after the upload removes the upload", async () => {
+  seedAccount("gmail");
+  await tillMail("f2");
+  db.fault = (c) => (c.table === "documents" && c.op === "insert" ? "throw" : false);
+  await sync();
+  assert.equal(db.storage.size, 0, "the uploaded object is removed when the row write throws");
+  assert.deepEqual(regKeys(), []);
+  assert.equal(watermark(), WM_START);
+});
+
+test("[ARCHIEF-WAAR] a cleanup that fails is surfaced, and the member still stays unresolved", async () => {
+  seedAccount("gmail");
+  await tillMail("f3");
+  db.fault = (c) => c.table === "documents" && c.op === "insert";
+  db.removeFault = () => true;
+  await sync();
+  assert.equal(db.storage.size, 1, "fixture: the removal really failed");
+  // reportHandledFailure writes its system_events row without being awaited (it must never delay
+  // or break the failure path it reports on), so give that write a moment to land.
+  for (let i = 0; i < 50 && !db.t("system_events").some((e) => e.tag === "ARCHIEF-WAAR"); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const events = db.t("system_events").filter((e) => e.tag === "ARCHIEF-WAAR");
+  assert.equal(events.length, 1, "the orphan is reported to the alarm channel, not only logged");
+  assert.equal(events[0].severity, "data-integrity");
+  assert.deepEqual(regKeys(), []);
+  assert.equal(watermark(), WM_START);
 });

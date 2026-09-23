@@ -710,6 +710,22 @@ export interface GmailAttachment {
   fromArchive?: boolean
   /** [ARCHIEF-WAAR] `${messageId}:${filename}` of the archive this member came out of. */
   archiveKey?: string
+  /**
+   * [ARCHIEF-WAAR] A member's own registry key (archiveMemberKey). A key built from the member's
+   * display name could equal the key of a LOOSE attachment of that name, or a member of another
+   * archive in the same message — and the member was then skipped as already handled.
+   */
+  memberKey?: string
+}
+
+/**
+ * [ARCHIEF-WAAR] The one key an attachment is known by — in the registry, on the invoice
+ * (source_message_id), in the failure counter and in the watermark walk. A loose attachment keeps
+ * the key it always had, `${messageId}:${filename}`; an archive member uses its own namespace.
+ * Every place that asks "is this one handled?" asks through here, so the two can never be mixed.
+ */
+export function attachmentKey(a: { messageId: string; filename: string; memberKey?: string }): string {
+  return a.memberKey ?? `${a.messageId}:${a.filename}`
 }
 
 // [EMAIL→BANK] A machine-readable bank statement (MT940 / CAMT.053 / bank CSV) seen as an
@@ -3011,7 +3027,7 @@ export async function syncUserEmails(
     }
     return true
   }
-  const allKeys = attachments.map((a) => `${a.messageId}:${a.filename}`)
+  const allKeys = attachments.map((a) => attachmentKey(a))
   if (!(await readKnownKeys(allKeys, knownKeys))) {
     // [ARCHIEF-WAAR] Nothing is decided on an unread registry: no model call, no reservation, no
     // key completed, and the watermark untouched. Everything stays in the mailbox for the next run,
@@ -3048,7 +3064,7 @@ export async function syncUserEmails(
   }
 
 
-  const notKnown = attachments.filter((a) => !knownKeys.has(`${a.messageId}:${a.filename}`))
+  const notKnown = attachments.filter((a) => !knownKeys.has(attachmentKey(a)))
 
   // [AFZENDERREGEL] Overslaan is nooit ONZICHTBAAR. Elke overgeslagen bijlage krijgt een rij in
   // dezelfde skip-registry die al elke niet-geïmporteerde bijlage verantwoordt, met de reden en
@@ -3068,7 +3084,7 @@ export async function syncUserEmails(
       const { error: blockedErr } = await skipPipeline.from('email_skipped_attachments').upsert(
         blockedBySender.map((a) => ({
           user_id: userId,
-          source_message_id: `${a.messageId}:${a.filename}`,
+          source_message_id: attachmentKey(a),
           filename: a.filename,
           reason: blockedSenderSkipReason(normalizeSenderEmail(a.from) ?? a.from),
         })),
@@ -3082,10 +3098,10 @@ export async function syncUserEmails(
       console.error('[AFZENDERREGEL] kon overgeslagen bijlage niet registreren', e)
     }
   }
-  const blockedKeys = new Set(blockedBySender.map((a) => `${a.messageId}:${a.filename}`))
+  const blockedKeys = new Set(blockedBySender.map((a) => attachmentKey(a)))
 
   const freshAll = notKnown
-    .filter((a) => !blockedKeys.has(`${a.messageId}:${a.filename}`))
+    .filter((a) => !blockedKeys.has(attachmentKey(a)))
     // [BOEK-011] Oldest email first → save order (created_at) follows real
     // chronology, so lists sorted on created_at read naturally. Graph returns
     // newest-first; Gmail is unordered — this sort normalizes both providers.
@@ -3147,7 +3163,7 @@ export async function syncUserEmails(
       key: opened.archiveKey,
       messageId: a.messageId,
       filename: a.filename,
-      memberKeys: opened.members.map((m) => `${m.messageId}:${m.filename}`),
+      memberKeys: opened.members.map((m) => attachmentKey(m)),
       refusals: opened.refusals,
       refusedWhole: opened.refusedWhole,
       registryUnknown: false,
@@ -3162,7 +3178,7 @@ export async function syncUserEmails(
       continue
     }
     for (const m of opened.members) {
-      const k = `${m.messageId}:${m.filename}`
+      const k = attachmentKey(m)
       if (memberKnown.has(k)) { knownKeys.add(k); continue }
       if (batchCandidates.length >= SYNC_BATCH_MAX) { run.unreached++; notReached++; continue }
       batchCandidates.push(m)
@@ -3181,7 +3197,7 @@ export async function syncUserEmails(
   for (const a of batchCandidates) {
     if (!couldBeBookableFile(a.filename)) continue
     const verdict = await judgeKeepable(a.filename, Buffer.from(a.data, 'base64'), await loadBookableReaders())
-    if (verdict.keep && verdict.kind) tillKeep.set(`${a.messageId}:${a.filename}`, verdict)
+    if (verdict.keep && verdict.kind) tillKeep.set(attachmentKey(a), verdict)
   }
   /**
    * [ARCHIEF-WAAR] Does this document cost a MODEL read? Only what verifyInvoiceFromPdf actually
@@ -3191,7 +3207,7 @@ export async function syncUserEmails(
    * those would charge them for reads that never happen.
    */
   const costsModelRead = (a: GmailAttachment): boolean =>
-    MODEL_READ_MIMES.has(a.mimeType) && !tillKeep.has(`${a.messageId}:${a.filename}`)
+    MODEL_READ_MIMES.has(a.mimeType) && !tillKeep.has(attachmentKey(a))
 
   // ── [EERLIJK-GEBRUIK] De maandteller telt eindelijk ook hier mee ────────────────────────
   //
@@ -3354,7 +3370,7 @@ export async function syncUserEmails(
   // count = consecutive counted failures; atMs = when the last one was counted (the time gate).
   const attemptState = new Map<string, { count: number; atMs: number }>()
   {
-    const batchKeys = freshAttachments.map((a) => `${a.messageId}:${a.filename}`)
+    const batchKeys = freshAttachments.map((a) => attachmentKey(a))
     for (const chunk of chunkArray(batchKeys, 100)) {
       const { data } = await supabase
         .from('email_failed_attempts')
@@ -3390,6 +3406,30 @@ export async function syncUserEmails(
     // bytes that existed nowhere — a till closing registered as "klaar om te boeken" with no file.
   ): Promise<KeepResult> => {
     let documentId: string | null = null
+    // [ARCHIEF-WAAR] `orphaned` is set the moment bytes are in storage and cleared the moment a row
+    // points at them. Anything that ends this function while it is set leaves a file nothing refers
+    // to — so every such exit goes through removeOrphan, and a removal that fails is reported, not
+    // assumed. The key is only ever the one built below from this owner's id ([SEC-STORAGE-PATH]).
+    let storagePath: string | null = null
+    let orphaned = false
+    const removeOrphan = async (why: string): Promise<void> => {
+      if (!orphaned || !storagePath) return
+      orphaned = false
+      let removeErr: string | null = null
+      try {
+        const { error } = await supabase.storage.from('documents').remove([storagePath])
+        if (error) removeErr = error.message
+      } catch (e) {
+        removeErr = e instanceof Error ? e.message : String(e)
+      }
+      if (removeErr) {
+        reportHandledFailure({
+          tag: 'ARCHIEF-WAAR', severity: 'data-integrity',
+          message: 'a kept attachment failed after upload and its stored file could not be removed — orphan in storage',
+          context: { userId, filename: att.filename, storagePath, why, error: removeErr },
+        })
+      }
+    }
     try {
       const buf = Buffer.from(att.data, 'base64')
       const hash = computeContentHash(buf)
@@ -3411,16 +3451,22 @@ export async function syncUserEmails(
           storageHeld++
           return STORAGE_FULL
         }
+        // [ARCHIEF-WAAR] The folder BEFORE the bytes. It was resolved after the upload, and a folders
+        // failure there threw with the file already stored and nothing pointing at it — every retry
+        // then uploaded another copy. Resolved first, a failure here has stored nothing.
+        const folderId = await resolveImportTarget(userId, null, 'facturen', 'pipeline')
         const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
-        const storagePath = `${userId}/incoming/${Date.now()}-${safeName}`
+        // A random part as well as the clock: a loose file and a member can share a display name,
+        // and two keeps in the same millisecond must not collide on one object path.
+        storagePath = `${userId}/incoming/${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`
         const { error: upErr } = await supabase.storage
           .from('documents').upload(storagePath, buf, { contentType: att.mimeType, upsert: false })
         if (upErr) {
           console.error('[ARCHIEF-WAAR] kept attachment could not be uploaded — held', { filename: att.filename, error: upErr.message })
           return NOT_STORED
         }
+        orphaned = true
         tookRoom(buf.length)
-        const folderId = await resolveImportTarget(userId, null, 'facturen', 'pipeline')
         const { data: docRow, error: docErr } = await supabase.from('documents').insert({
           user_id: userId,
           file_name: att.filename,
@@ -3441,13 +3487,16 @@ export async function syncUserEmails(
         }).select('id').single()
         const insertedId = (docRow as { id: string } | null)?.id ?? null
         if (docErr || !insertedId) {
-          await supabase.storage.from('documents').remove([storagePath])
           console.error('[ARCHIEF-WAAR] kept attachment row could not be written — held', { filename: att.filename, error: docErr?.message })
+          await removeOrphan(`document row not written: ${docErr?.message ?? 'no id returned'}`)
           return NOT_STORED
         }
+        orphaned = false // a row points at the file now; it is no longer an orphan
         documentId = insertedId
       }
     } catch (e) {
+      // [ARCHIEF-WAAR] A throw after the upload must not leave the file behind.
+      await removeOrphan(`threw: ${e instanceof Error ? e.message : String(e)}`)
       // [LEES] This is the failure that makes an attachment exist NOWHERE: not in bestanden, not
       // in the skipped panel — an invoice that silently never happened. console.error alone was
       // the definition of the silent shelf; the alarm channel exists for exactly this.
@@ -3473,7 +3522,7 @@ export async function syncUserEmails(
         .upsert(
           {
             user_id: userId,
-            source_message_id: `${att.messageId}:${att.filename}`,
+            source_message_id: attachmentKey(att),
             filename: att.filename,
             reason: reason.slice(0, 200),
           },
@@ -3505,7 +3554,7 @@ export async function syncUserEmails(
   // its retries and was given up (kept owner-visible + terminal skip), so the caller lets the mark
   // pass; false while it should still be retried (the mark holds, unchanged behaviour). Never throws.
   const recordFailedAttempt = async (att: GmailAttachment, lastError: string): Promise<boolean> => {
-    const key = `${att.messageId}:${att.filename}`
+    const key = attachmentKey(att)
     const prev = attemptState.get(key)
     const nowMs = Date.now()
     // [POISON-PILL] Time gate: within SYNC_MIN_RETRY_MS of the last COUNTED failure, do NOT count
@@ -3578,7 +3627,7 @@ export async function syncUserEmails(
       // [ARCHIEF-WAAR] A recognised till closing is not read by the model at all; its verdict was
       // reached above from the real bytes. It goes on as "not an invoice, confidently" so PHASE 2
       // keeps it for booking — and it can never become a purchase invoice.
-      const till = tillKeep.get(`${attachment.messageId}:${attachment.filename}`)
+      const till = tillKeep.get(attachmentKey(attachment))
       if (till) {
         return {
           attachment,
@@ -3717,7 +3766,7 @@ export async function syncUserEmails(
 
   // PHASE 2 — save loop, sequential by design (dedup correctness)
   for (const { attachment, classification, classifyFailed, configOutage, transientError, budgetOutage, creditOutage } of classified) {
-    const wmKey = `${attachment.messageId}:${attachment.filename}`
+    const wmKey = attachmentKey(attachment)
     // An outage-hold when: a config outage (always), the spend fuse (always), or a transient error
     // DURING a batch-wide outage.
     // A lone transient failure (some files succeeded) is NOT an outage → it takes the poison-pill path.
@@ -3810,7 +3859,7 @@ export async function syncUserEmails(
           .upsert(
             {
               user_id: userId,
-              source_message_id: `${attachment.messageId}:${attachment.filename}`,
+              source_message_id: attachmentKey(attachment),
               filename: attachment.filename,
               // [STATEMENT-SKIP] Claude's specific Dutch reason when available
               // (e.g. "rekeningoverzicht — samenvatting van bestaande facturen")
@@ -3840,7 +3889,7 @@ export async function syncUserEmails(
           .upsert(
             {
               user_id: userId,
-              source_message_id: `${attachment.messageId}:${attachment.filename}`,
+              source_message_id: attachmentKey(attachment),
               filename: attachment.filename,
               reason: 'te groot — overgeslagen (max 10MB)',
             },
@@ -3944,7 +3993,7 @@ export async function syncUserEmails(
       //
       // Both checks query receiver_id (not sender_id) — incoming invoices
       // have sender_id = null since the architectural fix.
-      const dedupKey = `${attachment.messageId}:${attachment.filename}`
+      const dedupKey = attachmentKey(attachment)
 
       // [DEDUP-READ-HONEST] Same rule as Check 0. A failed read here is softened by the
       // (receiver_id, source_message_id) uniqueness index — the insert would be refused — but it is
@@ -4651,7 +4700,7 @@ export async function syncUserEmails(
           await supabase.from('email_skipped_attachments').upsert(
             {
               user_id: userId,
-              source_message_id: `${attachment.messageId}:${attachment.filename}`,
+              source_message_id: attachmentKey(attachment),
               filename: attachment.filename,
               reason: filedReason,
             },
@@ -5351,7 +5400,7 @@ export async function syncUserEmails(
       // wait for → complete. (This is the fix for the frozen-watermark bug.)
       if (!atts || atts.length === 0) return true
       for (const a of atts) {
-        const key = `${a.messageId}:${a.filename}`
+        const key = attachmentKey(a)
         if (!(knownKeys.has(key) || completedKeys.has(key))) return false
       }
       return true
