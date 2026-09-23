@@ -3276,7 +3276,9 @@ export async function buildClosingPackageZip(args: {
     // continuity is a question about the WHOLE run of statements, not about one quarter. Paged for
     // the same reason as the shared documents: a gap that only exists past row 1000 would read as
     // "no gap", which is the answer that closes a quarter it should have stopped.
-    const periodRows = await required("bank_statement_periods", () => fetchAllRows<{
+    // Paged, and the failure converted here rather than through required(): the [GEEN-STILLE-KAP]
+    // gate pins this read's paged shape, and the shape is what matters.
+    const periodRows = await fetchAllRows<{
       document_id: string; iban: string | null; period_start: string | null; period_end: string | null;
       opening_balance: number | null; closing_balance: number | null;
     }>((from, to) =>
@@ -3287,7 +3289,9 @@ export async function buildClosingPackageZip(args: {
         .order("period_start", { ascending: true })
         .order("document_id", { ascending: true })
         .range(from, to),
-    ));
+    ).catch((e: unknown) => {
+      throw new ClosingPackageSourceUnavailableError("bank_statement_periods", e);
+    });
     const periods: ContinuityStatementPeriod[] = ((periodRows ?? []) as unknown as Array<{
       document_id: string; iban: string | null; period_start: string | null; period_end: string | null;
       opening_balance: number | null; closing_balance: number | null;

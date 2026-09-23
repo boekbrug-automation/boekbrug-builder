@@ -30178,7 +30178,11 @@ test("[BUITENLANDSE-INKOOP] 4a and 4b are computed from the supplier's country, 
   for (const file of ["src/app/api/aangifte/route.ts", "src/lib/closing-package.ts"]) {
     const src = code(file);
     assert.match(src, /readSupplierCountries\(/, `${file}: the supplier's recorded country is not read`);
-    assert.match(src, /if \(landen\.failed\) regimeNotes\.push\(SUPPLIER_COUNTRY_READ_FAILED_NOTE\);/,
+    // [PACKAGE-FAIL-CLOSED] The screen says so beside the concept; the package the accountant files
+    // from is not built at all, because a 4b that "may be missing a supplier" is a wrong 4b.
+    assert.match(src, file === "src/lib/closing-package.ts"
+      ? /if \(landen\.failed\) throw new ClosingPackageSourceUnavailableError\("supplier_countries"\);/
+      : /if \(landen\.failed\) regimeNotes\.push\(SUPPLIER_COUNTRY_READ_FAILED_NOTE\);/,
       `${file}: a failed country read is silent — 4a/4b then quietly miss every supplier placed by hand`);
     assert.match(src, /supplierCountry: i\.supplier_id \? landen\.byId\.get\(i\.supplier_id\) \?\? null : null,/,
       `${file}: the recorded country does not reach the rule`);
