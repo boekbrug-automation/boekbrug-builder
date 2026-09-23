@@ -103,6 +103,8 @@ const iso = (ms: number) => new Date(ms).toISOString();
 type Att = { name: string; bytes: Buffer; mime?: string; inline?: boolean; item?: "message" };
 type Mail = { id: string; at: number; atts: Att[] };
 let mailbox: Mail[] = [];
+/** Graph lists a message's attachments in the opposite order (ids unchanged). */
+let outlookListReversed = false;
 
 // ── the model ─────────────────────────────────────────────────────────────────────────────────
 
@@ -203,16 +205,16 @@ function rawMime(inner: Att[]): Buffer {
     if (list) {
       const m = mailbox.find((x) => x.id === list[1]);
       if (!m) return json({}, 404);
-      return json({
-        value: m.atts.map((a, i) => a.item === "message"
+      const listed = m.atts.map((a, i) => a.item === "message"
           ? { "@odata.type": "#microsoft.graph.itemAttachment", id: `a${i}`, name: "Fwd: dagafsluiting", contentType: "message/rfc822", size: a.bytes.length + 2000 }
           : {
             "@odata.type": "#microsoft.graph.fileAttachment", id: `a${i}`, name: a.name,
             contentType: a.mime ?? "application/x-zip-compressed", size: a.bytes.length,
             // A large attachment comes back WITHOUT contentBytes; the walker must fetch $value.
             ...(a.inline ? { contentBytes: a.bytes.toString("base64") } : {}),
-          }),
-      });
+          });
+      // Graph promises no order for this list; the ids are what stay put.
+      return json({ value: outlookListReversed ? listed.reverse() : listed });
     }
     const filter = decodeURIComponent(new URL(url).searchParams.get("$filter") ?? "");
     if (filter.includes("hasAttachments eq false")) return json({ value: [] }); // the body-only scan
@@ -275,6 +277,7 @@ beforeEach(() => {
   modelVerdict = null;
   modelFault = () => null;
   mailbox = [];
+  outlookListReversed = false;
   unknownUrls.length = 0;
   delete process.env.SYNC_BATCH_MAX;
 });
@@ -785,13 +788,15 @@ test("[ARCHIEF-WAAR] a cleanup that fails is surfaced, and the member still stay
   db.removeFault = () => true;
   await sync();
   assert.equal(db.storage.size, 1, "fixture: the removal really failed");
-  // reportHandledFailure writes its system_events row without being awaited (it must never delay
-  // or break the failure path it reports on), so give that write a moment to land.
+  // reportHandledFailure STARTS its system_events insert without awaiting it (a report must never
+  // delay or break the failure path it reports on). Here the process lives on, so the row lands and
+  // is observed; in production it is best effort — a function that returns first, or an insert
+  // that fails, leaves no row. What this proves is that the alarm is raised, not that it persists.
   for (let i = 0; i < 50 && !db.t("system_events").some((e) => e.tag === "ARCHIEF-WAAR"); i++) {
     await new Promise((r) => setTimeout(r, 10));
   }
   const events = db.t("system_events").filter((e) => e.tag === "ARCHIEF-WAAR");
-  assert.equal(events.length, 1, "the orphan is reported to the alarm channel, not only logged");
+  assert.equal(events.length, 1, "the orphan is raised on the alarm channel (row observed here; best effort in production)");
   assert.equal(events[0].severity, "data-integrity");
   assert.deepEqual(regKeys(), []);
   assert.equal(watermark(), WM_START);
@@ -846,3 +851,113 @@ test("[ARCHIEF-WAAR] ZIP64: an archive with inconsistent ZIP64 records is refuse
   assert.match(registry()[0].reason, /afzender/);
   assert.equal(watermark(), iso(NOW - 3 * DAY), "a durable refusal does not freeze the mailbox");
 });
+
+// ── [ARCHIEF-WAAR] review round 4 — two attachments with the same name in one message ─────────
+//
+// A sender that exports "bundle.zip" twice into one mail is ordinary. Each archive is its own
+// attachment, so each member is its own document — even when both hold an "invoice.pdf".
+
+/** A slice of `a`'s base64 that does not occur in `b`'s — how a request carrying `a` is recognised. */
+function needleOf(a: Buffer, b: Buffer): string {
+  const [ab, bb] = [a.toString("base64"), b.toString("base64")];
+  let at = 0;
+  while (at < ab.length && ab[at] === bb[at]) at++;
+  const needle = ab.slice(Math.max(0, at - 8), at + 64);
+  assert.ok(!bb.includes(needle), "fixture: the needle identifies one PDF alone");
+  return needle;
+}
+
+async function twoBundles(id: string, pdfs: Buffer[]): Promise<Mail> {
+  return { id, at: NOW - 3 * DAY, atts: [
+    { name: "bundle.zip", bytes: await zip({ "invoice.pdf": pdfs[0] }) },
+    // Inline on Outlook, so one arrives with contentBytes and the other through $value.
+    { name: "bundle.zip", inline: true, bytes: await zip({ "invoice.pdf": pdfs[1] }) },
+  ] };
+}
+
+const BUNDLES = ["bundle.zip", "bundle (2).zip"];
+
+for (const provider of ["gmail", "outlook"] as const) {
+  test(`[ARCHIEF-WAAR] ${provider}: two attachments named bundle.zip, each with its own invoice.pdf, are two members`, async () => {
+    seedAccount(provider);
+    const pdfs = [await otherPdf("same-name-1"), await otherPdf("same-name-2")];
+    mailbox = [await twoBundles("d1", pdfs)];
+    const bodies: string[] = [];
+    modelFault = (body) => { bodies.push(body); return null; };
+    const r = await sync();
+    assert.equal(r.errors, 0);
+    assert.equal(modelCalls, 2, "both members are read — neither hides behind the other's name");
+    assert.ok(bodies.some((b) => b.includes(needleOf(pdfs[0], pdfs[1]))), "the first invoice.pdf was read");
+    assert.ok(bodies.some((b) => b.includes(needleOf(pdfs[1], pdfs[0]))), "and so was the second");
+    assert.deepEqual(regKeys(), BUNDLES.map((n) => mk("d1", n, "invoice.pdf")).sort(),
+      "each member has an outcome under its own key");
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+
+    const before1 = snapshot();
+    await sync();
+    assert.deepEqual(snapshot(), before1, "and a second sync knows both: nothing is read again");
+  });
+
+  for (const failing of [0, 1] as const) {
+    test(`[ARCHIEF-WAAR] ${provider}: same-named archives, the ${failing ? "second" : "first"} member fails — the mark holds and a later pass finishes it`, async () => {
+      seedAccount(provider);
+      const pdfs = [await otherPdf("same-name-1"), await otherPdf("same-name-2")];
+      mailbox = [await twoBundles("d2", pdfs)];
+      const needle = needleOf(pdfs[failing], pdfs[1 - failing]);
+      modelFault = (body) => (body.includes(needle) ? 529 : null);
+      const r1 = await sync();
+      assert.ok(r1.errors > 0, "the failed member is counted");
+      assert.deepEqual(regKeys(), [mk("d2", BUNDLES[1 - failing], "invoice.pdf")],
+        "only the member that was read is on record — the failed one is not covered by its namesake");
+      assert.equal(watermark(), WM_START, "the mark holds for the member that failed");
+
+      // The retry. Outlook lists the attachments the other way round this time: which archive is
+      // "bundle.zip" follows the attachment's id, not its place in the list.
+      outlookListReversed = true;
+      const bodies: string[] = [];
+      modelFault = (body) => { bodies.push(body); return null; };
+      const calls = modelCalls;
+      await sync();
+      assert.equal(modelCalls - calls, 1, "only the failed member is read again");
+      assert.ok(bodies[0].includes(needle), "and it is the failed one, not its namesake");
+      assert.deepEqual(regKeys(), BUNDLES.map((n) => mk("d2", n, "invoice.pdf")).sort());
+      assert.equal(watermark(), iso(NOW - 3 * DAY), "a later pass finishes the mail");
+    });
+  }
+
+  test(`[ARCHIEF-WAAR] ${provider}: a member registered under the old shared key keeps it; its namesake is still read`, async () => {
+    // Before this correction both members registered as bundle.zip's invoice.pdf. That row stays
+    // readable: it still belongs to the first archive, and the second one is not written off by it.
+    seedAccount(provider);
+    const pdfs = [await otherPdf("same-name-1"), await otherPdf("same-name-2")];
+    mailbox = [await twoBundles("d3", pdfs)];
+    db.t("email_skipped_attachments").push({
+      user_id: U, source_message_id: mk("d3", "bundle.zip", "invoice.pdf"), filename: "bundle — invoice.pdf",
+      reason: "geen factuur", created_at: "2026-09-01T00:00:00Z",
+    });
+    const bodies: string[] = [];
+    modelFault = (body) => { bodies.push(body); return null; };
+    await sync();
+    assert.equal(modelCalls, 1, "the first member is known by its old key and not read again");
+    assert.ok(bodies[0].includes(needleOf(pdfs[1], pdfs[0])), "the second member is read");
+    assert.deepEqual(regKeys(), BUNDLES.map((n) => mk("d3", n, "invoice.pdf")).sort());
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+  });
+}
+
+for (const provider of ["gmail", "outlook"] as const) {
+  test(`[ARCHIEF-WAAR] ${provider}: two LOOSE attachments named invoice.pdf are two documents too`, async () => {
+    // The key a loose attachment is known by is built from the same name, so the same correction
+    // has to hold for it — and does, because the name is made distinct before any door is chosen.
+    seedAccount(provider);
+    const pdfs = [await otherPdf("loose-same-1"), await otherPdf("loose-same-2")];
+    mailbox = [{ id: "d4", at: NOW - 3 * DAY, atts: [
+      { name: "invoice.pdf", mime: "application/pdf", bytes: pdfs[0] },
+      { name: "invoice.pdf", mime: "application/pdf", inline: true, bytes: pdfs[1] },
+    ] }];
+    await sync();
+    assert.equal(modelCalls, 2, "both are read");
+    assert.deepEqual(regKeys(), ["d4:invoice (2).pdf", "d4:invoice.pdf"]);
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+  });
+}

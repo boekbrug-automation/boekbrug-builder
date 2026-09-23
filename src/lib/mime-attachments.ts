@@ -308,3 +308,25 @@ export function uniqueAttachmentName(name: string, taken: Set<string>): string {
   }
   return name
 }
+
+/**
+ * [ARCHIEF-WAAR] Give every attachment of one message a name of its own, in the order given.
+ *
+ * Two attachments of one message can carry the same name — a sender that exports "bundle.zip"
+ * twice — and every key the mail sync keeps is built from that name: the loose key and each
+ * archive member's key. A shared name is a shared outcome: a member that failed counts as known
+ * through its namesake, and the watermark moves past it.
+ *
+ * A key registered before this existed must stay valid, so nothing already distinct changes:
+ * the first occurrence of every name keeps it (a name that occurs once is never touched, even one
+ * that looks like "factuur (2).pdf"), and only the repeats are renamed. The order has to be stable
+ * for the message; that is the caller's to guarantee.
+ */
+export function distinctAttachmentNames(names: readonly string[], taken: Set<string>): string[] {
+  const kept = names.map((name) => {
+    if (taken.has(name)) return null
+    taken.add(name)
+    return name
+  })
+  return kept.map((name, i) => name ?? uniqueAttachmentName(names[i], taken))
+}

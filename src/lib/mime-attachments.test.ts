@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { extractMimeAttachments, base64ByteLength, uniqueAttachmentName } from './mime-attachments'
+import { extractMimeAttachments, base64ByteLength, uniqueAttachmentName, distinctAttachmentNames } from './mime-attachments'
 import { normalizeAttachmentMime } from './email-integration'
 
 const opts = { normalizeMime: normalizeAttachmentMime }
@@ -266,6 +266,22 @@ test('[DOORGESTUURD] two forwarded bills with the same filename stay two bills',
   assert.equal(uniqueAttachmentName('bon.jpg', taken), 'bon.jpg')
   assert.equal(uniqueAttachmentName('scan', taken), 'scan')
   assert.equal(uniqueAttachmentName('scan', taken), 'scan (2)')
+})
+
+test('[ARCHIEF-WAAR] repeated names become distinct; every first occurrence keeps its name', () => {
+  // Two "bundle.zip" in one message: the second is renamed, the first keeps the name any key
+  // registered before this was built from.
+  assert.deepEqual(distinctAttachmentNames(['bundle.zip', 'bundle.zip'], new Set()), ['bundle.zip', 'bundle (2).zip'])
+  // A name that occurs once is never touched — even when a repeat would have wanted it. The
+  // repeat moves on to the next free number instead.
+  assert.deepEqual(
+    distinctAttachmentNames(['x.pdf', 'x.pdf', 'x (2).pdf'], new Set()),
+    ['x.pdf', 'x (3).pdf', 'x (2).pdf'],
+  )
+  // Distinct names come through unchanged, and the set is left holding every name handed out.
+  const taken = new Set<string>()
+  assert.deepEqual(distinctAttachmentNames(['a.pdf', 'b.zip'], taken), ['a.pdf', 'b.zip'])
+  assert.deepEqual([...taken].sort(), ['a.pdf', 'b.zip'])
 })
 
 test('[DOORGESTUURD] the size is the file, not its encoding', () => {

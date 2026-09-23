@@ -27477,8 +27477,33 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
   assert.ok(walkAt > -1 && loadAt > walkAt, "JSZip loads the archive before its directory is validated, or is handed the raw bytes it cannot read");
   assert.match(expand, /if \(pos !== recordStart\) return null;?/,
     "a directory whose records do not end where it says it ends is accepted — an under-counted entry is invisible");
+  // [ARCHIEF-WAAR] review round 4 — the classic record's disk numbers must agree with ZIP64's 0.
+  assert.match(expand, /if \(classic\.disk !== MAX16 && classic\.disk !== 0\) return null;?\s*if \(classic\.cdDisk !== MAX16 && classic\.cdDisk !== 0\) return null/,
+    "a classic end record naming another disk is accepted beside a ZIP64 record — a spanned archive is read as whole");
   assert.match(src, /const keptDurably = \(r: KeepResult\)[^=]*=>[\s\S]{0,120}?registered/,
     "a keep the next sync cannot see counts as done");
+
+  // [ARCHIEF-WAAR] review round 4 — two attachments with one name are two identities. Every key is
+  // built from the name, so each walker makes names distinct BEFORE any door reads one: Gmail in
+  // walk order (a message's parts never change), Graph in attachment-id order (its list order is
+  // not promised). The first of each name keeps it, so keys registered before stay valid.
+  const gmailAt = src.indexOf("async function fetchMessageAttachments(");
+  const outlookAt = src.indexOf("async function fetchOutlookMessageAttachments(");
+  assert.ok(gmailAt > -1 && outlookAt > gmailAt, "[ARCHIEF-WAAR] the provider walkers moved — re-point this gate");
+  const gmail = src.slice(gmailAt, outlookAt);
+  const outlook = src.slice(outlookAt, src.indexOf("export interface AttachmentClassification"));
+  assert.ok(outlook.length > 1000, "[ARCHIEF-WAAR] the Outlook walker's end moved — re-point this gate");
+  const namedAt = gmail.indexOf("distinctAttachmentNames(namedParts.map(");
+  assert.ok(namedAt > -1 && namedAt < gmail.indexOf("function walkParts("),
+    "Gmail no longer makes part names distinct before walking — two 'bundle.zip' share every key again");
+  assert.match(gmail, /const filename = partNames\.get\(p\) \?\? ''/,
+    "the Gmail walker reads the name as sent again instead of the distinct one");
+  assert.match(outlook, /\.sort\(\(x, y\) => \(\(x\.id \?\? ''\) < \(y\.id \?\? ''\)/,
+    "Outlook names are no longer claimed in attachment-id order — which archive is 'bundle.zip' follows the list order");
+  assert.match(outlook, /distinctAttachmentNames\(fileAttachments\.map\(\(a\) => a\.name!\), takenNames\)/,
+    "Outlook no longer makes file-attachment names distinct");
+  assert.match(outlook, /const filename = fileNames\.get\(att\) \?\? ''/,
+    "the Outlook walker reads the name as sent again instead of the distinct one");
 
   // A failed registry read is UNKNOWN, never empty.
   assert.match(src, /if \(existingErr\) return false/, "a failed invoice-key read is treated as empty");

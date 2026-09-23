@@ -28,6 +28,10 @@ export interface Zip64Options {
   locatorSkew?: number;
   /** The extensible block claims more data than the sector holds. */
   extensibleOverrun?: boolean;
+  /** A real value (not the 0xFFFF placeholder) in the classic end record's "number of this disk". */
+  classicDisk?: number;
+  /** A real value in the classic end record's "disk where the central directory starts". */
+  classicCdDisk?: number;
 }
 
 const u16 = (n: number) => { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; };
@@ -97,7 +101,7 @@ export function zip64ify(zip: Buffer, o: Zip64Options): Buffer {
   const z64Offset = cdOffset + cd.length;
   const locator = Buffer.concat([u32(0x07064b50), u32(0), u64(z64Offset + (o.locatorSkew ?? 0)), u32(1)]);
   const end = Buffer.concat([
-    u32(0x06054b50), u16(0xffff), u16(0xffff), u16(0xffff), u16(0xffff),
+    u32(0x06054b50), u16(o.classicDisk ?? 0xffff), u16(o.classicCdDisk ?? 0xffff), u16(0xffff), u16(0xffff),
     u32(0xffffffff), u32(0xffffffff), u16(0),
   ]);
   return o.omitLocator

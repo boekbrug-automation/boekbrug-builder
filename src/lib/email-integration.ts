@@ -14,7 +14,7 @@ import { DOC_TYPE_COULD_NOT_READ, DOC_TYPE_REMINDER } from '@/lib/skipped-import
 import { htmlToReadableText, bodyLooksLikeInvoice, bodyDocumentName, countRefusal, type BodyScanTally } from '@/lib/email-body-invoice'
 import { textToPdf } from '@/lib/text-to-pdf'
 // [DOORGESTUURD] Read the attachments out of an e-mail that arrived as an attachment.
-import { extractMimeAttachments, mimeHeader, uniqueAttachmentName, type EmbeddedAttachment } from '@/lib/mime-attachments'
+import { distinctAttachmentNames, extractMimeAttachments, mimeHeader, uniqueAttachmentName, type EmbeddedAttachment } from '@/lib/mime-attachments'
 import { createPipelineClient } from '@/lib/supabase-pipeline'
 // [THROTTLE] One polite wait-and-retry, shared by both providers. See mail-throttle.ts.
 import { throttledFetch, beginThrottleBudget } from '@/lib/mail-throttle'
@@ -1063,6 +1063,30 @@ async function fetchMessageAttachments(
   const unread: SkippedAttachmentRef[] = []
   const statementSeen = new Set<string>()
 
+  // [ARCHIEF-WAAR] Every named part gets a name of its own before any door looks at it: two parts
+  // called "bundle.zip" would otherwise share every key built from the name, so one member's
+  // outcome would stand in for its namesake's. Walk order is stable for a message (its parts never
+  // change); the first of each name keeps it, so keys registered before this stay valid.
+  const partNames = new Map<object, string>()
+  const namedParts: Array<{ filename?: string }> = []
+  const collectNamed = (parts: unknown): void => {
+    if (!Array.isArray(parts)) return
+    for (const part of parts) {
+      const p = part as { filename?: string; parts?: unknown[] }
+      if (p.parts) collectNamed(p.parts)
+      else if (p.filename) namedParts.push(p)
+    }
+  }
+  // [FUNNEL] A message whose body IS a single PDF has no `payload.parts` — the PDF sits on
+  // `payload` itself (mimeType/filename/body.attachmentId). Passing only `parts` skipped those
+  // single-part invoices entirely (automated senders emit them often). Fall back to the payload
+  // itself when there are no parts so a single-attachment invoice is examined too.
+  const payload = msg.payload as { parts?: unknown[] } | undefined
+  const topParts = payload?.parts ?? (payload ? [payload] : [])
+  collectNamed(topParts)
+  distinctAttachmentNames(namedParts.map((p) => p.filename!), new Set())
+    .forEach((name, i) => partNames.set(namedParts[i], name))
+
   // Recursively find attachment parts
   function walkParts(parts: unknown[]): void {
     if (!Array.isArray(parts)) return
@@ -1079,7 +1103,7 @@ async function fetchMessageAttachments(
       }
 
       const rawMime = p.mimeType || ''
-      const filename = p.filename || ''
+      const filename = partNames.get(p) ?? ''
       const size = p.body?.size || 0
 
       // [H2] Accept PDFs/images even when the server mislabelled the MIME — infer from the
@@ -1096,11 +1120,13 @@ async function fetchMessageAttachments(
         // it arrived (skip-registry row, actionable reason) and can upload it via the reviewed
         // Bank flow. Running INSIDE the null-MIME branch guarantees an importable pdf/image can
         // NEVER be diverted here. Bytes are never fetched; no money is auto-imported.
-        const kind = looksLikeBankStatementFile(filename)
+        // Statements stay on the name as sent: they are surfaced, never read, and deduped by it.
+        const statementName = p.filename || ''
+        const kind = looksLikeBankStatementFile(statementName)
         if (kind) {
-          if (!statementSeen.has(filename)) {
-            statementSeen.add(filename)
-            statements.push({ messageId, filename, kind })
+          if (!statementSeen.has(statementName)) {
+            statementSeen.add(statementName)
+            statements.push({ messageId, filename: statementName, kind })
           }
           continue
         }
@@ -1158,12 +1184,7 @@ async function fetchMessageAttachments(
     }
   }
 
-  // [FUNNEL] A message whose body IS a single PDF has no `payload.parts` — the PDF sits on
-  // `payload` itself (mimeType/filename/body.attachmentId). Passing only `parts` skipped those
-  // single-part invoices entirely (automated senders emit them often). Fall back to the payload
-  // itself when there are no parts so a single-attachment invoice is examined too.
-  const payload = msg.payload as { parts?: unknown[] } | undefined
-  walkParts(payload?.parts ?? (payload ? [payload] : []))
+  walkParts(topParts)
 
   // [BOEK-011] Resolve each attachment — fetch by ID or use inline data
   // Gmail always returns base64url → convert to standard base64 exactly once
@@ -1709,6 +1730,17 @@ async function fetchOutlookMessageAttachments(
   // [DOORGESTUURD] Names already claimed by this message, so two forwarded originals that both
   // call their invoice "factuur.pdf" do not collapse into one dedup key — see uniqueAttachmentName.
   const takenNames = new Set<string>()
+  // [ARCHIEF-WAAR] The same holds for two FILE attachments with one name ("bundle.zip" twice): every
+  // key this sync keeps is built from the name, so each gets its own before any door looks at it.
+  // Graph promises no order for this list, so names are claimed in the order of the attachment's
+  // id, which does not change. The first of each name keeps it, so keys registered before this
+  // stay valid.
+  const fileAttachments = attachments
+    .filter((a) => a['@odata.type'] === '#microsoft.graph.fileAttachment' && a.name)
+    .sort((x, y) => ((x.id ?? '') < (y.id ?? '') ? -1 : (x.id ?? '') > (y.id ?? '') ? 1 : 0))
+  const fileNames = new Map<object, string>()
+  distinctAttachmentNames(fileAttachments.map((a) => a.name!), takenNames)
+    .forEach((name, i) => fileNames.set(fileAttachments[i], name))
   for (const a of attachments) if (a.name) takenNames.add(a.name)
 
   for (const att of attachments) {
@@ -1771,7 +1803,7 @@ async function fetchOutlookMessageAttachments(
     if (att['@odata.type'] !== '#microsoft.graph.fileAttachment') continue
 
     const rawMime = att.contentType || ''
-    const filename = att.name || ''
+    const filename = fileNames.get(att) ?? ''
     if (!filename) continue
 
     // [H2] Same mislabelled-MIME recovery as Gmail — a real PDF/image sent with a generic
@@ -1781,11 +1813,13 @@ async function fetchOutlookMessageAttachments(
       // [EMAIL→BANK] Being dropped (unreadable MIME). Surface a machine-readable bank statement
       // (MT940 / CAMT.053 / bank CSV) instead of losing it silently. Inside the null-MIME branch
       // so an importable pdf/image can never be diverted; bytes are never used, no auto-import.
-      const kind = looksLikeBankStatementFile(filename)
+      // Statements stay on the name as sent: they are surfaced, never read, and deduped by it.
+      const statementName = att.name || ''
+      const kind = looksLikeBankStatementFile(statementName)
       if (kind) {
-        if (!statementSeen.has(filename)) {
-          statementSeen.add(filename)
-          statements.push({ messageId: message.id, filename, kind })
+        if (!statementSeen.has(statementName)) {
+          statementSeen.add(statementName)
+          statements.push({ messageId: message.id, filename: statementName, kind })
         }
         continue
       }
@@ -3422,6 +3456,10 @@ export async function syncUserEmails(
       } catch (e) {
         removeErr = e instanceof Error ? e.message : String(e)
       }
+      // What "reported" guarantees: the log line, written before this returns. The system_events row
+      // is best effort — reportHandledFailure starts that insert without awaiting it (a report must
+      // never delay or break the failure path it reports on), so a function that ends first, or an
+      // insert that fails, leaves no row. The member itself stays unresolved either way.
       if (removeErr) {
         reportHandledFailure({
           tag: 'ARCHIEF-WAAR', severity: 'data-integrity',

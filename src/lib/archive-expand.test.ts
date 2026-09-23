@@ -379,6 +379,13 @@ test("[ARCHIEF-WAAR] ZIP64: a VARIABLE-length end record (extensible data) is lo
   assert.deepEqual(bodies(r), ["%PDF member A", "%PDF member B"]);
 });
 
+test("[ARCHIEF-WAAR] ZIP64: real zeros in the classic disk fields agree with the ZIP64 record and are read", async () => {
+  const buf = zip64ify(await twoMembers(), { sizes: true, offsets: true, endRecord: true, classicDisk: 0, classicCdDisk: 0 });
+  const r = await openArchive(attachment("z64.zip", buf.toString("base64")));
+  assert.equal(r.refusedWhole, false, r.refusals[0]?.reason);
+  assert.deepEqual(bodies(r), ["%PDF member A", "%PDF member B"]);
+});
+
 test("[ARCHIEF-WAAR] ZIP64: identical copies are compared at their REAL offsets and resolve once", async () => {
   const buf = zip64ify(await sameNameZip(2, "x".repeat(4096)), { sizes: true, offsets: true, endRecord: true });
   const r = await openArchive(attachment("z64.zip", buf.toString("base64")),
@@ -421,6 +428,11 @@ for (const [label, opts] of [
   ["an end record whose entry count is wrong", { sizes: true, offsets: true, endRecord: true, countSkew: 1 }],
   ["a locator that points beside the end record", { sizes: true, offsets: true, endRecord: true, locatorSkew: 4 }],
   ["an extensible block that overruns its sector", { sizes: true, offsets: true, endRecord: true, extensible: 16, extensibleOverrun: true }],
+  // The classic record may keep a REAL disk number beside a ZIP64 record. It must then say what the
+  // ZIP64 record says — disk 0 — or it is a spanned archive, or one whose records disagree.
+  ["a classic end record on disk 1 (multi-disk)", { sizes: true, offsets: true, endRecord: true, classicDisk: 1 }],
+  ["a classic end record whose directory starts on disk 1", { sizes: true, offsets: true, endRecord: true, classicCdDisk: 1 }],
+  ["classic disk fields that disagree with each other", { sizes: true, offsets: true, endRecord: true, classicDisk: 0, classicCdDisk: 2 }],
 ] as const) {
   test(`[ARCHIEF-WAAR] ZIP64 malformed — ${label} — is refused whole, truthfully, with an action`, async () => {
     const buf = zip64ify(await twoMembers(), opts);

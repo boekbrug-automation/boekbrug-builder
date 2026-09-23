@@ -283,7 +283,11 @@ function readCentralDirectory(buf: Buffer): Directory | null {
       q += 6 + buf.readUInt32LE(q + 2);
       if (q > sectorEnd) return null;
     }
-    // A real value in the classic record must agree with its ZIP64 counterpart.
+    // A real value in the classic record must agree with its ZIP64 counterpart — the disk numbers
+    // included, which the ZIP64 record has just pinned to 0. A classic record that names another
+    // disk is a spanned archive, or one whose two records disagree; neither is read.
+    if (classic.disk !== MAX16 && classic.disk !== 0) return null;
+    if (classic.cdDisk !== MAX16 && classic.cdDisk !== 0) return null;
     if (classic.count !== MAX16 && classic.count !== z64.count) return null;
     if (classic.onDisk !== MAX16 && classic.onDisk !== z64.onDisk) return null;
     if (classic.cdSize !== MAX32 && classic.cdSize !== z64.cdSize) return null;
