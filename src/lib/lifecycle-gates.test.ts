@@ -37520,6 +37520,35 @@ test("[NO-SILENT-EMPTY] neither of the drain's two scans may answer a failure wi
   assert.match(door, /notices unavailable/)
 })
 
+test("[ONTVANGEN-DRAIN] the drain-to-processor test seam forwards the mode, and invents none", () => {
+  // ── WHY A GATE ON A TEST FILE ──
+  //
+  // This seam is load-bearing, and its failure mode is silence. runOnce() hard-coded
+  // mode "fresh_intake" and runOnceAs() threw away everything the drain passed except the two
+  // ids — so [ONTVANGEN-CUTOVER] asserted that "the drain finishes the job" while substituting a
+  // mode the drain does not send. Production sent retry_skipped, mayResume() refused every
+  // candidate, and the test stayed green over a recovery pass that processed nothing.
+  //
+  // Measured: reverting runOnceAs to `runOnce(world, crashAfter)` leaves that test green with
+  // EITHER mode in production. No behavioural test can catch a regression of the thing that makes
+  // behavioural tests able to see. So it is held here.
+  const t = codeFile("src/lib/stored-document-processor.test.ts")
+
+  const start = t.indexOf("function runOnceAs")
+  assert.notEqual(start, -1, "[GATE-VENSTER] the drain-addressed helper is not where this gate expects it")
+  const end = t.indexOf("function tally(", start)
+  assert.notEqual(end, -1, "[GATE-VENSTER] the helper's closing marker is gone")
+  const helper = t.slice(start, end)
+  assert.ok(helper.length > 50, "the helper window is empty — the slice found nothing")
+
+  assert.match(helper, /mode: args\.mode/,
+    "[ONTVANGEN-DRAIN] the helper must forward the mode the drain chose, never one of its own")
+  assert.match(helper, /trigger: args\.trigger/,
+    "[ONTVANGEN-DRAIN] and the trigger, which is the provenance the audit rows carry")
+  assert.doesNotMatch(helper, /"fresh_intake"|"retry_skipped"/,
+    "[ONTVANGEN-DRAIN] a literal mode in this helper is the substitution that hid the defect")
+})
+
 test("[ONTVANGEN-DRAIN] the cron door is closed by default, and scheduled behind that door", () => {
   const door = codeFile("src/app/api/cron/intake-drain/route.ts")
   assert.match(door, /timingSafeEqualStr\(auth, `Bearer \$\{secret\}`\)/,
