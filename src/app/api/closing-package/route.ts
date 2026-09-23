@@ -27,7 +27,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { amsterdamYear } from "@/lib/format-nl";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
-import { buildClosingPackageZip, type Quarter } from "@/lib/closing-package";
+import { buildClosingPackageZip, ClosingPackageSourceUnavailableError, type Quarter } from "@/lib/closing-package";
 import { logAuditAction } from "@/lib/audit";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
 
@@ -58,6 +58,20 @@ function refuse(req: NextRequest, status: number, zin: string): NextResponse {
 <p style="font-size:13px;color:#5F6368;line-height:1.6;margin:12px 0 0">Ga terug naar het vorige scherm en probeer het opnieuw. Blijft dit gebeuren, meld het ons dan.</p>
 </main></body></html>`;
   return new NextResponse(body, { status, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+}
+
+// [PACKAGE-FAIL-CLOSED] A source of the package could not be read. Not a 500: nothing is broken in
+// the build, and the same request can succeed in a minute — so the answer says when to come back,
+// in both of refuse()'s languages.
+const SOURCE_RETRY_SECONDS = 120;
+function refuseUnreadableSource(req: NextRequest): NextResponse {
+  const res = refuse(
+    req,
+    503,
+    "Een deel van de administratie kon nu niet volledig worden gelezen, dus er is geen pakket gemaakt — een pakket zonder die gegevens zou er compleet uitzien terwijl het dat niet is. Er is niets verstuurd of veranderd; probeer het over een paar minuten opnieuw.",
+  );
+  res.headers.set("Retry-After", String(SOURCE_RETRY_SECONDS));
+  return res;
 }
 
 export async function GET(req: NextRequest) {
@@ -91,6 +105,7 @@ export async function GET(req: NextRequest) {
 
   // ── Resolve ownerId + dual-path authorization ──
   let ownerId = user.id;
+  let accountantDownload = false;
 
   if (clientId && clientId !== user.id) {
     // Only a linked accountant may export someone else's quarter.
@@ -112,28 +127,7 @@ export async function GET(req: NextRequest) {
       return refuse(req, 403, "Je bent niet (meer) aan deze klant gekoppeld, dus dit pakket is niet van jou op te halen.");
     }
     ownerId = clientId;
-
-    // [BEWIJS] Leg vast dát de boekhouder dit kwartaal heeft opgehaald.
-    //
-    // Deze route logde niets, net als /api/readiness, /api/export en /api/quarterly — alleen
-    // het verbreken van een koppeling werd bijgehouden. De klant kon dus nergens zien wat
-    // zijn boekhouder had gedownload, terwijl "een ontworpen overdracht in plaats van een
-    // gedeelde map" precies is wat dit product verkoopt. Een gedeelde map laat óók niets
-    // zien; het verschil bestaat pas als het aantoonbaar is.
-    //
-    // Best effort en NA de autorisatie: een logfout mag een geautoriseerde download nooit
-    // tegenhouden, en een geweigerde poging hoort hier niet als "opgehaald" te landen.
-    // [NIET-LOSGELATEN] Afgewacht. De toelichting hierboven zegt zelf waarom: het verschil met
-    // een gedeelde map bestaat pas als de download AANTOONBAAR is. Serverless mag een losgelaten
-    // belofte afkappen zodra het bestand is verstuurd, dus `void` maakte juist dat bewijs
-    // optioneel. logAuditAction vangt zijn eigen fouten af en gooit niet, dus afwachten kost een
-    // insert en kan de download nooit tegenhouden.
-    await logAuditAction({
-      userId: user.id,
-      action: 'accountant.package_downloaded',
-      entityType: 'quarter',
-      entityId: `${ownerId}:${year}-Q${quarter}`,
-    })
+    accountantDownload = true;
   }
 
   // ── Build (service_role, scoped to ownerId) ──
@@ -142,8 +136,41 @@ export async function GET(req: NextRequest) {
     const pipeline = createPipelineClient();
     result = await buildClosingPackageZip({ ownerId, year, quarter, supabase: pipeline });
   } catch (err) {
+    // [PACKAGE-FAIL-CLOSED] Two different failures, told apart: a source that could not be read
+    // (retry in a minute) and a build that broke on data it did read (a bug, reported as one).
+    if (err instanceof ClosingPackageSourceUnavailableError) {
+      console.error("[PACKAGE-FAIL-CLOSED] required source unreadable — no package", { ownerId, year, quarter, source: err.source, error: err.message });
+      return refuseUnreadableSource(req);
+    }
     console.error("[CLOSING-PACKAGE] build failed", err);
     return refuse(req, 500, "Het samenstellen van het pakket is halverwege misgegaan. Er is niets verstuurd of veranderd; opnieuw proberen kan direct.");
+  }
+
+  // [BEWIJS] Leg vast dát de boekhouder dit kwartaal heeft opgehaald.
+  //
+  // Deze route logde niets, net als /api/readiness, /api/export en /api/quarterly — alleen
+  // het verbreken van een koppeling werd bijgehouden. De klant kon dus nergens zien wat
+  // zijn boekhouder had gedownload, terwijl "een ontworpen overdracht in plaats van een
+  // gedeelde map" precies is wat dit product verkoopt. Een gedeelde map laat óók niets
+  // zien; het verschil bestaat pas als het aantoonbaar is.
+  //
+  // Best effort en NA de autorisatie: een logfout mag een geautoriseerde download nooit
+  // tegenhouden, en een geweigerde poging hoort hier niet als "opgehaald" te landen.
+  // [NIET-LOSGELATEN] Afgewacht. De toelichting hierboven zegt zelf waarom: het verschil met
+  // een gedeelde map bestaat pas als de download AANTOONBAAR is. Serverless mag een losgelaten
+  // belofte afkappen zodra het bestand is verstuurd, dus `void` maakte juist dat bewijs
+  // optioneel. logAuditAction vangt zijn eigen fouten af en gooit niet, dus afwachten kost een
+  // insert en kan de download nooit tegenhouden.
+  // [PACKAGE-FAIL-CLOSED] And AFTER the build, not before it. Written before, a package that was
+  // never built stayed on record as downloaded — in the one trail the owner reads to see what
+  // their accountant collected.
+  if (accountantDownload) {
+    await logAuditAction({
+      userId: user.id,
+      action: 'accountant.package_downloaded',
+      entityType: 'quarter',
+      entityId: `${ownerId}:${year}-Q${quarter}`,
+    })
   }
 
   // ── Filename ──

@@ -239,6 +239,10 @@ test("[TRIANGLE] no card reconciliation → no kaart-reconciliatie.csv", async (
 // wél te bewaken is, is het CONTRACT dat de reparatie oplegt en dat een latere wijziging stil
 // zou kunnen breken: verschijnt er een leesfout-waarschuwing, dan hoort er geen concept in de
 // ZIP te zitten. De bewijsstukken blijven wél gewoon meegaan.
+//
+// [PACKAGE-FAIL-CLOSED] The builder no longer gets this far with an unread ledger: it refuses the
+// package outright (closing-package-sources.test.ts). This stays as the assembler's own floor — a
+// read-failure warning handed to it directly must still never travel with a concept.
 
 const LEESFOUT_CODES = ["cash_read_failed", "bank_read_failed", "kasboek_unavailable"] as const;
 
@@ -256,8 +260,8 @@ test("[NO-EMPTY-LEDGER] een leesfout-waarschuwing gaat nooit samen met een conce
       sharedFiles: [],
       paymentDates: noPayDates,
       hasBankData: true,
-      // Dit is wat buildClosingPackage doet zodra een grootboeklezing faalt: de reden meesturen
-      // en het concept weglaten.
+      // Wat buildClosingPackage deed zodra een grootboeklezing faalde: de reden meesturen en het
+      // concept weglaten. (Now it builds no package at all — see the note above.)
       conceptAangifte: null,
       warnings: [{ code, message: "De boekingen konden niet volledig worden gelezen." }],
     });
@@ -566,8 +570,11 @@ test("[SLUIS] the orchestrator really hands the e-facturen over, and really chec
   // hand the assembler a reconciliation directly. What ships is a package without one, exactly
   // like a quarter that had no bank lines.
   assert.match(src, /buildBankHandoverCsv\(/, "the package no longer hands over the afletering");
-  assert.match(src, /read: !bankReadFailed/, "a failed bank read must reach the file — an empty table reads as 'all matched'");
-  assert.match(src, /totals: bankReadFailed \? null/, "zeroes over an unread quarter read as a finished job");
+  // [PACKAGE-FAIL-CLOSED] A failed bank read no longer reaches this file at all: no package is built
+  // (closing-package-sources.test.ts fails the read and shows it). What is left to hold here is that
+  // the afletering is built from the rows that were read in full, and from nothing else.
+  assert.match(src, /const bankAllRows = await required\("bank_transactions"/, "the rows under the afletering are no longer a required read — an unread quarter reads as 'all matched'");
+  assert.match(src, /const rows = bankAllRows as HandoverTx\[\];/, "the afletering is no longer built from the rows that were read");
   assert.match(src, /^\s*bankHandover,\s*$/m, "…and it is never built and then not passed on");
 
   // [VERANTWOORDING] The cover page is rendered inside the assembler, where the numbers are final.

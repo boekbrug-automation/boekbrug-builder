@@ -19,7 +19,7 @@ import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { fetchAllRows } from "@/lib/supabase-paginate";
 import { timingSafeEqualStr } from "@/lib/timing-safe";
 import { DEMO_TENANT_ID } from "@/lib/demo-tenant";
-import { summarizeClosingPackage } from "@/lib/closing-package";
+import { summarizeClosingPackage, ClosingPackageSourceUnavailableError } from "@/lib/closing-package";
 import { createNotification } from "@/lib/notifications";
 import { previousQuarter, buildQuarterCloseNotice } from "@/lib/quarter-close";
 import { sendQuarterReadyToAccountant } from "@/lib/email";
@@ -130,6 +130,14 @@ export async function GET(req: NextRequest) {
     if (filedOwners.has(ownerId)) { skippedEmpty += 1; continue; } // already filed → no review nudge
     try {
       const summary = await summarizeClosingPackage({ ownerId, year: period.year, quarter: period.quarter, supabase: pipeline });
+      // [PACKAGE-FAIL-CLOSED] A quarter this run could not read in full is not announced at all.
+      // The summary leaves out every warning an unread source would have decided, so the notice
+      // built from it can come out "clean" — and then the accountant is mailed "het kwartaalpakket
+      // staat klaar om te downloaden" about a quarter nobody read. Thrown into the catch below: the
+      // owner counts as failed, the run is not ok, and a re-run (?year&quarter) picks it up.
+      if (summary.unreadSources.length > 0) {
+        throw new ClosingPackageSourceUnavailableError(summary.unreadSources.join(","));
+      }
       const notice = buildQuarterCloseNotice(summary.quarter, summary);
       // Don't nag a dormant quarter (no invoice activity, no warnings).
       if (notice.empty) { skippedEmpty += 1; continue; }

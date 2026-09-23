@@ -27,7 +27,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createPipelineClient } from "@/lib/supabase-pipeline";
 import { checkRateLimitByKey, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
-import { buildClosingPackageZip } from "@/lib/closing-package";
+import { buildClosingPackageZip, ClosingPackageSourceUnavailableError } from "@/lib/closing-package";
 // [PAKKET-AFDRUK] Wat er is overhandigd, zodat "het pakket is veranderd" een antwoord heeft.
 import { contentOf, fingerprint, driftBetween, driftSentence } from "@/lib/package-fingerprint";
 // [DEPLOY-SAFE] "de tabel is er nog niet" is iets anders dan "de schrijf ging mis".
@@ -42,23 +42,31 @@ import { merkVoet } from "@/lib/mail-merk";
 /**
  * Eén gezicht voor elke weigering, in HTML — de lezer is een boekhouder die in zijn mailbox op
  * een knop klikte, niet een client die JSON verwerkt.
+ *
+ * [PACKAGE-FAIL-CLOSED] …with a second face for the refusals that pass. A link that is dead and a
+ * link whose package could not be built RIGHT NOW are opposite messages: "ask your client for a
+ * new one" sends the accountant after a link that still works. `retry` gives the page that says
+ * so, and a Retry-After when the wait is known.
  */
-function weiger(status: number, zin: string): NextResponse {
+function weiger(status: number, zin: string, retry?: { afterSeconds?: number }): NextResponse {
+  const kop = retry ? "Het pakket kon nu niet worden samengesteld" : "Deze link werkt niet meer";
+  const vervolg = retry
+    ? "De link blijft gewoon werken — probeer het straks opnieuw."
+    : "Vraag je klant om een nieuwe link te sturen — dat kost hem één tik.";
   const body = `<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Deze link werkt niet meer — BoekBrug</title></head>
+<title>${kop} — BoekBrug</title></head>
 <body style="margin:0;background:#f8f9fa;font-family:system-ui,-apple-system,sans-serif">
 <main style="max-width:460px;margin:14vh auto;padding:28px;background:#fff;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
-<h1 style="font-size:18px;color:#202124;margin:0 0 10px">Deze link werkt niet meer</h1>
+<h1 style="font-size:18px;color:#202124;margin:0 0 10px">${kop}</h1>
 <p style="font-size:14.5px;color:#5F6368;line-height:1.6;margin:0">${zin}</p>
-<p style="font-size:13px;color:#5F6368;line-height:1.6;margin:14px 0 0">Vraag je klant om een nieuwe link te sturen — dat kost hem één tik.</p>
+<p style="font-size:13px;color:#5F6368;line-height:1.6;margin:14px 0 0">${vervolg}</p>
 ${merkVoet()}
 </main></body></html>`;
-  return new NextResponse(body, {
-    status,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-  });
+  const headers: Record<string, string> = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
+  if (retry?.afterSeconds) headers["Retry-After"] = String(retry.afterSeconds);
+  return new NextResponse(body, { status, headers });
 }
 
 /** Een bestandsnaam die elk besturingssysteem accepteert — zelfde regel als de ingelogde route. */
@@ -99,7 +107,7 @@ export async function GET(req: NextRequest) {
   if (error) {
     console.error("[PAKKET-LINK] share lookup failed", { error: error.message });
     // Niet "onbekend": wij konden het niet nakijken, en dat is iets anders dan een dode link.
-    return weiger(503, "We konden deze link nu even niet nakijken. Probeer het over een paar minuten opnieuw.");
+    return weiger(503, "We konden deze link nu even niet nakijken.", { afterSeconds: 120 });
   }
   // Onbekend, verlopen en ingetrokken krijgen bewust hetzelfde antwoord — zie de kop.
   if (!share || shareStatus(share, Date.now()) !== "live") {
@@ -123,8 +131,19 @@ export async function GET(req: NextRequest) {
       supabase: pipeline,
     });
   } catch (err) {
+    // [PACKAGE-FAIL-CLOSED] An unreadable source is not a broken build: nothing is recorded below
+    // either way (no fingerprint, no counter, no audit row, no drift notice — all of that comes
+    // after this return), but the accountant is told which of the two it was.
+    if (err instanceof ClosingPackageSourceUnavailableError) {
+      console.error("[PACKAGE-FAIL-CLOSED] required source unreadable — no package", { id: share.id, source: err.source, error: err.message });
+      return weiger(
+        503,
+        "Een deel van de administratie van je klant kon nu niet volledig worden gelezen, dus er is geen pakket samengesteld — een onvolledig pakket zou eruitzien als een kwartaal zonder die boekingen. Er is niets veranderd.",
+        { afterSeconds: 120 },
+      );
+    }
     console.error("[PAKKET-LINK] build failed", { id: share.id, err });
-    return weiger(500, "Het samenstellen van het pakket ging halverwege mis. Er is niets veranderd; opnieuw proberen kan direct.");
+    return weiger(500, "Het samenstellen van het pakket ging halverwege mis. Er is niets veranderd.", {});
   }
 
   // [PAKKET-AFDRUK] …en WAT er is opgehaald. Het blok hieronder legde alleen de handeling vast,

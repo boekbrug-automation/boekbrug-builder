@@ -28,7 +28,7 @@
 // Mirrors account-export.ts: a pure assemble (node-testable) + an orchestrator
 // (fetch + parallel download, then assemble). Reuses quarterly.ts + export.ts.
 
-import { readExcludedBankIds } from "./bank-ignored-excluded";
+import { readExcludedBankIdsChecked } from "./bank-ignored-excluded";
 import { effectiveTaxKind } from "./tax-letter";
 import JSZip from "jszip";
 // [CLOSING-PACKAGE-PAYDATE] pdf-lib stamps a small "Betaald op: DD-MM-YYYY" line
@@ -128,12 +128,12 @@ import { buildIcp, buildIcpCsv, icpNote, type IcpInvoice, type IcpResult } from 
 import {
   foreignPurchaseVat, foreignPurchaseIds, foreignPurchaseNote, buildForeignPurchaseCsv, type ForeignPurchaseVat,
 } from "./foreign-purchase-vat";
-import { readSupplierCountries, SUPPLIER_COUNTRY_READ_FAILED_NOTE } from "./supplier-country";
+import { readSupplierCountries } from "./supplier-country";
 import { fetchAllRows, fetchAllRowsForIds } from "./supabase-paginate";
 // [PACKAGE-ART29] Both sides of art. 29 Wet OB — see the call site for why they belong here.
 import { collectBadDebt, collectVatClawback } from "./bad-debt-collect";
 import { BAD_DEBT_MIN_EUR } from "./bad-debt";
-import { collectRegimeFlags, type RegimeInvoiceRef } from "./regime-collect";
+import { collectRegimeFlagsChecked, type RegimeInvoiceRef } from "./regime-collect";
 import { regimeFlagNote } from "./regime-flags";
 import { resolveSchemeSettlements, mergeSchemeOpts } from "./kas-payment-events-fetch";
 // [RUBRIEK-SPLIT] Omzet per BTW rate from the invoice's own lines — the same helper the aangifte
@@ -250,6 +250,14 @@ export interface ClosingPackageSummary {
    * against the manifest instead of trusted.
    */
   auditfile?: { fileName: string; entryCount: number; skippedCount: number; throughDate: string } | null;
+  /**
+   * [PACKAGE-FAIL-CLOSED] Required sources this summary could NOT read, by name. Empty on every
+   * package the builder returns (it throws instead). The preview summary cannot throw — readiness
+   * shares it — so it lists them here, leaves out every warning those reads would have decided, and
+   * a caller that announces a package (the quarter cron, the share mail) refuses while this is not
+   * empty. Required on purpose: a summary that forgot to say must not read as one that read it all.
+   */
+  unreadSources: string[];
   generatedAt: string;               // ISO
 }
 
@@ -1195,6 +1203,8 @@ export async function assembleClosingPackageZip(input: AssembleInput): Promise<C
           throughDate: auditfile.throughDate,
         }
       : null,
+    // [PACKAGE-FAIL-CLOSED] The builder only reaches the assembler when every required read succeeded.
+    unreadSources: [],
     generatedAt: new Date().toISOString(),
   };
 
@@ -1353,6 +1363,94 @@ export async function assembleClosingPackageZip(input: AssembleInput): Promise<C
 
 // ─── Orchestrator (fetch + parallel download, then assemble) ────────────────────
 
+// ─── [PACKAGE-FAIL-CLOSED] Failed financial read ≠ empty financial period ────────────────────────
+//
+// A read that fails and a read that finds nothing looked the same to most of this orchestrator. A
+// `.catch(() => [])` or an ignored `error` handed the rest of the code an empty list, and the rest
+// of the code did what it does with an empty list: it computed. Measured against a real quarter
+// (tests/support/package-quarter.ts), one unreadable source produced, in a package that downloaded
+// normally:
+//
+//   · till turnover   → a concept BTW-aangifte without the till omzet (1a/1b too low), plus a warning;
+//   · card payouts    → "de bank ontving € 0" on every till day, in dagomzet.csv and the triangle;
+//   · KOR flag        → a concept with voorbelasting and "te betalen" for an owner who files none;
+//   · VAT exemption   → voorbelasting reclaimed on costs the owner attributed to exempt work;
+//   · rate split      → a mixed-rate invoice's omzet in the wrong rubriek;
+//   · art. 29 / regime / bank costs / statement coverage → the warning simply absent.
+//
+// A warning at the bottom of overzicht.csv does not undo a wrong 1a in concept-btw-aangifte.csv,
+// and an absent warning cannot be noticed at all. So every read whose rows decide a figure, a total,
+// a reconciliation, which evidence ships, or a financial warning is REQUIRED: if it cannot be read,
+// the builder throws ClosingPackageSourceUnavailableError and no package exists. The doors answer
+// with a retryable 503 and record nothing. A read that succeeds and returns zero rows is a quarter
+// that genuinely has none, and it still gets its package.
+//
+// What still degrades, on purpose — each one changes no figure and already SAYS it could not look:
+//   · the dateless-invoice probe (invoice_no_date: "we konden niet nagaan"),
+//   · the shared documents (shared_doc_other_quarter: "konden de gedeelde bestanden niet ophalen"),
+//   · the payment dates stamped on paid PDFs (paydate_read_failed; the stamp says "(geschat)"),
+//   · the invoice numbering check (the cover page says "kon niet worden nagekeken"),
+//   · the removed-cash trail under the Kasboek (kasboek_removals_incomplete),
+//   · the XAF auditfile (auditfile_unavailable, and the file is left out whole),
+//   · the e-facturen and the cover page's identity lines — additions to a package that is
+//     complete without them.
+//
+// summarizeClosingPackage follows the same rule without throwing — readiness shares it and keeps
+// its own class A/B contract — so it names the sources it could not read in `unreadSources`, and a
+// caller that announces a package must refuse while that list is not empty.
+
+/** A source the package cannot be honest without could not be read. Retrying may succeed. */
+export class ClosingPackageSourceUnavailableError extends Error {
+  readonly source: string;
+  constructor(source: string, cause?: unknown) {
+    super(`[PACKAGE-FAIL-CLOSED] required source unreadable: ${source}${cause === undefined ? "" : ` — ${describeCause(cause)}`}`);
+    this.name = "ClosingPackageSourceUnavailableError";
+    this.source = source;
+  }
+}
+
+function describeCause(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  if (cause && typeof cause === "object" && "message" in cause) return String((cause as { message: unknown }).message);
+  return String(cause);
+}
+
+/** Await a required read that signals failure by throwing; any failure becomes the typed refusal. */
+async function required<T>(source: string, read: () => PromiseLike<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (e) {
+    if (e instanceof ClosingPackageSourceUnavailableError) throw e;
+    throw new ClosingPackageSourceUnavailableError(source, e);
+  }
+}
+
+/** One PostgREST response whose `error` must never be read as "no rows". */
+async function requiredResponse<T>(
+  source: string,
+  read: () => PromiseLike<{ data: T | null; error: { message: string } | null }>,
+): Promise<T | null> {
+  const res = await required(source, read);
+  if (res.error) throw new ClosingPackageSourceUnavailableError(source, res.error);
+  return res.data;
+}
+
+/**
+ * [PACKAGE-FAIL-CLOSED] Did Storage answer about the OBJECT, or fail to answer at all?
+ *
+ * A key with nothing behind it comes back as a 4xx about that key (Supabase says 400 with
+ * statusCode "404", newer versions 404), and retrying changes nothing: the evidence is missing and
+ * the package says so per file, as it always has. Our own credentials (401/403), a timeout (408), a
+ * rate limit (429), a server error (5xx) or no status at all (the network) are the store being
+ * unavailable — and reporting those as "origineel PDF niet gevonden" tells the accountant the owner
+ * has no bon for a purchase whose bon is sitting in storage.
+ */
+function storageUnavailable(error: unknown): boolean {
+  const status = Number((error as { status?: unknown } | null)?.status);
+  if (!Number.isFinite(status)) return true;
+  return status >= 500 || status === 401 || status === 403 || status === 408 || status === 429;
+}
+
 // [BON-BETAALWIJZE] payment_method + payment_date + source horen hier thuis. Zonder die drie
 // ontving de boekhouder een contante bon van 112,92 zonder te weten HOE er is betaald — zijn
 // eerste vraag over elke bon, en juist bij contant de enige die hij niet zelf kan afleiden
@@ -1437,6 +1535,10 @@ export function datelessWarning(d: { count: number; labels: string[]; checked: b
  * builder uses (period-tagged + legacy created_at fallback), extracted so the preview
  * summary can tell whether a statement file will actually be attached. Returns de-duped
  * {path,name}. Presence of transactions ≠ presence of the statement file.
+ *
+ * [PACKAGE-FAIL-CLOSED] Throws when either query fails: a failed read answered "geen bankafschrift"
+ * and shipped the quarter without the statement the accountant asked for. The ZIP builder calls this
+ * too now, so the two can no longer differ.
  */
 async function bankStatementPaths(
   supabase: PipelineClient,
@@ -1447,21 +1549,25 @@ async function bankStatementPaths(
   const start = quarterStartDate(year, quarter);
   const end = quarterEndDate(year, quarter);
   const stmtPeriod = `${year}-Q${quarter}`;
-  const [{ data: taggedStmts }, { data: legacyStmts }] = await Promise.all([
-    supabase
-      .from("documents")
-      .select("file_url, file_name")
-      .eq("user_id", ownerId)
-      .eq("doc_type", "bankafschrift")
-      .eq("period", stmtPeriod),
-    supabase
-      .from("documents")
-      .select("file_url, file_name")
-      .eq("user_id", ownerId)
-      .eq("doc_type", "bankafschrift")
-      .is("period", null)
-      .gte("created_at", start)
-      .lte("created_at", `${end}T23:59:59`),
+  const [taggedStmts, legacyStmts] = await Promise.all([
+    requiredResponse("bank_statement_files", () =>
+      supabase
+        .from("documents")
+        .select("file_url, file_name")
+        .eq("user_id", ownerId)
+        .eq("doc_type", "bankafschrift")
+        .eq("period", stmtPeriod),
+    ),
+    requiredResponse("bank_statement_files", () =>
+      supabase
+        .from("documents")
+        .select("file_url, file_name")
+        .eq("user_id", ownerId)
+        .eq("doc_type", "bankafschrift")
+        .is("period", null)
+        .gte("created_at", start)
+        .lte("created_at", `${end}T23:59:59`),
+    ),
   ]);
   const rows = [...(taggedStmts ?? []), ...(legacyStmts ?? [])] as Array<{
     file_url: string | null;
@@ -1565,8 +1671,10 @@ async function sharedDocsForQuarter(
 // never quote two different numbers for the same thing. Debits only: a credit coded 'kosten'
 // (a refund) has no voorbelasting to reclaim.
 //
-// Fail-soft, like every other completeness probe here: if the read fails, this one check lapses
-// rather than taking the whole hand-over down with it.
+// [PACKAGE-FAIL-CLOSED] Throws when the read fails. It used to be fail-soft — "this one check lapses
+// rather than taking the whole hand-over down with it" — and a lapsed check is indistinguishable from
+// a quarter with nothing to report: the voorbelasting on the owner's rent disappeared without a
+// word. The builder refuses the package; the summary names the source as unread.
 async function costLinesWithoutInvoice(
   supabase: PipelineClient,
   ownerId: string,
@@ -1586,7 +1694,7 @@ async function costLinesWithoutInvoice(
       .lte("date", end)
       .order("id", { ascending: true })
       .range(from, to),
-  ).catch(() => [] as { id: string; amount: number | null }[]);
+  );
   const total = rows.reduce((s, t) => s + Math.abs(Number(t.amount) || 0), 0);
   return { count: rows.length, total: round2(total) };
 }
@@ -1700,9 +1808,27 @@ export async function summarizeClosingPackage(args: {
   const end = quarterEndDate(year, quarter);
   const warnings: ClosingPackageWarning[] = [];
 
+  // [PACKAGE-FAIL-CLOSED] The sources this summary could not read. It does not throw for them —
+  // readiness shares this function — but it never answers one with "none" either: the warnings a
+  // failed read would have decided are left out, the source is named, and the caller decides.
+  const unreadSources: string[] = [];
+  async function attempt<T>(source: string, read: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
+    try {
+      return { ok: true, value: await read() };
+    } catch (e) {
+      const name = e instanceof ClosingPackageSourceUnavailableError ? e.source : source;
+      if (!unreadSources.includes(name)) unreadSources.push(name);
+      console.error("[PACKAGE-FAIL-CLOSED] summary source unreadable — named, not answered with 'none'", {
+        ownerId, source: name, error: describeCause(e),
+      });
+      return { ok: false };
+    }
+  }
+
   // [PAGINATION] Page past the ~1000-row PostgREST cap: a busy shop's quarter can exceed it,
   // and a silent truncation would drop invoices from the count AND the readiness warning below.
-  const invData = await fetchAllRows<Record<string, unknown>>((from, to) =>
+  // Throws, as it always did: without the invoices there is no summary (readiness class A).
+  const invData = await required("invoices", () => fetchAllRows<Record<string, unknown>>((from, to) =>
     supabase
       .from("invoices")
       .select(INVOICE_FIELDS)
@@ -1712,9 +1838,7 @@ export async function summarizeClosingPackage(args: {
       .neq("status", "archived")
       .order("id", { ascending: true })
       .range(from, to),
-  ).catch((e: unknown) => {
-    throw new Error(`[CLOSING-PACKAGE] summary query failed: ${e instanceof Error ? e.message : String(e)}`);
-  });
+  ));
 
   // [FIN-4] Never silently drop a verified row with a NULL direction: infer it
   // from ownership (mirrors the quarterly route). Previously isVerifiedForPackage
@@ -1813,14 +1937,20 @@ export async function summarizeClosingPackage(args: {
   // old created_at filter almost always missed it and falsely reported "geen
   // bankafschrift" in the readiness panel. Parsed transactions are the honest
   // coverage signal.
-  const { data: bankTx } = await supabase
-    .from("bank_transactions")
-    .select("id")
-    .eq("user_id", ownerId)
-    .gte("date", start)
-    .lte("date", end)
-    .limit(1);
-  const hasBankData = (bankTx ?? []).length > 0;
+  // [PACKAGE-FAIL-CLOSED] null = we could not look. "Geen banktransacties gevonden" is a claim, and
+  // a failed read cannot make it.
+  const bankTxRead = await attempt("bank_coverage", () =>
+    requiredResponse("bank_coverage", () =>
+      supabase
+        .from("bank_transactions")
+        .select("id")
+        .eq("user_id", ownerId)
+        .gte("date", start)
+        .lte("date", end)
+        .limit(1),
+    ),
+  );
+  const hasBankData: boolean | null = bankTxRead.ok ? (bankTxRead.value ?? []).length > 0 : null;
 
   // [BANK-ONOPGELOST] A bank line that reached the end of the quarter still PENDING and still
   // uncategorised is a euro nobody placed: it contributes 0 to omzet, kosten and voorbelasting
@@ -1832,22 +1962,32 @@ export async function summarizeClosingPackage(args: {
   // Deliberately counts EVERY unresolved line, not a flagged subset: the gap exists today, for
   // every owner, whether or not they ever press a button. Ignored lines (status 'not_found') are
   // out — those the owner answered, even if the answer was "not mine".
-  const unresolvedBank = await fetchAllRows<{ id: string; amount: number | null }>((from, to) =>
-    supabase
-      .from("bank_transactions")
-      .select("id, amount")
-      .eq("user_id", ownerId)
-      .eq("status", "pending")
-      .is("category", null)
-      .gte("date", start)
-      .lte("date", end)
-      .order("id", { ascending: true })
-      .range(from, to),
-  ).catch(() => [] as { id: string; amount: number | null }[]);
+  // [PACKAGE-FAIL-CLOSED] This read decides the one warning the accountant most needs; a failed read
+  // used to leave the quarter without it and the cron then mailed "staat klaar" with no open point.
+  const unresolvedRead = await attempt("unresolved_bank_lines", () =>
+    fetchAllRows<{ id: string; amount: number | null }>((from, to) =>
+      supabase
+        .from("bank_transactions")
+        .select("id, amount")
+        .eq("user_id", ownerId)
+        .eq("status", "pending")
+        .is("category", null)
+        .gte("date", start)
+        .lte("date", end)
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
+  );
+  const unresolvedBank = unresolvedRead.ok ? unresolvedRead.value : [];
   // [COM-IN-DE-REGEL] The commission the bank stated on this quarter's card payouts. In-quarter by
   // booking date — the same clip the result engine and the ZIP use, so all three quote one number.
   // Soft: this is a finding, never a gate, so a failed read must not cost the owner their quarter
-  // notification. It degrades to "nothing stated", which is the same as most quarters honestly are.
+  // notification. It decides no warning, only an extra sentence, so it is not an unread SOURCE.
+  //
+  // [PACKAGE-FAIL-CLOSED] …but a failed read may not make that sentence either. The terminal probe
+  // decides whether it says "die staan als kosten in je cijfers": its error used to be ignored, so
+  // an unreadable probe read as "no terminal settlement" and the sentence claimed a booking that
+  // may not exist. Either read failing now means no sentence, never a guessed one.
   const posForCommission = await fetchAllRows<{ description: string | null; amount: number | null }>((from, to) =>
     supabase
       .from("bank_transactions")
@@ -1858,16 +1998,19 @@ export async function summarizeClosingPackage(args: {
       .lte("date", end)
       .order("id", { ascending: true })
       .range(from, to),
-  ).catch(() => [] as { description: string | null; amount: number | null }[]);
-  const statedForQuarter = statedCommission(posForCommission);
+  ).catch(() => null);
   // Mirrors the engine's booking guard (result-range-assemble.ts): with no terminal settlement in
   // the quarter, Leg B booked nothing, so the stated amount IS what landed in kosten.
-  const eftInQuarter = await supabase
-    .from("eft_settlements").select("id").eq("user_id", ownerId)
-    .gte("settlement_date", start).lte("settlement_date", end).limit(1);
+  const eftInQuarter = await Promise.resolve(
+    supabase
+      .from("eft_settlements").select("id").eq("user_id", ownerId)
+      .gte("settlement_date", start).lte("settlement_date", end).limit(1),
+  ).catch(() => null);
+  const statedForQuarter = statedCommission(posForCommission ?? []);
+  const commissionKnown = posForCommission !== null && eftInQuarter !== null && !eftInQuarter.error;
   const cardStatedCommission: StatedCommissionRow | null =
-    statedForQuarter.lines > 0 || statedForQuarter.unverified > 0
-      ? { ...statedForQuarter, booked: (eftInQuarter.data ?? []).length === 0 && statedForQuarter.total > 0 }
+    commissionKnown && (statedForQuarter.lines > 0 || statedForQuarter.unverified > 0)
+      ? { ...statedForQuarter, booked: (eftInQuarter?.data ?? []).length === 0 && statedForQuarter.total > 0 }
       : null;
 
   const unresolvedBankCount = unresolvedBank.length;
@@ -1876,7 +2019,8 @@ export async function summarizeClosingPackage(args: {
 
   // Whether the statement FILE will actually be attached — separate from "we have bank
   // data". Reported truthfully so the preview matches the ZIP (which two-tiers the same way).
-  const bankFilePaths = await bankStatementPaths(supabase, ownerId, year, quarter);
+  const statementRead = await attempt("bank_statement_files", () => bankStatementPaths(supabase, ownerId, year, quarter));
+  const bankFilePaths = statementRead.ok ? statementRead.value : [];
   const bankStatementIncluded = bankFilePaths.length > 0;
 
   // [C#3] Owner-shared general docs for this quarter — counted so the preview
@@ -1927,9 +2071,10 @@ export async function summarizeClosingPackage(args: {
   if (dateless) warnings.push(dateless);
   // Bank: mirror the ZIP's two-tier truth exactly. No data at all vs. data present but the
   // statement file isn't attached — the latter used to be invisible to the preview.
-  if (!hasBankData) {
+  // [PACKAGE-FAIL-CLOSED] Only from reads that happened: an unread source is named, not guessed.
+  if (hasBankData === false) {
     warnings.push({ code: "no_bank_statement", message: "Geen banktransacties gevonden voor dit kwartaal — upload het bankafschrift." });
-  } else if (!bankStatementIncluded) {
+  } else if (hasBankData === true && statementRead.ok && !bankStatementIncluded) {
     warnings.push({ code: "bank_file_missing", message: "Banktransacties zijn aanwezig, maar het originele bankafschrift-bestand is (nog) niet bijgevoegd — upload het bankafschrift." });
   }
   // [BANK-ONOPGELOST] unshift, not push — and the reason is arithmetic, not taste. gapCount is
@@ -1949,8 +2094,8 @@ export async function summarizeClosingPackage(args: {
   // [PACKAGE-VOORBELASTING] Costs paid by bank with no purchase invoice — deductible BTW the
   // owner is about to leave on the table. See the helper for why this is separate from
   // 'bank_unresolved'.
-  const costNoInvoice = await costLinesWithoutInvoice(supabase, ownerId, start, end);
-  const costNoInvoiceWarning = costWithoutInvoiceWarning(costNoInvoice.count, costNoInvoice.total);
+  const costNoInvoice = await attempt("bank_cost_lines", () => costLinesWithoutInvoice(supabase, ownerId, start, end));
+  const costNoInvoiceWarning = costNoInvoice.ok ? costWithoutInvoiceWarning(costNoInvoice.value.count, costNoInvoice.value.total) : null;
   if (costNoInvoiceWarning) warnings.push(costNoInvoiceWarning);
 
   // [C#2] Shared files that fall outside this quarter — warn, don't drop silently.
@@ -1972,6 +2117,7 @@ export async function summarizeClosingPackage(args: {
     bankStatementIncluded,
     warnings,
     cardStatedCommission,
+    unreadSources,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -2003,19 +2149,23 @@ export async function buildClosingPackageZip(args: {
   if (profile) clientName = profile.company_name || profile.full_name || "Onbekend";
   const ownerKvk = (profile as { kvk_number?: string | null } | null)?.kvk_number ?? null;
   const ownerBtw = (profile as { btw_number?: string | null } | null)?.btw_number ?? null;
-  // [REGIME-FLAGS] Owner's KOR declaration (drives the accountant-handoff flag, never a figure).
-  // [DEPLOY-SAFE] Fetched in its OWN query — never folded into the clientName select above — so if
-  // the regime_kor.sql migration lags this deploy, a missing column only nulls korActive (→ no
-  // flags), and can NEVER break the client-name lookup or any figure in this package.
-  const { data: korProfile } = await supabase
-    .from("profiles").select("kor_active").eq("id", ownerId).maybeSingle();
+  // [REGIME-FLAGS] Owner's KOR declaration. Fetched in its OWN query — never folded into the
+  // clientName select above — so it can never break the client-name lookup.
+  // [PACKAGE-FAIL-CLOSED] Required, and that includes an absent column. The comment here used to say
+  // it "drives the accountant-handoff flag, never a figure"; it now drives the ICP, the deductible
+  // share of rubriek 2a, the art. 29 clawback and whether the concept is a KOR concept at all. An
+  // unread flag read as "no KOR" produced a concept with voorbelasting and a "te betalen" for an
+  // owner who files no return. Readiness already treats this read as essential (class A).
+  const korProfile = await requiredResponse("kor", () =>
+    supabase.from("profiles").select("kor_active").eq("id", ownerId).maybeSingle(),
+  );
   const korActive = !!(korProfile as { kor_active?: boolean | null } | null)?.kor_active;
 
   // Invoices of the quarter (both directions). Filter on STORED status only
   // (verified sets), within the quarter date range.
   // [PAGINATION] Page past the ~1000-row cap — this set feeds BOTH the evidence PDFs and
   // invoicesForResult (the concept aangifte money), so a silent truncation would understate it.
-  const invData = await fetchAllRows<Record<string, unknown>>((from, to) =>
+  const invData = await required("invoices", () => fetchAllRows<Record<string, unknown>>((from, to) =>
     supabase
       .from("invoices")
       .select(INVOICE_FIELDS)
@@ -2025,9 +2175,7 @@ export async function buildClosingPackageZip(args: {
       .neq("status", "archived")
       .order("id", { ascending: true })
       .range(from, to),
-  ).catch((e: unknown) => {
-    throw new Error(`[CLOSING-PACKAGE] invoices query failed: ${e instanceof Error ? e.message : String(e)}`);
-  });
+  ));
 
   // [FIN-4] Never silently drop a verified row with a NULL direction: infer it
   // from ownership (mirrors the quarterly route). Previously isVerifiedForPackage
@@ -2066,7 +2214,7 @@ export async function buildClosingPackageZip(args: {
   // [PACKAGE-VOORBELASTING] Same mirror, for costs paid by bank with no purchase invoice. The
   // owner's readiness screen flags these as a risk, but a risk does not block a hand-over — so
   // without this the accountant receives a quarter with unclaimed voorbelasting and no signal.
-  const costNoInvoiceZip = await costLinesWithoutInvoice(supabase, ownerId, start, end);
+  const costNoInvoiceZip = await required("bank_cost_lines", () => costLinesWithoutInvoice(supabase, ownerId, start, end));
   const costNoInvoiceZipWarning = costWithoutInvoiceWarning(costNoInvoiceZip.count, costNoInvoiceZip.total);
   if (costNoInvoiceZipWarning) warnings.push(costNoInvoiceZipWarning);
 
@@ -2090,13 +2238,14 @@ export async function buildClosingPackageZip(args: {
   // ADDITION to a package that is complete without it; these ARE the package. Both callers of
   // this builder already answer a throw with "opnieuw proberen kan direct", so a failure costs
   // the owner one retry — where swallowing it costs him a quarter filed without its bills.
+  // [PACKAGE-FAIL-CLOSED] Named, so the doors can tell it from a fault in the build itself.
   const incomingDocIds = incoming.map((i) => i.document_id).filter((x): x is string => !!x);
   if (incomingDocIds.length > 0) {
     // [SEC-STORAGE-PATH] Scoped to the owner, like the bankafschrift query below and unlike
     // these two reads before it. invoices.document_id is ordinary text on a row the owner may
     // write, and `supabase` here is service_role — so an id pointing at another tenant's
     // document was read by id and its bytes shipped inside this owner's quarter ZIP.
-    const docRows = await fetchAllRowsForIds<
+    const docRows = await required("purchase_evidence", () => fetchAllRowsForIds<
       { id: string; file_url: string | null; file_name: string | null },
       string
     >(incomingDocIds, (chunk, from, to) =>
@@ -2107,7 +2256,7 @@ export async function buildClosingPackageZip(args: {
         .in("id", chunk)
         .order("id", { ascending: true })
         .range(from, to),
-    );
+    ));
     const docById = new Map(docRows.map((d) => [d.id, d]));
     for (const inv of incoming) {
       const d = inv.document_id ? docById.get(inv.document_id) : null;
@@ -2398,36 +2547,12 @@ export async function buildClosingPackageZip(args: {
   // without the statement the accountant needs. Two simple queries — statements
   // tagged for this quarter, plus a legacy fallback (period NULL → the old
   // created_at window, so pre-tagging uploads still surface) — merged + de-duped.
-  const stmtPeriod = `${year}-Q${quarter}`;
-  const [{ data: taggedStmts }, { data: legacyStmts }] = await Promise.all([
-    supabase
-      .from("documents")
-      .select("file_url, file_name")
-      .eq("user_id", ownerId)
-      .eq("doc_type", "bankafschrift")
-      .eq("period", stmtPeriod),
-    supabase
-      .from("documents")
-      .select("file_url, file_name")
-      .eq("user_id", ownerId)
-      .eq("doc_type", "bankafschrift")
-      .is("period", null)
-      .gte("created_at", start)
-      .lte("created_at", `${end}T23:59:59`),
-  ]);
-  const bankRows = [...(taggedStmts ?? []), ...(legacyStmts ?? [])] as unknown as Array<{
-    file_url: string | null;
-    file_name: string | null;
-  }>;
-  const bankPaths: Array<{ path: string; name: string }> = [];
-  const seenBankPath = new Set<string>();
-  for (const d of bankRows) {
-    if (!d.file_url || seenBankPath.has(d.file_url)) continue;
-    seenBankPath.add(d.file_url);
-    bankPaths.push({ path: d.file_url, name: d.file_name ?? "bankafschrift" });
-  }
+  // [PACKAGE-FAIL-CLOSED] Through the one helper the summary uses, which throws on a failed read:
+  // an ignored error here shipped the quarter without its statement, and a warning that told the
+  // owner to upload a statement that was already there.
+  const bankPaths = await bankStatementPaths(supabase, ownerId, year, quarter);
 
-  // ── Download everything in parallel; a failed file → warning, not a crash ──
+  // ── Download everything in parallel; a missing file → warning, an unavailable store → no package ──
   //
   // [SEC-STORAGE-PATH] The attribution lives HERE, not at each feeder. `supabase` is the
   // service-role client, so it bypasses the bucket policy that stops a session client reading
@@ -2439,17 +2564,22 @@ export async function buildClosingPackageZip(args: {
   // Guarding the feeders would have been four checks that a fifth feeder does not inherit. One
   // choke point cannot be half-applied: nothing reaches storage from this builder except through
   // this function, and it refuses what it cannot attribute.
+  //
+  // [PACKAGE-FAIL-CLOSED] Null still means "this file is not there" — a refused path, or Storage
+  // answering about the key itself — and the assembler warns per file, as before. Storage being
+  // UNAVAILABLE is not that: it used to come back as "origineel PDF niet gevonden" for evidence
+  // that exists, so it now refuses the package (see storageUnavailable).
   async function dl(stored: string, name: string): Promise<PackageFile | null> {
     const path = ownedStoragePath(stored, ownerId);
     if (!path) return null;
-    try {
-      const { data, error } = await supabase.storage.from("documents").download(path);
-      if (error || !data) return null;
-      const bytes = new Uint8Array(await data.arrayBuffer());
-      return { path, name, bytes };
-    } catch {
-      return null;
+    const res = await required("evidence_files", () => supabase.storage.from("documents").download(path));
+    if (res.error || !res.data) {
+      if (!res.error || !storageUnavailable(res.error)) return null;
+      throw new ClosingPackageSourceUnavailableError("evidence_files", res.error);
     }
+    const data = res.data;
+    const bytes = await required("evidence_files", async () => new Uint8Array(await data.arrayBuffer()));
+    return { path, name, bytes };
   }
 
   const pdfEntries = await Promise.all(
@@ -2490,13 +2620,16 @@ export async function buildClosingPackageZip(args: {
   // not the statement file's upload time. Statements are uploaded after the
   // quarter closes (aangifte deadline is the month after), so a created_at-based
   // check falsely reported "geen bankafschrift" on almost every package.
-  const { data: bankTxRows } = await supabase
-    .from("bank_transactions")
-    .select("id")
-    .eq("user_id", ownerId)
-    .gte("date", start)
-    .lte("date", end)
-    .limit(1);
+  // [PACKAGE-FAIL-CLOSED] A failed probe reported exactly that again, in the package itself.
+  const bankTxRows = await requiredResponse("bank_coverage", () =>
+    supabase
+      .from("bank_transactions")
+      .select("id")
+      .eq("user_id", ownerId)
+      .gte("date", start)
+      .lte("date", end)
+      .limit(1),
+  );
   const hasBankData = (bankTxRows ?? []).length > 0;
 
   // ── [BRUG-FILES-SHARED] Owner-shared general docs for this quarter ──
@@ -2531,21 +2664,17 @@ export async function buildClosingPackageZip(args: {
   // ZIP counted it AGAIN as omzet-zonder-tarief, disagreeing with the in-app concept.
   // [NO-SILENT-EMPTY] A failed read here answered "this shop had no till turnover this quarter",
   // which for a retailer is the single largest number in the package. Zero omzet is a conclusion
-  // and must never be the shape of an outage; the package says so instead.
-  const { data: turnoverRows, error: turnoverErr } = await supabase
-    .from("daily_turnover")
-    .select("turnover_date, base_0, base_9, base_21, btw_9, btw_21, total_incl, pin_amount, cash_amount, other_amount")
-    .eq("user_id", ownerId)
-    .gte("turnover_date", shiftDays(start, -5))
-    .lte("turnover_date", end);
-  if (turnoverErr) {
-    console.error("[NO-SILENT-EMPTY] daily_turnover read failed — the package says so instead of reporting zero omzet", { ownerId, error: turnoverErr.message });
-    warnings.push({
-      code: "turnover_read_failed",
-      message:
-        "De dagomzet kon niet worden gelezen. Staat er kasomzet in dit kwartaal, dan ontbreekt die in dit pakket — bouw het opnieuw op voordat je het naar je boekhouder stuurt.",
-    });
-  }
+  // and must never be the shape of an outage.
+  // [PACKAGE-FAIL-CLOSED] It then became a warning beside a concept aangifte that was still computed
+  // without the till omzet — 1a and 1b too low, in the file the accountant files from. Now no package.
+  const turnoverRows = await requiredResponse("daily_turnover", () =>
+    supabase
+      .from("daily_turnover")
+      .select("turnover_date, base_0, base_9, base_21, btw_9, btw_21, total_incl, pin_amount, cash_amount, other_amount")
+      .eq("user_id", ownerId)
+      .gte("turnover_date", shiftDays(start, -5))
+      .lte("turnover_date", end),
+  );
   const allTurnover: DailyTurnover[] = (turnoverRows ?? []).map((t) => ({
     turnover_date: t.turnover_date,
     base_0: t.base_0 ?? 0, base_9: t.base_9 ?? 0, base_21: t.base_21 ?? 0,
@@ -2565,8 +2694,12 @@ export async function buildClosingPackageZip(args: {
     // pos_income lines (several schemes/day + refunds) exceeds it, and a truncated fetch silently
     // understates pinSettled → fabricated pin breaks in the accountant-facing reconciliation
     // (and understated evidence). Same trap the cash_entries fetch below already avoids.
+    // [PACKAGE-FAIL-CLOSED] …and paging is only half of it. Each of the three ended in
+    // `.catch(() => [])`, so a failure on ANY page — the second one included, after the first had
+    // arrived — threw the whole read away: "de bank ontving € 0" on every till day, in a package that
+    // downloaded normally. fetchAllRows already throws rather than shortening; nothing swallows it now.
     const [posData, cashData, eftData] = await Promise.all([
-      fetchAllRows((from, to) =>
+      required("pos_income", () => fetchAllRows((from, to) =>
         supabase
           .from("bank_transactions")
           .select("description, amount, date")
@@ -2575,8 +2708,8 @@ export async function buildClosingPackageZip(args: {
           .gte("date", shiftDays(start, -5))
           .lte("date", shiftDays(end, 5))
           .order("id", { ascending: true })
-          .range(from, to)).catch(() => []),
-      fetchAllRows((from, to) =>
+          .range(from, to))),
+      required("cash_turnover", () => fetchAllRows((from, to) =>
         liveCash.only(supabase
           .from("cash_entries")
           .select("entry_date, amount")
@@ -2585,8 +2718,8 @@ export async function buildClosingPackageZip(args: {
           .gte("entry_date", start)
           .lte("entry_date", end))
           .order("id", { ascending: true })
-          .range(from, to)).catch(() => []),
-      fetchAllRows((from, to) =>
+          .range(from, to))),
+      required("eft_settlements", () => fetchAllRows((from, to) =>
         supabase
           .from("eft_settlements")
           .select("settlement_date, terminal_id, period_nr, shift_nr, period_start, period_end, first_trx, last_trx, gross_total, tx_count, by_scheme")
@@ -2594,7 +2727,7 @@ export async function buildClosingPackageZip(args: {
           .gte("settlement_date", start)
           .lte("settlement_date", end)
           .order("id", { ascending: true })
-          .range(from, to)).catch(() => []),
+          .range(from, to))),
     ]);
     const posLines = posData.map((p) => ({ description: p.description, amount: p.amount }));
     const cashOmzet = cashData.map((c) => ({ date: c.entry_date, amount: c.amount }));
@@ -2617,14 +2750,16 @@ export async function buildClosingPackageZip(args: {
     // [LEDGER · Leg-A witness] The bookkeeper's PIN grootboek (ledger_daily kind='pin') as an
     // independent GROSS cross-check — fed to the triangle ONLY as pinLedgerByDay (a break on
     // mismatch), never a money source. In-quarter days only, matching /api/result.
-    const pinLedgerRows = await fetchAllRows<{ ledger_date: string; received: number | null; spent: number | null }>((from, to) =>
+    // [PACKAGE-FAIL-CLOSED] A witness that could not be read is not a witness that agreed: the
+    // triangle then showed no ledger column and no break, as if the grootboek matched the till.
+    const pinLedgerRows = await required("pin_ledger", () => fetchAllRows<{ ledger_date: string; received: number | null; spent: number | null }>((from, to) =>
       supabase.from("ledger_daily").select("ledger_date, received, spent")
         .eq("user_id", ownerId).eq("kind", "pin")
         .gte("ledger_date", start).lte("ledger_date", end)
         // [PAGE-KEY] ledger_date is unique per (user, date, KIND) — up to four rows a day — so a
         // .range() page boundary is not stable over it alone: ties may come back in a different
         // order per query, repeating some days and dropping others. The id makes the order total.
-        .order("ledger_date", { ascending: true }).order("id", { ascending: true }).range(from, to)).catch(() => []);
+        .order("ledger_date", { ascending: true }).order("id", { ascending: true }).range(from, to)));
     // NET PIN (received − spent) — matches /api/result and the till's net-of-refunds pin_amount.
     const pinLedgerByDay = new Map<string, number>();
     for (const r of (pinLedgerRows ?? [])) if (r.ledger_date) pinLedgerByDay.set(r.ledger_date, (Number(r.received) || 0) - (Number(r.spent) || 0));
@@ -2658,7 +2793,7 @@ export async function buildClosingPackageZip(args: {
   // /api/result and /api/readiness. The covered-days set excludes takings the till counted.
   // [PAGINATION] Busy shops book many cash entries a quarter — page past the cap so the
   // reconciliation engine sees every one (a dropped row understates omzet/kosten).
-  const cashAllRows = await fetchAllRows<{
+  const cashAllRows = await required("cash_entries", () => fetchAllRows<{
     direction: string; amount: number | null; category: string | null; btw_rate: number | null; entry_date: string | null; document_id: string | null;
   }>((from, to) =>
     liveCash.only(supabase
@@ -2669,14 +2804,16 @@ export async function buildClosingPackageZip(args: {
       .lte("entry_date", end))
       .order("id", { ascending: true })
       .range(from, to),
-  ).catch((e) => { console.error("[CLOSING-PACKAGE] cash_entries read failed", { ownerId, error: String(e) }); return null; });
+  ));
   // [NO-EMPTY-LEDGER] Een mislukte lezing werd hier een LEGE la, en een lege la rekent gewoon
   // door: de concept-aangifte kwam eruit alsof de ondernemer dat kwartaal geen cent contant had
   // omgezet. De boekhouder kreeg een pakket dat er compleet uitzag. Dat is de gevaarlijkste vorm
   // die dit product kent — niet een ontbrekend bestand (dat zie je), maar een compleet ogend
   // bestand met een been eraf.
-  const cashReadFailed = cashAllRows == null;
-  const cashEntries: ResultCashEntry[] = (cashAllRows ?? []).map((c) => ({
+  // [PACKAGE-FAIL-CLOSED] The repair that followed left the concept out and shipped the rest with
+  // a warning. The rest still leaned on the same rows (the cash-cost warning below, the regime
+  // check's omzet), so the rule is now the one above: no package without the cash movements.
+  const cashEntries: ResultCashEntry[] = cashAllRows.map((c) => ({
     direction: c.direction === "in" ? "in" : "out",
     amount: c.amount,
     category: c.category,
@@ -2691,7 +2828,7 @@ export async function buildClosingPackageZip(args: {
   const cashNoReceiptWarning = cashCostWithoutReceiptWarning(cashNoReceipt.count, cashNoReceipt.total);
   if (cashNoReceiptWarning) warnings.push(cashNoReceiptWarning);
   // [PAGINATION] Same for bank lines — a quarter of a busy account can exceed 1000 rows.
-  const bankAllRows = await fetchAllRows<{
+  const bankAllRows = await required("bank_transactions", () => fetchAllRows<{
     amount: number | null; category: string | null; invoice_id: string | null; date: string | null; description: string | null;
     counterpart_name?: string | null; reference?: string | null; status?: string | null;
   }>((from, to) =>
@@ -2707,34 +2844,47 @@ export async function buildClosingPackageZip(args: {
       .lte("date", end)
       .order("id", { ascending: true })
       .range(from, to),
-  ).catch((e) => { console.error("[CLOSING-PACKAGE] bank_transactions read failed", { ownerId, error: String(e) }); return null; });
+  ));
   // [NO-EMPTY-LEDGER] Zie hierboven: geen bankregels lezen is iets heel anders dan geen
   // bankregels hebben, en het concept mag die twee niet door elkaar halen.
-  const bankReadFailed = bankAllRows == null;
   // [SETTLE] Shared mapper — identical card-settlement de-dup to /api/result, /api/aangifte and
   // /api/readiness, incl. flagging an acquirer payout mis-tapped as 'omzet' so the closing
   // package never double-counts a covered-day card settlement.
   // [GENEGEERD-TELT] Het pakket telt dezelfde regels als het resultaat en de aangifte, dus ook
   // dezelfde uitsluitingen. Expliciete pijl: `.map(toResultBankTx)` zou de index doorgeven.
-  const excludedBankIds = await readExcludedBankIds({ client: supabase, userId: ownerId, start, end });
-  const bankForResult: ResultBankTx[] = (bankAllRows ?? []).map((b) => toResultBankTx(b, excludedBankIds));
+  // [PACKAGE-FAIL-CLOSED] The checked read: a failure other than the column not existing yet used to
+  // exclude nothing, so a line the owner marked "dubbel" counted as omzet again. (An absent column
+  // is still "nothing excluded", which is then the truth.)
+  const excluded = await required("excluded_bank_lines", () =>
+    readExcludedBankIdsChecked({ client: supabase, userId: ownerId, start, end }),
+  );
+  if (excluded.failed) throw new ClosingPackageSourceUnavailableError("excluded_bank_lines");
+  const excludedBankIds = excluded.ids;
+  const bankForResult: ResultBankTx[] = bankAllRows.map((b) => toResultBankTx(b, excludedBankIds));
   // [RUBRIEK-SPLIT] The accountant's package must show the same rubrieken as the aangifte the
   // owner files, so a mixed-rate sales invoice is split by its own lines here too. Only invoices
   // whose lines add up to their header are split; everything else keeps the header-derived rate.
   // [VRIJGESTELD] And the same exempt regime, from the same shared collector, for the same
   // reason: the package the accountant receives may not contradict the concept the owner saw.
   const typedAll = all as Array<{ id?: string; direction: string | null; total_ex_btw: number | null; btw_amount: number | null }>;
-  const exemption = await collectVatExemption({
+  // [PACKAGE-FAIL-CLOSED] Both collectors "never throw": they degrade and set `degraded`, which
+  // nothing here read. An unread exemption flag computed the concept as fully taxed and reclaimed
+  // voorbelasting on costs the owner had attributed to exempt work; an unread line set put a
+  // mixed-rate invoice's omzet in one rubriek. Either way the concept was wrong without a word.
+  const exemption = await required("vat_exemption", () => collectVatExemption({
     client: supabase as unknown as Parameters<typeof collectVatExemption>[0]["client"],
     ownerId,
     periodStart: start,
     incomingInvoiceIds: typedAll.filter((i) => i.direction === "incoming").map((i) => i.id).filter((id): id is string => !!id),
-  });
-  const { rateShares: rateSharesByInvoice, exemptExByInvoice } = await fetchRateShares(
+  }));
+  if (exemption.degraded) throw new ClosingPackageSourceUnavailableError("vat_exemption");
+  const rateSplit = await required("rate_split", () => fetchRateShares(
     supabase as unknown as Parameters<typeof fetchRateShares>[0],
     typedAll.filter((i) => i.direction !== "incoming"),
     { exemptRegime: exemption.active },
-  );
+  ));
+  if (rateSplit.degraded) throw new ClosingPackageSourceUnavailableError("rate_split");
+  const { rateShares: rateSharesByInvoice, exemptExByInvoice } = rateSplit;
   const invoicesForResult: ResultInvoice[] = all.map((i) => ({
     direction: i.direction as "outgoing" | "incoming" | null,
     status: i.status,
@@ -2765,7 +2915,9 @@ export async function buildClosingPackageZip(args: {
   // on the PAID date. Resolve the scheme for this quarter and, under kas, feed the settlement
   // events to computeResult (the raw invoice-list evidence stays invoice-date — that's a list, not
   // a computed figure). Default factuur → byte-identical.
-  const kasResolution = await resolveSchemeSettlements(supabase, ownerId, start, start, end, exemption.active);
+  // [PACKAGE-FAIL-CLOSED] Already threw on a failed read ([SCHEME-READ-HONEST]); named now, so the
+  // doors can say a source was unreadable rather than that the build broke.
+  const kasResolution = await required("vat_scheme", () => resolveSchemeSettlements(supabase, ownerId, start, start, end, exemption.active));
   // [TRIANGLE-ZERO] The 6th argument is the acquirer commission, and 0 here is deliberate.
   //
   // This call feeds ONLY the BTW side of the package: salesByRate, cashOmzetZonderBtw and
@@ -2814,17 +2966,17 @@ export async function buildClosingPackageZip(args: {
     direction: i.direction === "incoming" ? "incoming" : "outgoing",
     label: i.invoice_number,
   }));
-  // [NO-EMPTY-LEDGER] Bij een mislukte grootboeklezing is de omzet waarop de KOR-drempel wordt
-  // getoetst te laag, en zou een terechte drempelwaarschuwing juist ONDERDRUKT worden. Dan liever
-  // helemaal niet toetsen dan geruststellen op een half getal.
-  const ledgerReadFailed = cashReadFailed || bankReadFailed;
+  // [NO-EMPTY-LEDGER] The KOR threshold is tested on omzet from the ledger reads above; those are
+  // required now, so it is never tested on half a figure.
+  // [PACKAGE-FAIL-CLOSED] The line texts that decide "BTW verlegd" and "margeregeling": an unread set
+  // used to be no flags at all, which reads as a quarter without either regime.
   const omzetForKorCheck =
     result.salesByRate.reduce((sum, r) => sum + (r.omzet ?? 0), 0) + (result.cashOmzetZonderBtw ?? 0);
-  const regimeFlags = ledgerReadFailed
-    ? []
-    : await collectRegimeFlags({
-        client: supabase, korActive, omzetForKorCheck, invoices: regimeInvoices,
-      }).catch(() => []);
+  const regime = await required("regime_lines", () => collectRegimeFlagsChecked({
+    client: supabase, korActive, omzetForKorCheck, invoices: regimeInvoices,
+  }));
+  if (!regime.linesRead) throw new ClosingPackageSourceUnavailableError("regime_lines");
+  const regimeFlags = regime.flags;
   const regimeNotes = regimeFlags.map(regimeFlagNote);
   for (const f of regimeFlags) {
     warnings.push({ code: `regime_${f.code}`, message: regimeFlagNote(f) });
@@ -2859,10 +3011,14 @@ export async function buildClosingPackageZip(args: {
   // discipline as the rest of this file, which reports raw numbers and computes no vat_due.
   //
   // Same threshold as readiness (BAD_DEBT_MIN_EUR) so the owner's screen and this package can
-  // never name two different amounts. Fail-soft: a failed read drops the check, not the ZIP.
-  const clawback = await collectVatClawback(supabase, ownerId, kasResolution.scheme, end, korActive)
-    .catch(() => null);
-  if (clawback && clawback.eligible.length > 0 && clawback.totalRepayableBtw >= BAD_DEBT_MIN_EUR) {
+  // never name two different amounts.
+  // [PACKAGE-FAIL-CLOSED] This was "fail-soft: a failed read drops the check, not the ZIP" — and the
+  // collectors report a failed read as `readFailed` rather than throwing, so the `.catch` never even
+  // fired: the check dropped silently and the package said nothing about art. 29. On the clawback
+  // side that is a naheffing nobody is told about. Both reads are required now.
+  const clawback = await required("vat_clawback", () => collectVatClawback(supabase, ownerId, kasResolution.scheme, end, korActive));
+  if (clawback.readFailed) throw new ClosingPackageSourceUnavailableError("vat_clawback");
+  if (clawback.eligible.length > 0 && clawback.totalRepayableBtw >= BAD_DEBT_MIN_EUR) {
     warnings.push({
       code: "vat_clawback_art29_7",
       message:
@@ -2871,9 +3027,9 @@ export async function buildClosingPackageZip(args: {
         `(art. 29 lid 7 Wet OB) en is hier NIET verrekend. Zijn ze wél betaald, dan vervalt dit.`,
     });
   }
-  const badDebt = await collectBadDebt(supabase, ownerId, kasResolution.scheme, end)
-    .catch(() => null);
-  if (badDebt && badDebt.eligible.length > 0 && badDebt.totalReclaimableBtw >= BAD_DEBT_MIN_EUR) {
+  const badDebt = await required("bad_debt", () => collectBadDebt(supabase, ownerId, kasResolution.scheme, end));
+  if (badDebt.readFailed) throw new ClosingPackageSourceUnavailableError("bad_debt");
+  if (badDebt.eligible.length > 0 && badDebt.totalReclaimableBtw >= BAD_DEBT_MIN_EUR) {
     warnings.push({
       code: "bad_debt_art29_1",
       message:
@@ -2919,24 +3075,9 @@ export async function buildClosingPackageZip(args: {
     });
   }
 
-  // [NO-EMPTY-LEDGER] Kon een grootboek niet worden gelezen, dan komt er GEEN concept mee. Een
-  // concept-aangifte is een optelsom die pretendeert compleet te zijn; met een ontbrekend been is
-  // dat een onwaarheid met een bedrag eraan. De boekhouder krijgt in plaats daarvan de reden, en
-  // alle échte bewijsstukken — de factuur-PDF's, het bankafschrift, dagomzet.csv — blijven
-  // gewoon in het pakket zitten. Kijken en exporteren blijft altijd werken; alleen de PROJECTIE
-  // die niet klopt, ontbreekt.
-  if (cashReadFailed) {
-    warnings.push({
-      code: "cash_read_failed",
-      message: "De kasboekingen konden niet volledig worden gelezen. Daarom zit er geen concept-BTW-aangifte in dit pakket — die zou het contante deel missen. De facturen en bestanden zijn wel compleet. Genereer het pakket opnieuw.",
-    });
-  }
-  if (bankReadFailed) {
-    warnings.push({
-      code: "bank_read_failed",
-      message: "De bankregels konden niet volledig worden gelezen. Daarom zit er geen concept-BTW-aangifte in dit pakket — die zou bankmutaties missen. De facturen en bestanden zijn wel compleet. Genereer het pakket opnieuw.",
-    });
-  }
+  // [NO-EMPTY-LEDGER] A ledger that could not be read used to leave the concept out of an otherwise
+  // shipped package, with the reason attached. [PACKAGE-FAIL-CLOSED] made those reads required, so
+  // this point is only reached with both ledgers read in full, and the concept is always complete.
   // ── [VERLEGD-NAAR-MIJ] Rubriek 2a, from the same rows and the same rule as /api/aangifte. This
   //    package is the concept the accountant signs off, so it may not lack a rubriek the owner's
   //    screen shows — the two concepts then disagree about 5a and 5b for one quarter, and the
@@ -2958,8 +3099,11 @@ export async function buildClosingPackageZip(args: {
   //    the supplier's recorded country first (its own tolerant read), the btw-nummer's prefix
   //    second, the proposed rate, the owner's deductible share per invoice. ONE DOCUMENT, ONE
   //    RUBRIEK: an invoice placed here is kept out of the 2a set below, whatever it prints.
-  const landen = await readSupplierCountries(supabase, ownerId);
-  if (landen.failed) regimeNotes.push(SUPPLIER_COUNTRY_READ_FAILED_NOTE);
+  // [PACKAGE-FAIL-CLOSED] An unread country used to fall back to the btw-nummer prefix, with a note;
+  // a supplier with only a recorded country then vanished from 4a/4b. The concept is required to be
+  // complete now, so the read is too. (A column that does not exist yet is still "no countries".)
+  const landen = await required("supplier_countries", () => readSupplierCountries(supabase, ownerId));
+  if (landen.failed) throw new ClosingPackageSourceUnavailableError("supplier_countries");
   const buitenland = foreignPurchaseVat(incoming.map((i) => ({
     id: i.id,
     direction: "incoming" as const,
@@ -2990,7 +3134,7 @@ export async function buildClosingPackageZip(args: {
     })
     .filter((v): v is NonNullable<typeof v> => v !== null);
 
-  const conceptAangifte = hasDeclarable && !ledgerReadFailed
+  const conceptAangifte = hasDeclarable
     ? buildAangifte(
         { ...result, intraEuOmzet: icp.totalExBtw, verlegdNaarMij: totaalVerlegd(verlegdeVondsten), korActive, verlegdBuitenEu: buitenland.nonEu, verlegdBinnenEu: buitenland.eu },
         { ...completeness, euPurchaseNote: foreignPurchaseNote(buitenland) },
@@ -3007,7 +3151,10 @@ export async function buildClosingPackageZip(args: {
   //
   // The Beginsaldo must carry from ALL prior periods, so the projection is fed the FULL history
   // up to quarter-end (two small owner-scoped queries), not just this quarter's rows.
-  const kasEntriesRaw = await fetchAllRows<{
+  // [PACKAGE-FAIL-CLOSED] All three Kasboek sources are required. The sheet used to be left out with
+  // a warning when one failed; it is the accountant's running balance, and a package that ships
+  // without it is the same shape as a quarter that had no cash — so there is no package instead.
+  const kasEntriesRaw = await required("kasboek_entries", () => fetchAllRows<{
     entry_date: string | null; direction: string; amount: number | null; category: string | null; description: string | null;
   }>((from, to) =>
     liveCash.only(supabase.from("cash_entries").select("entry_date, direction, amount, category, description")
@@ -3027,17 +3174,17 @@ export async function buildClosingPackageZip(args: {
       // UNIQUE (user_id, turnover_date), so within one owner's query the date already IS a total
       // order and adding one would suggest a hazard that is not there.
       .order("id", { ascending: true }).range(from, to),
-  ).catch((e) => { console.error("[CLOSING-PACKAGE] kasboek entries read failed", { ownerId, error: String(e) }); return null; });
-  const kasEntries: KasEntry[] = (kasEntriesRaw ?? []).map((r) => ({
+  ));
+  const kasEntries: KasEntry[] = kasEntriesRaw.map((r) => ({
     entry_date: r.entry_date, direction: r.direction === "in" ? "in" : "out",
     amount: r.amount, category: r.category, description: r.description,
   }));
-  const kasTurnoverRaw = await fetchAllRows<{ turnover_date: string; cash_amount: number | null }>((from, to) =>
+  const kasTurnoverRaw = await required("kasboek_turnover", () => fetchAllRows<{ turnover_date: string; cash_amount: number | null }>((from, to) =>
     supabase.from("daily_turnover").select("turnover_date, cash_amount")
       .eq("user_id", ownerId).lte("turnover_date", end)
       .order("turnover_date", { ascending: true }).range(from, to),
-  ).catch((e) => { console.error("[CLOSING-PACKAGE] kasboek turnover read failed", { ownerId, error: String(e) }); return null; });
-  const kasTurnover: KasTurnoverDay[] = (kasTurnoverRaw ?? []) as KasTurnoverDay[];
+  ));
+  const kasTurnover: KasTurnoverDay[] = kasTurnoverRaw as KasTurnoverDay[];
   // [NO-EMPTY-LEDGER] Het kasboek is een LOPEND SALDO. Faalt één van de twee bronnen, dan telt
   // het blad de ene kant wel en de andere niet, en komt er een eindsaldo uit dat niemand kan
   // verklaren en dat niet strookt met de Kas-pagina — een blad met ontvangsten en zonder uitgaven
@@ -3047,9 +3194,9 @@ export async function buildClosingPackageZip(args: {
   // [NO-EMPTY-LEDGER] …and its read counts as one of the two sources: a swallowed error becomes a
   // silent €0 float, and the sheet then opens on a balance that is wrong by exactly the money the
   // till started with — the unexplainable eindsaldo this guard exists to keep out of the package.
-  const { data: kasProf, error: kasProfErr } = await supabase.from("profiles").select("kas_opening_balance").eq("id", ownerId).maybeSingle();
-  if (kasProfErr) console.error("[CLOSING-PACKAGE] kas opening balance read failed", { ownerId, error: kasProfErr.message });
-  const kasboekReadFailed = kasEntriesRaw == null || kasTurnoverRaw == null || kasProfErr != null;
+  const kasProf = await requiredResponse("kas_opening_balance", () =>
+    supabase.from("profiles").select("kas_opening_balance").eq("id", ownerId).maybeSingle(),
+  );
   const kasStartingBalance = Number((kasProf as { kas_opening_balance?: number | null } | null)?.kas_opening_balance ?? 0) || 0;
 
   // Only emit the sheet when the drawer has any life this quarter (takings or movements).
@@ -3108,9 +3255,9 @@ export async function buildClosingPackageZip(args: {
   // ── [AFLETTEREN] The reconciliation the accountant would otherwise do by hand ──
   //
   // Built from the SAME bank rows the concept aangifte is built from, so the two can never
-  // disagree about which lines exist. `bankReadFailed` is passed straight through: a package
-  // whose bank read failed gets a file that says so, and never an empty table that reads as
-  // "every line is accounted for".
+  // disagree about which lines exist. [PACKAGE-FAIL-CLOSED] A package whose bank read failed used
+  // to get a file that said so; it now gets no package, so every file here is built from rows
+  // that were read in full and `read` is true by construction.
   // ── [DEKKING] Do the statements actually cover this quarter? ──
   //
   // Asked BEFORE the reconciliation is written, because the reconciliation's whole claim depends
@@ -3119,16 +3266,17 @@ export async function buildClosingPackageZip(args: {
   // and the turnover that came in is tied to nothing. "34 van de 40 gekoppeld" over such a quarter
   // is the most confident wrong sentence this package could print.
   //
-  // Its own failable read: on a database where bank_statement_periods.sql is still open, or on an
-  // administration whose statements were imported before it existed, this yields checked:false —
-  // "we did not look", which is not the same as "covered" and must never render as one.
-  let coverage: ReturnType<typeof coverageOfPeriod> = { accounts: [], complete: false, checked: false };
-  try {
+  // [PACKAGE-FAIL-CLOSED] It was its own failable read, meant to yield checked:false — "we did not
+  // look", which must never render as "covered". It rendered as nothing: coverageSentence says
+  // nothing for an unchecked result, so a failed read and a covered quarter printed the same
+  // afletering. The read is required now (production has the table; verified before this change).
+  let coverage: ReturnType<typeof coverageOfPeriod>;
+  {
     // [GEEN-STILLE-KAP] Every statement period this owner ever had — no date filter, because
     // continuity is a question about the WHOLE run of statements, not about one quarter. Paged for
     // the same reason as the shared documents: a gap that only exists past row 1000 would read as
     // "no gap", which is the answer that closes a quarter it should have stopped.
-    const periodRows = await fetchAllRows<{
+    const periodRows = await required("bank_statement_periods", () => fetchAllRows<{
       document_id: string; iban: string | null; period_start: string | null; period_end: string | null;
       opening_balance: number | null; closing_balance: number | null;
     }>((from, to) =>
@@ -3139,7 +3287,7 @@ export async function buildClosingPackageZip(args: {
         .order("period_start", { ascending: true })
         .order("document_id", { ascending: true })
         .range(from, to),
-    );
+    ));
     const periods: ContinuityStatementPeriod[] = ((periodRows ?? []) as unknown as Array<{
       document_id: string; iban: string | null; period_start: string | null; period_end: string | null;
       opening_balance: number | null; closing_balance: number | null;
@@ -3154,11 +3302,6 @@ export async function buildClosingPackageZip(args: {
         closing: r.closing_balance,
       }));
     coverage = coverageOfPeriod(periods, start, end);
-  } catch (e) {
-    console.error("[DEKKING] could not read the statement periods — coverage stays unchecked", {
-      ownerId,
-      error: e instanceof Error ? e.message : String(e),
-    });
   }
 
   const coverageWarning = coverageSentence(coverage);
@@ -3264,8 +3407,8 @@ export async function buildClosingPackageZip(args: {
   }
 
   const bankHandover: { csv: string; totals: HandoverTotals | null; coverage: string | null } | null = (() => {
-    const rows = (bankAllRows ?? []) as HandoverTx[];
-    if (!bankReadFailed && rows.length === 0) return null; // nothing to reconcile, so no file
+    const rows = bankAllRows as HandoverTx[];
+    if (rows.length === 0) return null; // nothing to reconcile, so no file
     const invoiceById = new Map<string, HandoverInvoice>(
       all.map((inv) => [
         inv.id,
@@ -3282,12 +3425,10 @@ export async function buildClosingPackageZip(args: {
         quarterLabel: `Q${quarter} ${year}`,
         transactions: rows,
         invoiceById,
-        read: !bankReadFailed,
+        read: true,
         coverage: coverageWarning,
       }),
-      // Null on a failed read: the counts would all be zero, and a zero here is indistinguishable
-      // from a quarter in which nothing needed matching.
-      totals: bankReadFailed ? null : bankHandoverTotals(rows, invoiceById),
+      totals: bankHandoverTotals(rows, invoiceById),
       // [DEKKING] Travels with the reconciliation because it qualifies it — the cover page prints
       // it above the same numbers, for the same reason the CSV does.
       coverage: coverageWarning,
@@ -3295,15 +3436,9 @@ export async function buildClosingPackageZip(args: {
   })();
 
   const kasboekXlsx: Uint8Array | null =
-    !kasboekReadFailed && (kb.months.length > 0 || kb.openingBalance !== 0)
+    kb.months.length > 0 || kb.openingBalance !== 0
       ? matrixToXlsxBytes(kasboekToMatrix(kb, kasRemoved), `Kasboek Q${quarter} ${year}`)
       : null;
-  if (kasboekReadFailed) {
-    warnings.push({
-      code: "kasboek_unavailable",
-      message: "Het kasboek kon niet volledig worden gelezen en zit daarom niet in dit pakket — een half kasboek zou een eindsaldo tonen dat nergens op slaat. De facturen en bestanden zijn wel compleet. Genereer het pakket opnieuw.",
-    });
-  }
 
   // [XAF-IN-PAKKET] The auditfile, built here so the accountant's mail stops promising a file the
   // recipient cannot reach. Same reads as /api/xaf ([XAF-BRON]) — one answer to "what books".

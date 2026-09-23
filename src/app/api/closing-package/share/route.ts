@@ -22,7 +22,7 @@ import { appOrigin } from "@/lib/app-origin";
 import { logAuditAction, getClientIP } from "@/lib/audit";
 import { sendQuarterPackageLink } from "@/lib/email";
 import { isBruikbaarEmail, shareExpiry, SHARE_VALIDITY_DAYS } from "@/lib/package-share";
-import { summarizeClosingPackage } from "@/lib/closing-package";
+import { summarizeClosingPackage, ClosingPackageSourceUnavailableError } from "@/lib/closing-package";
 import type { Quarter } from "@/lib/closing-package";
 
 export async function POST(req: NextRequest) {
@@ -83,6 +83,38 @@ export async function POST(req: NextRequest) {
   // Een eigen zin mag, maar begrensd: dit is een mail, geen tekstveld.
   const notitie = typeof body?.note === "string" ? body.note.trim().slice(0, 500) : "";
 
+  // De aantallen voor in de mail — uit dezelfde samenvatting die de kwartaal-cron gebruikt, zodat
+  // de boekhouder hetzelfde getal leest als in het pakket zit.
+  //
+  // [PACKAGE-FAIL-CLOSED] Not best effort any more, and BEFORE the link exists. This used to be
+  // "mislukt de telling, dan gaat de mail zonder aantallen" — but the mail has no version without
+  // counts: it printed "0 verkoopfacturen en 0 inkoopfacturen" as a statement about the quarter.
+  // Nothing is created and nothing is sent while a source cannot be read; the owner tries again.
+  let uit = 0;
+  let inkomend = 0;
+  try {
+    const pipeline = createPipelineClient();
+    const samenvatting = await summarizeClosingPackage({ ownerId: user.id, year: jaar, quarter: kwartaal, supabase: pipeline });
+    if (samenvatting.unreadSources.length > 0) {
+      throw new ClosingPackageSourceUnavailableError(samenvatting.unreadSources.join(","));
+    }
+    uit = samenvatting.outgoingCount;
+    inkomend = samenvatting.incomingCount;
+  } catch (telErr) {
+    if (telErr instanceof ClosingPackageSourceUnavailableError) {
+      console.error("[PACKAGE-FAIL-CLOSED] quarter unreadable — no link made, no mail sent", { source: telErr.source, error: telErr.message });
+      return NextResponse.json(
+        { error: "Een deel van je administratie kon nu niet volledig worden gelezen. Er is niets verstuurd en er is geen link aangemaakt — probeer het over een paar minuten opnieuw." },
+        { status: 503, headers: { "Retry-After": "120" } },
+      );
+    }
+    console.error("[PAKKET-LINK] quarter summary failed — no link made, no mail sent", { telErr });
+    return NextResponse.json(
+      { error: "Het kwartaal kon nu niet worden samengevat. Er is niets verstuurd en er is geen link aangemaakt — probeer het opnieuw." },
+      { status: 500 },
+    );
+  }
+
   const nu = Date.now();
   // [RLS-UIT] Sessie-client: de INSERT stempelt user_id = user.id en de policy eist dat ook.
   // Het TOKEN komt uit de database (gen_random_uuid) — geen client kiest ooit zijn eigen sleutel.
@@ -102,20 +134,6 @@ export async function POST(req: NextRequest) {
   if (insertErr || !share) {
     console.error("[PAKKET-LINK] share insert failed", { error: insertErr?.message });
     return NextResponse.json({ error: "We konden de link niet aanmaken. Probeer het opnieuw." }, { status: 500 });
-  }
-
-  // De aantallen voor in de mail — uit dezelfde samenvatting die de kwartaal-cron gebruikt, zodat
-  // de boekhouder hetzelfde getal leest als in het pakket zit. Best effort: mislukt de telling,
-  // dan gaat de mail zonder aantallen liever dan helemaal niet.
-  let uit = 0;
-  let inkomend = 0;
-  try {
-    const pipeline = createPipelineClient();
-    const samenvatting = await summarizeClosingPackage({ ownerId: user.id, year: jaar, quarter: kwartaal, supabase: pipeline });
-    uit = samenvatting.outgoingCount;
-    inkomend = samenvatting.incomingCount;
-  } catch (telErr) {
-    console.error("[PAKKET-LINK] quarter summary failed — mailing without counts", { telErr });
   }
 
   const origin = appOrigin(process.env, new URL(req.url).origin) ?? new URL(req.url).origin;
