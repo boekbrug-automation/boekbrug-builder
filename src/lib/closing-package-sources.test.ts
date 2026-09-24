@@ -143,6 +143,9 @@ test("[PACKAGE-FAIL-CLOSED] evidence: only an answer that proves the OBJECT is a
     ["a conflict (409)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Conflict", status: 409, statusCode: "409" } }],
     ["an entity too large (413)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Payload too large", status: 413, statusCode: "413" } }],
     ["an unprocessable request (422)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Unprocessable", status: 422, statusCode: "422" } }],
+    // The right words with a status that proves nothing: the message alone is not the proof.
+    ["'Object not found' with a 403", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Object not found", status: 403, statusCode: "403" } }],
+    ["'Object not found' on a 400 without code 404", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Object not found", status: 400 } }],
     ["'Object not found' with a null status", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Object not found", status: null, statusCode: "404" } }],
     ["no status at all", { path: PATHS.purchase1, mode: "error", error: { name: "StorageUnknownError", message: "fetch failed" } }],
     ["neither data nor an error", { path: PATHS.purchase1, mode: "empty" }],
