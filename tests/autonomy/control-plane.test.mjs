@@ -72,6 +72,7 @@ test('claim requires assigned worker, nonconflicting reservation, merged deps an
   assert.throws(() => transition(ready, { kind: 'claim', workerId: ready.worker.id }, context()), /dependency/);
   assert.throws(() => transition(ready, { kind: 'claim', workerId: ready.worker.id }, context({ dependencies: deps, activeTasks: [{ id: 'BB-2', state: 'FIX_REQUIRED', reserved_areas: ['docs/autonomy-pilot/first.md'] }] })), /reserved by BB-2/);
   assert.throws(() => transition(ready, { kind: 'claim', workerId: ready.worker.id }, context({ dependencies: deps, activeTasks: [{ id: 'BB-2', state: 'BUILDING', worker: { id: ready.worker.id }, reserved_areas: ['tests/autonomy-pilot/'] }] })), /worker already assigned/);
+  assert.equal(transition(ready, { kind: 'claim', workerId: ready.worker.id }, context({ dependencies: deps, activeTasks: [{ id: 'BB-2', state: 'VERIFIED', merged: true, worker: { id: ready.worker.id }, reserved_areas: ['docs/autonomy-pilot/'] }] })).state, 'BUILDING');
   assert.equal(transition(ready, { kind: 'claim', workerId: ready.worker.id }, context({ dependencies: deps })).state, 'BUILDING');
   assert.equal(branchFor(ready.id), 'claude/task-bb-1001');
   assert.equal(worktreeFor(ready.id), '../boekbrug-worker-bb-1001');

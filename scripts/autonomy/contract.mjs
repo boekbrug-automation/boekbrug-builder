@@ -111,6 +111,7 @@ export function assertFreeReservation(task, otherTasks) {
   assert(Array.isArray(otherTasks), 'live reservations are required');
   for (const other of otherTasks) {
     if (other.id === task.id || !['BUILDING', 'REVIEW_REQUIRED', 'FIX_REQUIRED', 'VERIFIED'].includes(other.state)) continue;
+    if (other.state === 'VERIFIED' && other.merged === true) continue;
     assert(other.worker?.id !== task.worker.id, `worker already assigned to ${other.id}`);
     assert(!task.reserved_areas.some(a => other.reserved_areas.some(b => overlap(a, b))), `area reserved by ${other.id}`);
   }
