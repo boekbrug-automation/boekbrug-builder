@@ -957,7 +957,173 @@ for (const provider of ["gmail", "outlook"] as const) {
     ] }];
     await sync();
     assert.equal(modelCalls, 2, "both are read");
-    assert.deepEqual(regKeys(), ["d4:invoice (2).pdf", "d4:invoice.pdf"]);
+    // Round 5: a loose pair has keys of its own namespace, so no row written from now on can be
+    // mistaken for the one the old code wrote under the shared name.
+    assert.deepEqual(regKeys(), [tk("d4", "invoice (2).pdf"), tk("d4", "invoice.pdf")].sort());
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+  });
+}
+
+// ── [ARCHIEF-WAAR] review round 5 — the row the OLD code wrote for a loose same-name pair ────────
+//
+// Before round 4, two loose attachments named invoice.pdf in one message shared the key
+// `<id>:invoice.pdf`, and whichever wrote first owned the row. That row still exists. Nothing in it
+// says which of the two it was for, so it may not be handed to the first attachment on trust.
+
+/** The key of a loose attachment that shares its name with another in the same message. */
+const tk = (id: string, name: string) => `twin:${JSON.stringify([id, name])}`;
+
+async function loosePair(id: string, pdfs: Buffer[]): Promise<Mail> {
+  return { id, at: NOW - 3 * DAY, atts: [
+    { name: "invoice.pdf", mime: "application/pdf", bytes: pdfs[0] },
+    { name: "invoice.pdf", mime: "application/pdf", inline: true, bytes: pdfs[1] },
+  ] };
+}
+
+/** What the old code left behind when it IMPORTED one of the two: an invoice under the shared key. */
+function legacyInvoice(id: string, bytes: Buffer) {
+  db.t("documents").push({
+    id: `doc-${id}`, user_id: U, file_name: "invoice.pdf", content_hash: computeContentHash(bytes),
+    trashed: false, invoice_id: `inv-${id}`, source: "email",
+  });
+  db.t("invoices").push({
+    id: `inv-${id}`, receiver_id: U, source: "email", source_message_id: `${id}:invoice.pdf`,
+    document_id: `doc-${id}`, invoice_number: `OUD-${id}`, status: "received",
+  });
+}
+
+/** What the old code left behind when it only REGISTERED one of the two: a row with no bytes behind it. */
+function legacySkipRow(id: string) {
+  db.t("email_skipped_attachments").push({
+    user_id: U, source_message_id: `${id}:invoice.pdf`, filename: "invoice.pdf",
+    reason: "geen factuur", created_at: "2026-08-01T00:00:00Z",
+  });
+}
+
+const AMBIGUOUS = /dezelfde naam/;
+
+for (const provider of ["gmail", "outlook"] as const) {
+  test(`[ARCHIEF-WAAR] ${provider}: the old shared row proven to be the SECOND attachment's — the first is read, not written off`, async () => {
+    seedAccount(provider);
+    const pdfs = [await otherPdf("legacy-first"), await otherPdf("legacy-second")];
+    mailbox = [await loosePair("e1", pdfs)];
+    legacyInvoice("e1", pdfs[1]); // the old code imported the SECOND; the first was never handled
+    const bodies: string[] = [];
+    modelFault = (body) => { bodies.push(body); return null; };
+    const r = await sync();
+    assert.equal(r.errors, 0);
+    assert.equal(modelCalls, 1, "exactly one read");
+    assert.ok(bodies[0].includes(needleOf(pdfs[0], pdfs[1])), "and it is the FIRST attachment, the one the old row never covered");
+    assert.deepEqual(regKeys(), [tk("e1", "invoice.pdf")], "the first now has an outcome of its own");
+    assert.equal(registry().filter((x) => AMBIGUOUS.test(x.reason)).length, 0, "nothing is ambiguous: the evidence decided");
+    assert.equal(db.t("invoices").length, 1, "the old invoice is untouched and not doubled");
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+    const before1 = snapshot();
+    await sync();
+    assert.deepEqual(snapshot(), before1, "a second sync spends nothing");
+  });
+
+  test(`[ARCHIEF-WAAR] ${provider}: the old shared row proven to be the FIRST attachment's — the second is read`, async () => {
+    seedAccount(provider);
+    const pdfs = [await otherPdf("legacy-first"), await otherPdf("legacy-second")];
+    mailbox = [await loosePair("e2", pdfs)];
+    legacyInvoice("e2", pdfs[0]);
+    const bodies: string[] = [];
+    modelFault = (body) => { bodies.push(body); return null; };
+    await sync();
+    assert.equal(modelCalls, 1);
+    assert.ok(bodies[0].includes(needleOf(pdfs[1], pdfs[0])), "the second attachment is the one read");
+    assert.deepEqual(regKeys(), [tk("e2", "invoice (2).pdf")]);
+    assert.equal(registry().filter((x) => AMBIGUOUS.test(x.reason)).length, 0);
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+  });
+
+  test(`[ARCHIEF-WAAR] ${provider}: an old shared row with NO evidence is not given to either — the owner is told, per attachment`, async () => {
+    seedAccount(provider);
+    const pdfs = [await otherPdf("legacy-first"), await otherPdf("legacy-second")];
+    mailbox = [await loosePair("e3", pdfs)];
+    legacySkipRow("e3"); // "geen factuur" — for one of the two, and nothing says which
+    const r = await sync();
+    assert.equal(r.errors, 0);
+    assert.equal(modelCalls, 0, "nothing is read on a guess");
+    const rows = registry().filter((x) => x.source_message_id.startsWith("twin:"));
+    assert.deepEqual(rows.map((x) => x.source_message_id).sort(), [tk("e3", "invoice (2).pdf"), tk("e3", "invoice.pdf")].sort(),
+      "each attachment the old row might not cover has its own row");
+    for (const row of rows) {
+      assert.match(row.reason, AMBIGUOUS, "the row says what is uncertain");
+      assert.match(row.reason, /Uploaden/, "and what the owner can do about it");
+    }
+    assert.ok(regKeys().includes("e3:invoice.pdf"), "the old row itself is left as it was");
+    assert.equal(watermark(), iso(NOW - 3 * DAY), "a stated ambiguity is a durable outcome; the mailbox moves on");
+    const before1 = snapshot();
+    await sync();
+    assert.deepEqual(snapshot(), before1, "and it is stated once, not on every sync");
+  });
+
+  test(`[ARCHIEF-WAAR] ${provider}: an old shared row, one attachment's bytes proven stored — only the other is ambiguous`, async () => {
+    seedAccount(provider);
+    const pdfs = [await otherPdf("legacy-first"), await otherPdf("legacy-second")];
+    mailbox = [await loosePair("e4", pdfs)];
+    legacySkipRow("e4");
+    // The first attachment's exact bytes are in the administration (kept by the old code).
+    db.t("documents").push({
+      id: "doc-e4", user_id: U, file_name: "invoice.pdf", content_hash: computeContentHash(pdfs[0]),
+      trashed: false, invoice_id: null, source: "email",
+    });
+    await sync();
+    assert.equal(modelCalls, 0);
+    const rows = registry().filter((x) => x.source_message_id.startsWith("twin:"));
+    assert.deepEqual(rows.map((x) => x.source_message_id), [tk("e4", "invoice (2).pdf")],
+      "the stored one needs nothing; the other is stated as uncertain");
+    assert.match(rows[0].reason, AMBIGUOUS);
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+  });
+
+  test(`[ARCHIEF-WAAR] ${provider}: a NEW loose pair, one failing, is still finished by a retry — no ambiguity`, async () => {
+    // Round 4's behaviour for a pair that arrives after the fix: nothing the fix itself writes can
+    // look like the old shared row, so a half-finished pair is simply finished.
+    seedAccount(provider);
+    const pdfs = [await otherPdf("fresh-first"), await otherPdf("fresh-second")];
+    mailbox = [await loosePair("e5", pdfs)];
+    const needle = needleOf(pdfs[1], pdfs[0]);
+    modelFault = (body) => (body.includes(needle) ? 529 : null);
+    const r1 = await sync();
+    assert.ok(r1.errors > 0);
+    assert.deepEqual(regKeys(), [tk("e5", "invoice.pdf")]);
+    assert.equal(watermark(), WM_START, "the mark holds for the failed one");
+    outlookListReversed = true;
+    const bodies: string[] = [];
+    modelFault = (body) => { bodies.push(body); return null; };
+    const calls = modelCalls;
+    await sync();
+    assert.equal(modelCalls - calls, 1, "only the failed one is read again");
+    assert.ok(bodies[0].includes(needle));
+    assert.deepEqual(regKeys(), [tk("e5", "invoice (2).pdf"), tk("e5", "invoice.pdf")].sort());
+    assert.equal(registry().filter((x) => AMBIGUOUS.test(x.reason)).length, 0, "and nothing is ambiguous");
+    assert.equal(watermark(), iso(NOW - 3 * DAY));
+  });
+}
+
+for (const [label, fault] of [
+  // Nothing reads `documents` before PHASE 0 settles the old row, so this fails that read alone.
+  ["the evidence read fails", (c: { table: string; op: string }) => c.table === "documents" && c.op === "select"],
+  ["the uncertainty cannot be written", (c: { table: string; op: string }) => c.table === "email_skipped_attachments" && c.op === "upsert"],
+] as const) {
+  test(`[ARCHIEF-WAAR] an old shared row where ${label}: UNKNOWN — nothing read, nothing completed, and the retry settles it`, async () => {
+    seedAccount("gmail");
+    const pdfs = [await otherPdf("legacy-first"), await otherPdf("legacy-second")];
+    mailbox = [await loosePair("e6", pdfs)];
+    legacySkipRow("e6");
+    db.fault = fault;
+    const r = await sync();
+    assert.ok(r.errors > 0, "the failure is counted");
+    assert.equal(modelCalls, 0, "nothing is read while the old row is unsettled");
+    assert.deepEqual(regKeys(), ["e6:invoice.pdf"], "and nothing is written in its place");
+    assert.equal(watermark(), WM_START, "the mail stays open");
+    db.fault = () => false;
+    await sync();
+    assert.equal(modelCalls, 0);
+    assert.deepEqual(regKeys(), ["e6:invoice.pdf", tk("e6", "invoice (2).pdf"), tk("e6", "invoice.pdf")].sort());
     assert.equal(watermark(), iso(NOW - 3 * DAY));
   });
 }

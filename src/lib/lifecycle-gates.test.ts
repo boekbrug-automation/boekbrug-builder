@@ -27441,8 +27441,34 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
   assert.equal(hand.length, 3,
     "a key is built by hand again instead of through attachmentKey() — only the helper itself and " +
       "the two statement/oversized refs (which are never members) may spell it out");
-  assert.match(src, /export function attachmentKey\([^)]*\): string \{\s*return a\.memberKey \?\? `\$\{a\.messageId\}:\$\{a\.filename\}`/,
-    "attachmentKey no longer prefers the member's own key");
+  assert.match(src, /export function attachmentKey\([^)]*\): string \{\s*return a\.memberKey \?\? a\.twinKey \?\? `\$\{a\.messageId\}:\$\{a\.filename\}`/,
+    "attachmentKey no longer prefers the member's own key, or a same-name twin's");
+
+  // [ARCHIEF-WAAR] review round 5 — the row the OLD code wrote for a loose same-name pair is given
+  // only to the attachment the evidence names; the rest is stated to the owner, never guessed.
+  assert.match(src, /export function twinAttachmentKey\(messageId: string, filename: string\): string \{\s*return `twin:\$\{JSON\.stringify\(\[messageId, filename\]\)\}`/,
+    "twins left their own key namespace — a row written from now on could be taken for the old shared one");
+  assert.match(src, /if \(\(count\.get\(name\) \?\? 0\) > 1 && !isOpenableArchive\(name\)\) twins\.set\(distinct\[i\], name\)/,
+    "the twin rule changed: loose attachments sharing a sent name, archives excluded");
+  assert.equal((src.match(/markTwins\((messageId|message\.id), twins, (items|out), unread\)/g) ?? []).length, 2,
+    "one of the two provider walkers no longer marks its twins");
+  assert.match(src, /const key = ov\.key \?\? `\$\{ov\.messageId\}:\$\{ov\.filename\}`/,
+    "a twin's skipped-file notice lands on the old shared key again");
+  const settleAt = src.indexOf("const settleLegacyTwins = async ()");
+  const settleEnd = src.indexOf("const allKeys = attachments.map((a) => attachmentKey(a))");
+  assert.ok(settleAt > -1 && settleEnd > settleAt, "[ARCHIEF-WAAR] settleLegacyTwins moved — re-point this gate");
+  const settle = src.slice(settleAt, settleEnd);
+  assert.match(settle, /if \(h === owner \|\| stored\.has\(h\)\) \{ knownKeys\.add\(key\); continue \}/,
+    "an old shared row is given to an attachment the evidence does not name");
+  assert.match(settle, /if \(owner !== undefined\) continue/,
+    "an attachment the old invoice is proven NOT to cover is no longer read");
+  assert.match(settle, /unresolved\.push\(a\)[\s\S]{0,700}?reason: TWIN_UNRESOLVED_REASON[\s\S]{0,200}?if \(regErr\) return false/,
+    "an unproven twin is no longer stated to the owner, or a failed statement counts as done");
+  for (const read of ["if (invErr) return false", "if (docErr) return false", "if (storedErr) return false"]) {
+    assert.ok(settle.includes(read), `a failed evidence read is decided on again: ${read}`);
+  }
+  assert.match(src, /if \(!\(await readKnownKeys\(allKeys, knownKeys\)\) \|\| !\(await settleLegacyTwins\(\)\)\) \{/,
+    "an unsettled old row no longer holds the run");
   const expand = code("src/lib/archive-expand.ts");
   assert.match(expand, /return `zip:\$\{JSON\.stringify\(\[messageId, archiveFilename, normalizeMemberPath\(entryPath\)\]\)\}`/,
     "the member key left its own namespace, or stopped encoding its parts unambiguously");
@@ -27493,14 +27519,16 @@ test("[ARCHIEF-WAAR] both providers admit a zip, members are durable, and the re
   const gmail = src.slice(gmailAt, outlookAt);
   const outlook = src.slice(outlookAt, src.indexOf("export interface AttachmentClassification"));
   assert.ok(outlook.length > 1000, "[ARCHIEF-WAAR] the Outlook walker's end moved — re-point this gate");
-  const namedAt = gmail.indexOf("distinctAttachmentNames(namedParts.map(");
+  const namedAt = gmail.indexOf("const distinctNames = distinctAttachmentNames(sentNames, new Set())");
+  assert.match(gmail, /const sentNames = namedParts\.map\(\(p\) => p\.filename!\)/,
+    "Gmail's distinct names no longer come from every named part");
   assert.ok(namedAt > -1 && namedAt < gmail.indexOf("function walkParts("),
     "Gmail no longer makes part names distinct before walking — two 'bundle.zip' share every key again");
   assert.match(gmail, /const filename = partNames\.get\(p\) \?\? ''/,
     "the Gmail walker reads the name as sent again instead of the distinct one");
   assert.match(outlook, /\.sort\(\(x, y\) => \(\(x\.id \?\? ''\) < \(y\.id \?\? ''\)/,
     "Outlook names are no longer claimed in attachment-id order — which archive is 'bundle.zip' follows the list order");
-  assert.match(outlook, /distinctAttachmentNames\(fileAttachments\.map\(\(a\) => a\.name!\), takenNames\)/,
+  assert.match(outlook, /const sentFileNames = fileAttachments\.map\(\(a\) => a\.name!\)[\s\S]{0,80}?distinctAttachmentNames\(sentFileNames, takenNames\)/,
     "Outlook no longer makes file-attachment names distinct");
   assert.match(outlook, /const filename = fileNames\.get\(att\) \?\? ''/,
     "the Outlook walker reads the name as sent again instead of the distinct one");

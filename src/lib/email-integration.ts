@@ -716,6 +716,54 @@ export interface GmailAttachment {
    * archive in the same message — and the member was then skipped as already handled.
    */
   memberKey?: string
+  /**
+   * [ARCHIEF-WAAR] A loose attachment that shares its sent name with another in the same message
+   * has a key of its own namespace (twinAttachmentKey), and `sentName` is the name both arrived
+   * with. Until round 4 such a pair shared `${messageId}:${sentName}`, and the row the old code
+   * wrote there says nothing about WHICH of the two it was for; a key in its own namespace is what
+   * lets PHASE 0 tell that old row apart from anything written since. Absent on every other attachment.
+   */
+  twinKey?: string
+  sentName?: string
+}
+
+/** [ARCHIEF-WAAR] The key of a loose attachment whose sent name another one in its message shares. */
+export function twinAttachmentKey(messageId: string, filename: string): string {
+  return `twin:${JSON.stringify([messageId, filename])}`
+}
+
+// Dutch: the owner reads this in the skipped panel, beside the attachment's name.
+const TWIN_UNRESOLVED_REASON =
+  'meer bijlagen met dezelfde naam in deze e-mail; een eerdere synchronisatie verwerkte er één, ' +
+  'maar niet vast te stellen welke — staat deze niet in je administratie, voeg hem dan toe bij Uploaden'
+
+/**
+ * [ARCHIEF-WAAR] Which attachments of one message share a sent name with another: distinct name →
+ * sent name. Archives are left out on purpose — the old code never opened them, so no row it
+ * wrote under an archive's name counts as handled (see [OVERSLAG-VERJAART] in readKnownKeys).
+ */
+function looseTwins(sent: readonly string[], distinct: readonly string[]): Map<string, string> {
+  const count = new Map<string, number>()
+  for (const name of sent) count.set(name, (count.get(name) ?? 0) + 1)
+  const twins = new Map<string, string>()
+  sent.forEach((name, i) => {
+    if ((count.get(name) ?? 0) > 1 && !isOpenableArchive(name)) twins.set(distinct[i], name)
+  })
+  return twins
+}
+
+/** [ARCHIEF-WAAR] Put the twin key on every item and every skipped-file notice of a twin. */
+function markTwins(
+  messageId: string, twins: Map<string, string>, items: GmailAttachment[], unread: SkippedAttachmentRef[],
+): void {
+  if (twins.size === 0) return
+  for (const item of items) {
+    const sent = twins.get(item.filename)
+    if (sent === undefined) continue
+    item.sentName = sent
+    item.twinKey = twinAttachmentKey(messageId, item.filename)
+  }
+  for (const ref of unread) if (twins.has(ref.filename)) ref.key = twinAttachmentKey(messageId, ref.filename)
 }
 
 /**
@@ -724,8 +772,8 @@ export interface GmailAttachment {
  * the key it always had, `${messageId}:${filename}`; an archive member uses its own namespace.
  * Every place that asks "is this one handled?" asks through here, so the two can never be mixed.
  */
-export function attachmentKey(a: { messageId: string; filename: string; memberKey?: string }): string {
-  return a.memberKey ?? `${a.messageId}:${a.filename}`
+export function attachmentKey(a: { messageId: string; filename: string; memberKey?: string; twinKey?: string }): string {
+  return a.memberKey ?? a.twinKey ?? `${a.messageId}:${a.filename}`
 }
 
 // [EMAIL→BANK] A machine-readable bank statement (MT940 / CAMT.053 / bank CSV) seen as an
@@ -768,6 +816,8 @@ export interface SkippedAttachmentRef {
   reason: string
   /** Waarom hij afviel — bepaalt of er ook een melding uit gaat. */
   kind: AttachmentSkipKind
+  /** [ARCHIEF-WAAR] The twin key, when another attachment of the message has the same sent name. */
+  key?: string
 }
 
 export interface BankStatementRef {
@@ -1084,8 +1134,10 @@ async function fetchMessageAttachments(
   const payload = msg.payload as { parts?: unknown[] } | undefined
   const topParts = payload?.parts ?? (payload ? [payload] : [])
   collectNamed(topParts)
-  distinctAttachmentNames(namedParts.map((p) => p.filename!), new Set())
-    .forEach((name, i) => partNames.set(namedParts[i], name))
+  const sentNames = namedParts.map((p) => p.filename!)
+  const distinctNames = distinctAttachmentNames(sentNames, new Set())
+  distinctNames.forEach((name, i) => partNames.set(namedParts[i], name))
+  const twins = looseTwins(sentNames, distinctNames)
 
   // Recursively find attachment parts
   function walkParts(parts: unknown[]): void {
@@ -1263,6 +1315,7 @@ async function fetchMessageAttachments(
       reason: UNREACHABLE_ATTACHMENT_REASON,
     })
   }
+  markTwins(messageId, twins, items, unread)
   return { items, ok: allReachable, statements, unread }
 }
 
@@ -1739,8 +1792,10 @@ async function fetchOutlookMessageAttachments(
     .filter((a) => a['@odata.type'] === '#microsoft.graph.fileAttachment' && a.name)
     .sort((x, y) => ((x.id ?? '') < (y.id ?? '') ? -1 : (x.id ?? '') > (y.id ?? '') ? 1 : 0))
   const fileNames = new Map<object, string>()
-  distinctAttachmentNames(fileAttachments.map((a) => a.name!), takenNames)
-    .forEach((name, i) => fileNames.set(fileAttachments[i], name))
+  const sentFileNames = fileAttachments.map((a) => a.name!)
+  const distinctFileNames = distinctAttachmentNames(sentFileNames, takenNames)
+  distinctFileNames.forEach((name, i) => fileNames.set(fileAttachments[i], name))
+  const twins = looseTwins(sentFileNames, distinctFileNames)
   for (const a of attachments) if (a.name) takenNames.add(a.name)
 
   for (const att of attachments) {
@@ -1902,6 +1957,7 @@ async function fetchOutlookMessageAttachments(
     })
   }
 
+  markTwins(message.id, twins, out, unread)
   return { items: out, ok, statements, unread }
 }
 
@@ -2798,7 +2854,7 @@ export async function syncUserEmails(
   if (unread.length > 0) {
     const unreadSeen = new Set<string>()
     for (const ov of unread) {
-      const key = `${ov.messageId}:${ov.filename}`
+      const key = ov.key ?? `${ov.messageId}:${ov.filename}`
       if (unreadSeen.has(key)) continue
       unreadSeen.add(key)
       try {
@@ -3061,12 +3117,107 @@ export async function syncUserEmails(
     }
     return true
   }
+  // [ARCHIEF-WAAR] review round 5 — the row the OLD code wrote for a loose same-name pair.
+  //
+  // Until round 4, two loose attachments that arrived with one name shared `${messageId}:${name}`,
+  // and whichever wrote first owned that row — an invoice, a "geen factuur", a kept file. Round 4
+  // gave the first of the two that key again, so an old row that was really the SECOND one's made
+  // the first count as handled with nothing ever proving its bytes were. Twins now have keys of
+  // their own namespace, so a row under the shared name is the old code's by construction, and it
+  // is only ever given to an attachment the evidence names:
+  //   · the invoice under the shared key, through its document's bytes — that attachment is the
+  //     row's owner, and every other one of the pair is simply new and is read;
+  //   · an attachment whose own bytes are already in the administration needs nothing either way.
+  // Anything left over is stated to the owner as uncertain, per attachment, with what to do — never
+  // read on a guess and never written off. Answers false when a read or that write failed:
+  // UNKNOWN, and the caller holds the run exactly as it does for an unread registry.
+  const settleLegacyTwins = async (): Promise<boolean> => {
+    const groups = new Map<string, GmailAttachment[]>()
+    for (const a of attachments) {
+      if (!a.twinKey || a.sentName === undefined) continue
+      const shared = `${a.messageId}:${a.sentName}`
+      groups.set(shared, [...(groups.get(shared) ?? []), a])
+    }
+    const open = [...groups].filter(([, g]) => g.some((a) => !knownKeys.has(attachmentKey(a))))
+    if (open.length === 0) return true
+    const sharedKnown = new Set<string>()
+    if (!(await readKnownKeys(open.map(([shared]) => shared), sharedKnown))) return false
+    const legacy = open.filter(([shared]) => sharedKnown.has(shared))
+    if (legacy.length === 0) return true
+
+    const hashOf = new Map<GmailAttachment, string>()
+    for (const [, g] of legacy) for (const a of g) hashOf.set(a, computeContentHash(Buffer.from(a.data, 'base64')))
+
+    const invoices: Array<{ source_message_id: string | null; document_id: string | null }> = []
+    for (const sharedChunk of chunkArray(legacy.map(([shared]) => shared), 100)) {
+      const { data: invRows, error: invErr } = await supabase
+        .from('invoices')
+        .select('source_message_id, document_id')
+        .eq('receiver_id', userId)
+        .eq('source', 'email')
+        .in('source_message_id', sharedChunk)
+      if (invErr) return false
+      invoices.push(...((invRows ?? []) as typeof invoices))
+    }
+    const docIds = [...new Set(invoices.map((r) => r.document_id).filter((id): id is string => !!id))]
+    const docHash = new Map<string, string>()
+    for (const idChunk of chunkArray(docIds, 100)) {
+      const { data: docRows, error: docErr } = await supabase
+        .from('documents').select('id, content_hash').eq('user_id', userId).in('id', idChunk)
+      if (docErr) return false
+      for (const d of (docRows ?? []) as Array<{ id: string; content_hash: string | null }>) {
+        if (d.content_hash) docHash.set(d.id, d.content_hash)
+      }
+    }
+    const ownerHash = new Map<string, string>()
+    for (const r of invoices) {
+      const h = r.document_id ? docHash.get(r.document_id) : undefined
+      if (r.source_message_id && h) ownerHash.set(r.source_message_id, h)
+    }
+
+    const stored = new Set<string>()
+    for (const hashChunk of chunkArray([...new Set(hashOf.values())], 100)) {
+      const { data: storedRows, error: storedErr } = await supabase
+        .from('documents').select('content_hash, trashed').eq('user_id', userId).in('content_hash', hashChunk)
+      if (storedErr) return false
+      for (const d of (storedRows ?? []) as Array<{ content_hash: string | null; trashed: boolean | null }>) {
+        if (!d.trashed && d.content_hash) stored.add(d.content_hash)
+      }
+    }
+
+    const unresolved: GmailAttachment[] = []
+    for (const [shared, g] of legacy) {
+      const owner = ownerHash.get(shared)
+      for (const a of g) {
+        const key = attachmentKey(a)
+        if (knownKeys.has(key)) continue
+        const h = hashOf.get(a)!
+        if (h === owner || stored.has(h)) { knownKeys.add(key); continue }
+        if (owner !== undefined) continue // the old row is proven to be another's: this one is new
+        unresolved.push(a)
+      }
+    }
+    if (unresolved.length === 0) return true
+    const { error: regErr } = await supabase
+      .from('email_skipped_attachments')
+      .upsert(
+        unresolved.map((a) => ({
+          user_id: userId, source_message_id: attachmentKey(a), filename: a.filename, reason: TWIN_UNRESOLVED_REASON,
+        })),
+        { onConflict: 'user_id,source_message_id', ignoreDuplicates: true },
+      )
+    if (regErr) return false
+    for (const a of unresolved) knownKeys.add(attachmentKey(a))
+    return true
+  }
+
   const allKeys = attachments.map((a) => attachmentKey(a))
-  if (!(await readKnownKeys(allKeys, knownKeys))) {
-    // [ARCHIEF-WAAR] Nothing is decided on an unread registry: no model call, no reservation, no
-    // key completed, and the watermark untouched. Everything stays in the mailbox for the next run,
-    // which is the one outcome that cannot lose or double anything.
-    console.error('[ARCHIEF-WAAR] the known-attachment registry could not be read — holding the whole run', { userId })
+  if (!(await readKnownKeys(allKeys, knownKeys)) || !(await settleLegacyTwins())) {
+    // [ARCHIEF-WAAR] Nothing is decided on an unread registry — or on an old same-name row whose
+    // evidence could not be read or whose uncertainty could not be written: no model call, no
+    // reservation, no key completed, and the watermark untouched. Everything stays in the mailbox
+    // for the next run, which is the one outcome that cannot lose or double anything.
+    console.error('[ARCHIEF-WAAR] the known-attachment registry could not be read or settled — holding the whole run', { userId })
     return {
       provider: tokens.provider, fetched: attachments.length, verified: 0, saved: 0, autoAdvanced: 0,
       errors: 1, remaining: attachments.length, heldByFairUse: 0, storageHeld: 0, readerOutage: false,
