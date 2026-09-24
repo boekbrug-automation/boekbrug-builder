@@ -265,9 +265,11 @@ export async function GET(req: NextRequest) {
     failed,
     truncated,
   };
+  // The plural is spelled out: [MEERVOUD] refuses a bracketed plural placeholder in any sentence.
+  const owners = (n: number) => (n === 1 ? "1 owner" : `${n} owners`);
   const why = [
-    failed > 0 ? `${failed} owner(s) failed — nothing was sent to them or their accountant (see [CRON-QUARTER-CLOSE] owner failed)` : null,
-    truncated > 0 ? `${truncated} owner(s) not reached before the soft deadline` : null,
+    failed > 0 ? `${owners(failed)} failed — nothing was sent to them or their accountant (see [CRON-QUARTER-CLOSE] owner failed)` : null,
+    truncated > 0 ? `${owners(truncated)} not reached before the soft deadline` : null,
   ].filter((x): x is string => x !== null);
 
   // [CRON-HARTSLAG] De uitkomst vastleggen. Best effort: dit mag de cron nooit laten vallen.

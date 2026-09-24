@@ -12,7 +12,7 @@ The run's heartbeat is the `quarter-close` row in `cron_runs` (see `LIVE_GAAN.md
 | Heartbeat | Meaning |
 |---|---|
 | `ok = true` | Every owner was served. Nothing to do. |
-| `ok = false`, `result.failed > 0` | Some owners failed. `error` starts with `N owner(s) failed`. |
+| `ok = false`, `result.failed > 0` | Some owners failed. `error` starts with `1 owner failed` or `N owners failed`. |
 | `ok = false`, `result.truncated > 0` | The run hit its soft deadline (250 s) and never reached the last `N` owners. `error` says `not reached before the soft deadline`. |
 | `ok = null` | The run died before it finished (time-out, crash): *afgebroken*. |
 
