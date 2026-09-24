@@ -12,6 +12,8 @@ export const OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 export const ACCOUNTANT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 export const STRANGER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 export const SHARE_TOKEN = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+/** A second owner, sorted after OWNER, for a cron run that has more than one owner to serve. */
+export const OWNER2 = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 export const YEAR = 2026;
 export const QUARTER = 1 as const;
 
@@ -185,5 +187,43 @@ export function withManyCardPayouts(t: Record<string, Row[]>, count: number): Re
       reference: null, ignore_reason: null,
     });
   }
+  return t;
+}
+
+/**
+ * [PACKAGE-FAIL-CLOSED] The same quarter for an owner on the KASSTELSEL, with one sale invoiced last
+ * quarter and paid in this one. Under cash basis that sale's BTW belongs to THIS quarter, and the
+ * only read that knows its rate mix is the scheme resolver's own (resolveSchemeSettlements): the
+ * builder's rate-split read covers the invoices dated in the quarter, which "out-prev" is not.
+ */
+export function kasQuarter(): Record<string, Row[]> {
+  const t = quarterTables();
+  Object.assign(t.profiles[0], { vat_scheme: "kas", vat_scheme_since: null });
+  t.invoices.push(invoice({
+    id: "out-prev", invoice_number: "2025-0042", client_name: "Klant D", status: "paid", direction: "outgoing",
+    total_ex_btw: 200, btw_amount: 30, total_inc_btw: 230, invoice_date: "2025-12-10", due_date: "2026-01-09",
+    sender_id: OWNER, receiver_id: null, payment_date: "2026-02-15", amount_paid: 230,
+  }));
+  t.invoice_lines.push(
+    { id: "il-p1", invoice_id: "out-prev", description: "Taart", quantity: 1, unit: "stuks", unit_price: 100, btw_rate: 21, line_total: 100, vat_treatment: null, position: 0 },
+    { id: "il-p2", invoice_id: "out-prev", description: "Brood", quantity: 20, unit: "stuks", unit_price: 5, btw_rate: 9, line_total: 100, vat_treatment: null, position: 1 },
+  );
+  return t;
+}
+
+/**
+ * The cash-basis quarter for an owner under the EXEMPT regime, who also paid, this quarter, a
+ * purchase invoiced last quarter and attributed wholly to exempt work. Its attribution is read by
+ * the resolver for the settled purchases (fetchVatDeductions), again outside the builder's own read.
+ */
+export function kasExemptQuarter(): Record<string, Row[]> {
+  const t = kasQuarter();
+  Object.assign(t.profiles[0], { vat_exempt_activity: true, vat_exempt_since: "2025-01-01" });
+  t.invoices.push(invoice({
+    id: "in-prev", invoice_number: "OUD-9", client_name: "Leverancier Meel", status: "paid", direction: "incoming",
+    total_ex_btw: 200, btw_amount: 42, total_inc_btw: 242, invoice_date: "2025-11-05", due_date: "2025-12-05",
+    sender_id: null, receiver_id: OWNER, supplier_id: "sup-1", payment_date: "2026-02-20", amount_paid: 242,
+    vat_deduction: "direct_exempt",
+  }));
   return t;
 }

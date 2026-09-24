@@ -1436,19 +1436,27 @@ async function requiredResponse<T>(
 }
 
 /**
- * [PACKAGE-FAIL-CLOSED] Did Storage answer about the OBJECT, or fail to answer at all?
+ * [PACKAGE-FAIL-CLOSED] Does this Storage answer PROVE the object is not there?
  *
- * A key with nothing behind it comes back as a 4xx about that key (Supabase says 400 with
- * statusCode "404", newer versions 404), and retrying changes nothing: the evidence is missing and
- * the package says so per file, as it always has. Our own credentials (401/403), a timeout (408), a
- * rate limit (429), a server error (5xx) or no status at all (the network) are the store being
- * unavailable — and reporting those as "origineel PDF niet gevonden" tells the accountant the owner
- * has no bon for a purchase whose bon is sitting in storage.
+ * "Origineel PDF niet gevonden" is a statement about the owner's evidence, so only an answer about
+ * the object itself may produce it: Supabase Storage's "Object not found", carried with a 404 —
+ * as the HTTP status, or, from the older API, as `statusCode: "404"` on a 400. Retrying changes
+ * nothing then; the evidence is missing and the package names the file, as it always has.
+ *
+ * Everything else is Storage NOT answering about the object, and each of those used to pass as
+ * "not found": a 400 about the request ("Invalid key"), a missing bucket (404 "Bucket not found"),
+ * a 409/413/422, our own credentials, a rate limit, a 5xx — and a status of `null`, which
+ * `Number(null)` turned into a finite 0. Built on any of them, the package tells the accountant
+ * the owner has no bon for a purchase whose bon is sitting in storage. So they refuse it instead.
  */
-function storageUnavailable(error: unknown): boolean {
-  const status = Number((error as { status?: unknown } | null)?.status);
-  if (!Number.isFinite(status)) return true;
-  return status >= 500 || status === 401 || status === 403 || status === 408 || status === 429;
+function storageProvesObjectAbsent(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { status, statusCode, message } = error as { status?: unknown; statusCode?: unknown; message?: unknown };
+  // No HTTP status is no answer from Storage at all (the network, an unknown error shape).
+  if (typeof status !== "number" || !Number.isInteger(status)) return false;
+  if (status !== 404 && !(status === 400 && String(statusCode ?? "") === "404")) return false;
+  // A 404 about the BUCKET, or about anything but the object, proves nothing about this file.
+  return typeof message === "string" && /^object not found$/i.test(message.trim());
 }
 
 // [BON-BETAALWIJZE] payment_method + payment_date + source horen hier thuis. Zonder die drie
@@ -2565,18 +2573,20 @@ export async function buildClosingPackageZip(args: {
   // choke point cannot be half-applied: nothing reaches storage from this builder except through
   // this function, and it refuses what it cannot attribute.
   //
-  // [PACKAGE-FAIL-CLOSED] Null still means "this file is not there" — a refused path, or Storage
-  // answering about the key itself — and the assembler warns per file, as before. Storage being
-  // UNAVAILABLE is not that: it used to come back as "origineel PDF niet gevonden" for evidence
-  // that exists, so it now refuses the package (see storageUnavailable).
+  // [PACKAGE-FAIL-CLOSED] Null means exactly two things: a path this owner cannot be proven to own
+  // (refused, as before), or Storage PROVING the object is absent (storageProvesObjectAbsent) — and
+  // the assembler then warns per file, as it always has. Every other answer refuses the package,
+  // including one that carries neither the file nor an error: that says nothing, and "nothing" is
+  // not evidence that the file is missing.
   async function dl(stored: string, name: string): Promise<PackageFile | null> {
     const path = ownedStoragePath(stored, ownerId);
     if (!path) return null;
     const res = await required("evidence_files", () => supabase.storage.from("documents").download(path));
-    if (res.error || !res.data) {
-      if (!res.error || !storageUnavailable(res.error)) return null;
+    if (res.error) {
+      if (storageProvesObjectAbsent(res.error)) return null;
       throw new ClosingPackageSourceUnavailableError("evidence_files", res.error);
     }
+    if (!res.data) throw new ClosingPackageSourceUnavailableError("evidence_files", "Storage returned neither the file nor an error");
     const data = res.data;
     const bytes = await required("evidence_files", async () => new Uint8Array(await data.arrayBuffer()));
     return { path, name, bytes };
@@ -2918,6 +2928,19 @@ export async function buildClosingPackageZip(args: {
   // [PACKAGE-FAIL-CLOSED] Already threw on a failed read ([SCHEME-READ-HONEST]); named now, so the
   // doors can say a source was unreadable rather than that the build broke.
   const kasResolution = await required("vat_scheme", () => resolveSchemeSettlements(supabase, ownerId, start, start, end, exemption.active));
+  // [PACKAGE-FAIL-CLOSED] …and a resolution that RETURNED is not yet a resolution that read
+  // everything. Under the kasstelsel the quarter includes invoices dated earlier and paid now; their
+  // rate mix and (exempt regime) cost attribution are read inside the resolver, whose helpers fall
+  // back instead of throwing. `degraded` names that fallback. A settled mixed-rate sale then sits in
+  // one rubriek (measured: 1a 1300/261 and 1b 300/27 where the truth is 1200/252 and 400/36), so the
+  // package is not built on it.
+  //
+  // The attribution half is refused on principle rather than on a figure: since [KAS-VOORBELASTING]
+  // the engine deducts a purchase on its invoice date, so a settled purchase's attribution feeds no
+  // number in this package today. It stays required because it is a declared input of the settled
+  // figures, and the package should not depend on which declared inputs the engine happens to read.
+  if (kasResolution.degraded.includes("rate_split")) throw new ClosingPackageSourceUnavailableError("settled_rate_split");
+  if (kasResolution.degraded.includes("vat_deduction")) throw new ClosingPackageSourceUnavailableError("settled_vat_deductions");
   // [TRIANGLE-ZERO] The 6th argument is the acquirer commission, and 0 here is deliberate.
   //
   // This call feeds ONLY the BTW side of the package: salesByRate, cashOmzetZonderBtw and

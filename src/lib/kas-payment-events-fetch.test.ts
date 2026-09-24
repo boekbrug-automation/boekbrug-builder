@@ -19,8 +19,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { mergeSchemeOpts } from './kas-payment-events-fetch'
+import { mergeSchemeOpts, resolveSchemeSettlements } from './kas-payment-events-fetch'
 import type { ComputeOpts } from './financial-result'
+import { makeFakeDb, type Failure, type Row } from '../../tests/support/package-fake-db'
+import { failRead } from '../../tests/support/package-sources'
+import { OWNER, quarterTables, kasExemptQuarter } from '../../tests/support/package-quarter'
 
 const opts = (o: Partial<ComputeOpts> = {}): ComputeOpts => o as ComputeOpts
 
@@ -108,4 +111,47 @@ test('[MERGE-SCHEME] every other option travels through unchanged', () => {
   ) as ComputeOpts & { scheme?: string; korActive?: boolean }
   assert.equal(merged.scheme, 'kas')
   assert.equal(merged.korActive, true)
+})
+
+// ── [SCHEME-DEGRADED] What the resolver could not read for the invoices a quarter SETTLES ──────────
+//
+// Under the kasstelsel the quarter's BTW follows the money, so it includes invoices dated in an
+// earlier quarter and paid in this one. Their rate mix (fetchRateShares) and, under the exempt
+// regime, their cost attribution (fetchVatDeductions) are read HERE and nowhere else — and both
+// helpers degrade instead of throwing: a failed read falls back to the header-derived rate and to
+// pro-rata. The resolver used to drop that flag, so every consumer computed the settled figures on a
+// fallback without knowing it. It now says so in `degraded`. It computes nothing differently.
+
+async function resolveQ1(tables: Record<string, Row[]>, failures: Failure[], exemptRegime: boolean) {
+  const db = makeFakeDb(tables, { failures })
+  const e = console.error, w = console.warn
+  console.error = () => {}; console.warn = () => {}
+  try {
+    return await resolveSchemeSettlements(db.client as never, OWNER, '2026-01-01', '2026-01-01', '2026-03-31', exemptRegime)
+  } finally { console.error = e; console.warn = w }
+}
+
+test('[SCHEME-DEGRADED] a settled invoice whose rate mix or attribution was not read is named, not silently priced', async () => {
+  const read = await resolveQ1(kasExemptQuarter(), [], true)
+  assert.equal(read.scheme, 'kas')
+  assert.deepEqual(read.degraded, [], 'everything read: nothing to report')
+
+  const noRateMix = await resolveQ1(kasExemptQuarter(), [failRead('settled_rate_split')], true)
+  assert.deepEqual(noRateMix.degraded, ['rate_split'])
+
+  const noAttribution = await resolveQ1(kasExemptQuarter(), [failRead('settled_vat_deductions')], true)
+  assert.deepEqual(noAttribution.degraded, ['vat_deduction'])
+
+  const thrown = await resolveQ1(kasExemptQuarter(), [failRead('settled_rate_split', 'throw'), failRead('settled_vat_deductions', 'throw')], true)
+  assert.deepEqual(thrown.degraded, ['rate_split', 'vat_deduction'])
+
+  // The flag is a statement about the inputs; the settlements themselves are the same either way.
+  assert.deepEqual(noRateMix.opts.settlements, read.opts.settlements)
+  assert.deepEqual(noAttribution.opts.settlements, read.opts.settlements)
+})
+
+test('[SCHEME-DEGRADED] under factuur there is nothing settled to degrade', async () => {
+  const factuur = await resolveQ1(quarterTables(), [failRead('settled_rate_split')], false)
+  assert.equal(factuur.scheme, 'factuur')
+  assert.deepEqual(factuur.degraded, [])
 })

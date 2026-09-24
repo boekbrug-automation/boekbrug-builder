@@ -51,10 +51,16 @@ export interface Failure {
 export interface StorageFailure {
   /** The storage key, or a pattern over it. */
   path: string | RegExp;
-  /** "error" resolves `{ data: null, error }` with `status`; "throw" rejects the download. */
-  mode: "error" | "throw";
-  status?: number;
+  /**
+   * "error" resolves `{ data: null, error }` — `error` exactly as given, or built from `status` and
+   * `message`; "throw" rejects the download; "empty" resolves `{ data: null, error: null }`, an
+   * answer that says nothing at all.
+   */
+  mode: "error" | "throw" | "empty";
+  status?: number | null;
   message?: string;
+  /** The error object Storage hands back, verbatim — for shapes the two fields above cannot make. */
+  error?: Record<string, unknown>;
 }
 
 export interface FakeDbOptions {
@@ -62,6 +68,8 @@ export interface FakeDbOptions {
   /** Storage objects in the `documents` bucket, by key. */
   storage?: Record<string, Uint8Array>;
   storageFailures?: StorageFailure[];
+  /** Called for every query as it is awaited — lets a test act at an exact point in a run. */
+  onQuery?: (q: Query) => void;
 }
 
 const str = (v: unknown) => (v == null ? null : String(v));
@@ -159,6 +167,7 @@ export function makeFakeDb(tables: Record<string, Row[]>, opts: FakeDbOptions = 
       delete: () => chain(() => { q.write = "delete"; }),
       then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => {
         seen.push(q);
+        opts.onQuery?.(q);
         const failure = failures.find((f) => f.table === table && (!f.when || f.when(q)));
         if (failure) {
           const message = failure.message ?? "connection reset by peer";
@@ -211,10 +220,15 @@ export function makeFakeDb(tables: Record<string, Row[]>, opts: FakeDbOptions = 
           typeof f.path === "string" ? f.path === path : f.path.test(path),
         );
         if (failure?.mode === "throw") throw new Error(failure.message ?? "socket hang up");
+        if (failure?.mode === "empty") return { data: null, error: null };
         if (failure) {
           return {
             data: null,
-            error: { name: "StorageApiError", message: failure.message ?? "upstream unavailable", status: failure.status ?? 503 },
+            error: failure.error ?? {
+              name: "StorageApiError",
+              message: failure.message ?? "upstream unavailable",
+              status: failure.status === undefined ? 503 : failure.status,
+            },
           };
         }
         const bytes = opts.storage?.[path];

@@ -11,6 +11,10 @@ import type { Failure, Query } from "./package-fake-db";
 const has = (q: Query, op: string, col: string, val?: unknown) =>
   q.filters.some((f) => f.op === op && f.col === col && (val === undefined || f.val === val));
 
+/** The ids an `.in(...)` filter asks for, as strings. */
+const inIds = (q: Query): string[] =>
+  q.filters.filter((f) => f.op === "in").flatMap((f) => (f.val as unknown[]).map(String));
+
 interface SourceRead {
   table: string;
   when: (q: Query) => boolean;
@@ -44,6 +48,10 @@ export const SOURCE_READS = {
   bad_debt: { table: "invoices", when: (q) => has(q, "eq", "sender_id") && has(q, "in", "status") },
   supplier_countries: { table: "suppliers", when: () => true },
   bank_statement_periods: { table: "bank_statement_periods", when: () => true },
+  // The scheme resolver's own reads for the invoices a cash-basis quarter SETTLES (kasQuarter):
+  // "out-prev" and "in-prev" are dated last quarter, so no other read asks for them.
+  settled_rate_split: { table: "invoice_lines", when: (q) => q.select.startsWith("invoice_id, btw_rate, line_total") && inIds(q).includes("out-prev") },
+  settled_vat_deductions: { table: "invoices", when: (q) => q.select === "id, vat_deduction" && inIds(q).includes("in-prev") },
 } satisfies Record<string, SourceRead>;
 
 export type SourceName = keyof typeof SOURCE_READS;

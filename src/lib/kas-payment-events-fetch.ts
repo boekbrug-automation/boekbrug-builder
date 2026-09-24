@@ -370,12 +370,32 @@ export function mergeSchemeOpts(
   }
 }
 
+/**
+ * [SCHEME-DEGRADED] An input of the SETTLED invoices that could not be read, so the figures built
+ * on it stand on a fallback:
+ *   · "rate_split"    — a settled sale's rate mix (fetchRateShares): its omzet stays on the rate
+ *                        derived from the invoice header, so a mixed 21%/9% invoice lands in one
+ *                        rubriek;
+ *   · "vat_deduction" — a settled purchase's cost attribution under the exempt regime
+ *                        (fetchVatDeductions): pro-rata instead of what the owner attributed.
+ */
+export type SchemeDegradation = "rate_split" | "vat_deduction";
+
 /** What a money-read route needs to become scheme-aware in one call. */
 export interface SchemeResolution {
   scheme: VatScheme;
   opts: ComputeOpts;              // {} under factuur (computeResult runs accrual); kas inputs under kas
   undatedPaidCount: number;      // paid money that couldn't be dated → block klaar/aangifte, suppress figures
   estimatedPortionCount: number; // paid-date is an estimate (marked_paid_at) → block klaar
+  /**
+   * [SCHEME-DEGRADED] Which settled-invoice inputs fell back (see SchemeDegradation). Empty when
+   * everything was read, and always under factuur. The two helpers behind it degrade instead of
+   * throwing, and this function used to drop their flag — so every consumer priced the settled
+   * invoices on a fallback without knowing it. Nothing is computed differently because of this
+   * field; it only says what the resolution stands on, and each consumer decides. The closing
+   * package refuses to build (closing-package.ts); /api/aangifte and /api/readiness do not read it.
+   */
+  degraded: SchemeDegradation[];
 }
 
 /**
@@ -403,7 +423,7 @@ export async function resolveSchemeSettlements(
   // BTW-aangifte, of the readiness verdict and of the closing package.
   const { scheme: profileScheme, since } = await readSchemeElection(pipeline, ownerId);
   const scheme = resolveSchemeForQuarter(profileScheme, since, quarterStart);
-  if (scheme !== "kas") return { scheme: "factuur", opts: {}, undatedPaidCount: 0, estimatedPortionCount: 0 };
+  if (scheme !== "kas") return { scheme: "factuur", opts: {}, undatedPaidCount: 0, estimatedPortionCount: 0, degraded: [] };
   const qs = await fetchSettlementEvents(pipeline, ownerId, start, end);
   // [RUBRIEK-SPLIT] The rate mix belongs to the invoices the SETTLEMENTS point at, not to the
   // invoices DATED in this window — and under kas those are different sets on purpose: the
@@ -421,7 +441,7 @@ export async function resolveSchemeSettlements(
         .map((e) => [e.invoiceId, { id: e.invoiceId, total_ex_btw: e.headerEx, btw_amount: e.headerBtw }]),
     ).values(),
   ];
-  const { rateShares: rateSharesByInvoice, exemptExByInvoice } = await fetchRateShares(
+  const { rateShares: rateSharesByInvoice, exemptExByInvoice, degraded: rateSplitDegraded } = await fetchRateShares(
     pipeline, settledSales, { exemptRegime },
   );
 
@@ -439,7 +459,12 @@ export async function resolveSchemeSettlements(
   const settledPurchaseIds = exemptRegime
     ? [...new Set(qs.events.filter((e) => e.direction === "incoming").map((e) => e.invoiceId))]
     : [];
-  const { deductionByInvoice } = await fetchVatDeductions(pipeline, ownerId, settledPurchaseIds);
+  const { deductionByInvoice, degraded: deductionsDegraded } = await fetchVatDeductions(pipeline, ownerId, settledPurchaseIds);
+
+  // [SCHEME-DEGRADED] Carried, not acted on: see SchemeResolution.degraded.
+  const degraded: SchemeDegradation[] = [];
+  if (rateSplitDegraded) degraded.push("rate_split");
+  if (deductionsDegraded) degraded.push("vat_deduction");
 
   return {
     scheme: "kas",
@@ -456,5 +481,6 @@ export async function resolveSchemeSettlements(
     },
     undatedPaidCount: qs.undatedPaidCount,
     estimatedPortionCount: qs.estimatedCount,
+    degraded,
   };
 }

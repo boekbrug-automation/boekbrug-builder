@@ -26,7 +26,7 @@ import { makeFakeDb, type Failure, type Row, type StorageFailure } from "../../t
 import { SOURCE_READS, failRead, failSecondPage, type SourceName } from "../../tests/support/package-sources";
 import {
   OWNER, YEAR, QUARTER, PATHS,
-  quarterTables, quarterStorage, emptyQuarterTables, withManyCardPayouts,
+  quarterTables, quarterStorage, emptyQuarterTables, withManyCardPayouts, kasQuarter, kasExemptQuarter,
 } from "../../tests/support/package-quarter";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────────────────────
@@ -118,10 +118,60 @@ test("[PACKAGE-FAIL-CLOSED] evidence: Storage being unavailable refuses; a file 
   }
   // Storage answering about the key itself: the evidence is missing, and the package says which.
   const { zipBytes, summary } = await build({
-    storageFailures: [{ path: PATHS.purchase1, mode: "error", status: 400, message: "Object not found" }],
+    storageFailures: [{ path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Object not found", status: 400, statusCode: "404" } }],
   });
   assert.ok(summary.warnings.some((w) => w.code === "pdf_missing" && /LEV-1/.test(w.message)));
   assert.ok(!Object.keys(await files(zipBytes)).some((n) => /LEV-1\.pdf$/.test(n)));
+});
+
+test("[PACKAGE-FAIL-CLOSED] evidence: only an answer that proves the OBJECT is absent may say 'niet gevonden'", async () => {
+  // Proven absence, in both shapes Supabase Storage uses for a key with nothing behind it: the
+  // package is built and names the missing file.
+  for (const error of [
+    { name: "StorageApiError", message: "Object not found", status: 400, statusCode: "404" },
+    { name: "StorageApiError", message: "Object not found", status: 404, statusCode: "404" },
+  ]) {
+    const { summary } = await build({ storageFailures: [{ path: PATHS.purchase1, mode: "error", error }] });
+    assert.ok(summary.warnings.some((w) => w.code === "pdf_missing" && /LEV-1/.test(w.message)), JSON.stringify(error));
+  }
+  // Everything else is Storage failing to answer about the object, and a package built on it would
+  // tell the accountant that a bon which exists is missing.
+  const untrustworthy: [string, StorageFailure][] = [
+    ["an unrelated 400", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Invalid key", status: 400, statusCode: "InvalidKey" } }],
+    ["a bare 400 that names no object", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Bad Request", status: 400, statusCode: "400" } }],
+    ["a missing bucket (404)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Bucket not found", status: 404, statusCode: "404" } }],
+    ["a conflict (409)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Conflict", status: 409, statusCode: "409" } }],
+    ["an entity too large (413)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Payload too large", status: 413, statusCode: "413" } }],
+    ["an unprocessable request (422)", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Unprocessable", status: 422, statusCode: "422" } }],
+    ["'Object not found' with a null status", { path: PATHS.purchase1, mode: "error", error: { name: "StorageApiError", message: "Object not found", status: null, statusCode: "404" } }],
+    ["no status at all", { path: PATHS.purchase1, mode: "error", error: { name: "StorageUnknownError", message: "fetch failed" } }],
+    ["neither data nor an error", { path: PATHS.purchase1, mode: "empty" }],
+  ];
+  for (const [label, f] of untrustworthy) {
+    const e = await refusal(build({ storageFailures: [f] }));
+    assert.equal(e.source, "evidence_files", label);
+  }
+});
+
+// ── 1b. Cash basis: the invoices a quarter SETTLES are read by the scheme resolver, not the builder ──
+
+test("[PACKAGE-FAIL-CLOSED] cash basis: a sale from last quarter, paid in this one, needs its rate mix read", async () => {
+  const healthy = await build({ tables: kasQuarter() });
+  assert.deepEqual(healthy.summary.unreadSources, []);
+  assert.ok("concept-btw-aangifte.csv" in (await files(healthy.zipBytes)), "a healthy cash-basis quarter gets its concept");
+  for (const mode of ["error", "throw"] as const) {
+    const e = await refusal(build({ tables: kasQuarter(), failures: [failRead("settled_rate_split", mode)] }));
+    assert.equal(e.source, "settled_rate_split", `settled rate mix (${mode})`);
+  }
+});
+
+test("[PACKAGE-FAIL-CLOSED] cash basis, exempt regime: a purchase from last quarter, paid in this one, needs its attribution read", async () => {
+  const healthy = await build({ tables: kasExemptQuarter() });
+  assert.deepEqual(healthy.summary.unreadSources, []);
+  for (const mode of ["error", "throw"] as const) {
+    const e = await refusal(build({ tables: kasExemptQuarter(), failures: [failRead("settled_vat_deductions", mode)] }));
+    assert.equal(e.source, "settled_vat_deductions", `settled attribution (${mode})`);
+  }
 });
 
 // ── 2. Everything read: the package, with the figures it always had ────────────────────────────
@@ -246,7 +296,7 @@ test("[PACKAGE-FAIL-CLOSED] no read in the builder is swallowed into an empty li
     [...src.matchAll(/(?:required|requiredResponse|attempt)\("([a-z_]+)"|ClosingPackageSourceUnavailableError\("([a-z_]+)"/g)]
       .map((m) => m[1] ?? m[2]),
   );
-  const tested = new Set<string>([...REQUIRED_BY_BUILDER, "unresolved_bank_lines", "evidence_files"]);
+  const tested = new Set<string>([...REQUIRED_BY_BUILDER, "unresolved_bank_lines", "evidence_files", "settled_rate_split", "settled_vat_deductions"]);
   for (const n of named) assert.ok(tested.has(n), `the source "${n}" is required in code but no test fails it`);
   for (const n of REQUIRED_BY_BUILDER) assert.ok(n in SOURCE_READS, n);
 });
