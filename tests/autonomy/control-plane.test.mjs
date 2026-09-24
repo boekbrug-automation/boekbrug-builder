@@ -58,6 +58,7 @@ test('one issue is the task ID; all six states are labels; invalid or ambiguous 
   assert.deepEqual(STATES, ['READY', 'BUILDING', 'REVIEW_REQUIRED', 'FIX_REQUIRED', 'VERIFIED', 'BLOCKED']);
   assert.throws(() => taskFromIssue(issue({}, ['autonomy:READY', 'autonomy:BUILDING'])), /exactly one/);
   assert.throws(() => taskFromIssue(issue({ task_id: 'BB-9' })), /must be BB-1001/);
+  assert.throws(() => taskFromIssue(issue({ task_id: undefined })), /must be BB-1001/);
   assert.throws(() => taskFromIssue(issue({ risk: { ...risk(), vat: undefined } })), /risk.vat/);
   assert.throws(() => taskFromIssue({ ...issue(), number: 1001, pull_request: {} }), /one GitHub Issue/);
 });

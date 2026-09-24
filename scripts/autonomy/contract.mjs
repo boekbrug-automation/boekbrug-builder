@@ -75,7 +75,7 @@ export function taskFromIssue(issue) {
   assert(Number.isSafeInteger(issue?.number) && issue.number > 0 && !issue.pull_request, 'one GitHub Issue is required');
   const id = `BB-${issue.number}`;
   const record = readBlock(issue.body, TASK_MARKER);
-  if (record.task_id !== undefined) assert(record.task_id === id, `task ID must be ${id}`);
+  assert(record.task_id === id, `task ID must be ${id}`);
   text(record.scope, 'scope');
   const allowed = list(record.allowed_areas, 'allowed_areas').map(area);
   const reserved = list(record.reserved_areas, 'reserved_areas').map(area);
