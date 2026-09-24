@@ -8006,8 +8006,15 @@ test("[TAAL] the screen uses logical directions, so Arabic is a layout and not a
         // (a multi-line style object), so it is looked for in a small window around this line
         // rather than only within it. Kept at ±2 lines: wide enough for the pair, too narrow to
         // pardon an unrelated side further down the same object.
+        //
+        // ZERO on both sides, and nothing else. `left: 0` with `right: 0` is one element spanning
+        // the full width, which is the same element in either direction. Any other pair —
+        // `left: 20` beside `right: 5` — is two independent physical offsets, so it is two
+        // defects rather than an exemption; matching a mere digit here pardoned exactly those.
         const near = lines.slice(Math.max(0, i - 2), i + 3).join("\n");
-        if (/\bleft: *[\d'"]/.test(near) && /\bright: *[\d'"]/.test(near)) continue;
+        const fullBleed = (side: string) =>
+          new RegExp(`\\b${side}: *['"]?0['"]?(?![\\d.%a-z])`, "i").test(near);
+        if (fullBleed("left") && fullBleed("right")) continue;
         // Horizontal centring — `left: 50%` pulled back by translateX(-50%) — is symmetric, so
         // it lands in the same place in either direction.
         if (/\b(?:left|right): *50%/.test(line) && /translateX\(-50%\)/.test(near)) continue;
