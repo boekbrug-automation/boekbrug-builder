@@ -21,10 +21,10 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { NextRequest } from "next/server";
-import { makeFakeDb, type Failure, type Row, type StorageFailure } from "../support/package-fake-db";
+import { makeFakeDb, type Failure, type Query, type Row, type StorageFailure } from "../support/package-fake-db";
 import { failRead, failSecondPage } from "../support/package-sources";
 import {
-  OWNER, ACCOUNTANT, STRANGER, SHARE_TOKEN, YEAR, QUARTER,
+  OWNER, OWNER2, ACCOUNTANT, STRANGER, SHARE_TOKEN, YEAR, QUARTER,
   quarterTables, quarterStorage, emptyQuarterTables, withManyCardPayouts,
 } from "../support/package-quarter";
 
@@ -74,9 +74,10 @@ function scenario(opts: {
   tables?: Record<string, Row[]>;
   user?: string | null;
   storageFailures?: StorageFailure[];
+  onQuery?: (q: Query) => void;
 } = {}) {
   db = makeFakeDb(opts.tables ?? quarterTables(), {
-    failures: opts.failures, storage: quarterStorage(), storageFailures: opts.storageFailures,
+    failures: opts.failures, storage: quarterStorage(), storageFailures: opts.storageFailures, onQuery: opts.onQuery,
   });
   sessionUser = opts.user === undefined ? OWNER : opts.user;
   mails.length = 0;
@@ -347,6 +348,60 @@ test("[PACKAGE-FAIL-CLOSED] quarter cron: when a source cannot be read, no one i
     assert.equal(mails.length, 0, `${name}: no "staat klaar" mail over a quarter that was not read`);
     assert.equal(writesTo("notifications").length, 0, `${name}: nor an in-app one, to anybody`);
   }
+});
+
+/** What the run wrote on its heartbeat when it finished — the row /api/health judges it by. */
+function heartbeat(): Row {
+  const finish = writesTo("cron_runs").filter((q) => q.write === "update");
+  assert.equal(finish.length, 1, "the run closed its heartbeat exactly once");
+  return finish[0].payload as Row;
+}
+
+test("[PACKAGE-FAIL-CLOSED] quarter cron: a run with a failed owner says so — in its answer AND in its heartbeat", async () => {
+  scenario({ user: null, tables: tidyQuarter(), failures: [failRead("unresolved_bank_lines", "error")] });
+  const { GET } = await cron();
+  const body = await (await quiet(() => GET(cronRequest()))).json();
+  assert.equal(body.failed, 1, JSON.stringify(body));
+  assert.equal(body.ok, false, "the response may not call a run with a failed owner ok");
+  const beat = heartbeat();
+  assert.equal(beat.ok, false, "nor may the heartbeat");
+  assert.equal((beat.result as Row).ok, false);
+  assert.match(String(beat.error ?? ""), /1 .*owner/i, "the heartbeat says what went wrong");
+  // …and the rule this PR exists for still holds: nothing announced the quarter.
+  assert.equal(mails.length, 0);
+});
+
+test("[PACKAGE-FAIL-CLOSED] quarter cron: a run cut short by its deadline is not ok either", async () => {
+  // Two owners; the clock passes the soft deadline once the first one has been served.
+  const t = tidyQuarter();
+  t.profiles.push({ id: OWNER2, role: "zzper", email: "tweede@example.invalid", company_name: "Tweede Zaak", full_name: "Tom Tweede", kor_active: false, vat_scheme: "factuur" });
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+  try {
+    scenario({
+      user: null, tables: t,
+      onQuery: (q) => { if (q.table === "notifications" && q.write === "insert") skew = 300_000; },
+    });
+    const { GET } = await cron();
+    const body = await (await quiet(() => GET(cronRequest()))).json();
+    assert.equal(body.failed, 0, JSON.stringify(body));
+    assert.equal(body.truncated, 1, "the second owner was never reached");
+    assert.equal(body.ok, false, "a run that did not reach every owner is not ok");
+    const beat = heartbeat();
+    assert.equal(beat.ok, false, "and the heartbeat may not say it was");
+    assert.match(String(beat.error ?? ""), /1 .*not reached|deadline/i, "the heartbeat says why");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("[PACKAGE-FAIL-CLOSED] quarter cron: a complete run is ok in both places", async () => {
+  scenario({ user: null, tables: tidyQuarter() });
+  const { GET } = await cron();
+  const body = await (await quiet(() => GET(cronRequest()))).json();
+  assert.equal(body.ok, true, JSON.stringify(body));
+  assert.equal(heartbeat().ok, true);
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

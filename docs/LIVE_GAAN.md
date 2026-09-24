@@ -201,6 +201,10 @@ quarter-close ontdek je een jaar later, met de vraag *"waarom heeft mijn boekhou
 ontvangen?"* — en dat is precies de belofte van dit product. Draai die query één keer per kwartaal,
 kort na de 5e van januari/april/juli/oktober.
 
+Liep hij onvolledig (`ok = false`, of `afgebroken`), dan staat in
+[QUARTER_CLOSE_RETRY.md](QUARTER_CLOSE_RETRY.md) hoe je hem opnieuw draait — en waarom eigenaren die
+al bericht kregen dat dan een tweede keer krijgen.
+
 ### Waar je in week één naar kijkt
 
 | waar | waarop |

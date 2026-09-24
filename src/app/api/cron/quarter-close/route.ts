@@ -12,6 +12,16 @@
 // the owner to review + file. Never a green light the figures don't support.
 //
 // SECURITY: fail-closed on a missing CRON_SECRET; constant-time bearer compare (mirrors email-sync).
+//
+// OUTCOME: a run is ok only when every owner was served — no owner failed and none was left behind
+// by the soft deadline. The response body and the heartbeat carry that same `ok`; /api/health
+// judges the run by the heartbeat. A partial run is still HTTP 200 (the house style of every cron
+// here); `ok: false`, `failed` and `truncated` say what it could not do.
+//
+// RETRY: a partial run is re-run by hand — see docs/QUARTER_CLOSE_RETRY.md. The same-day guard
+// ([CRON-EENMAAL]) only counts runs that were ok, so it does not block that re-run. The re-run serves
+// EVERY owner again: owners and accountants the first run already notified get the notice and the
+// accountant mail a second time, because nothing here dedups per owner.
 
 import { NextRequest, NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
@@ -239,9 +249,14 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // [CRON-HARTSLAG] De uitkomst vastleggen. Best effort: dit mag de cron nooit laten vallen.
-  await finishCronRun(createPipelineClient(), cronRunId, { ok: failed === 0, result: {
-    ok: failed === 0,
+  // [CRON-HONEST] One outcome, written in both places. The response said `ok: true` whatever
+  // happened, while the heartbeat said `failed === 0` — which still called a run ok when the soft
+  // deadline had left owners unserved. Both now carry the same verdict: every owner was served.
+  // Owners with an unreadable quarter count as failed ([PACKAGE-FAIL-CLOSED]), so a run that could
+  // not read a quarter is never "ok" — and those owners got no mail, which is the point.
+  const ok = failed === 0 && truncated === 0;
+  const outcome = {
+    ok,
     quarter: `Q${period.quarter} ${period.year}`,
     owners: ownerIds.length,
     notifiedOwners,
@@ -249,16 +264,18 @@ export async function GET(req: NextRequest) {
     skippedEmpty,
     failed,
     truncated,
-  } });
+  };
+  const why = [
+    failed > 0 ? `${failed} owner(s) failed — nothing was sent to them or their accountant (see [CRON-QUARTER-CLOSE] owner failed)` : null,
+    truncated > 0 ? `${truncated} owner(s) not reached before the soft deadline` : null,
+  ].filter((x): x is string => x !== null);
 
-  return NextResponse.json({
-    ok: true,
-    quarter: `Q${period.quarter} ${period.year}`,
-    owners: ownerIds.length,
-    notifiedOwners,
-    notifiedAccountants,
-    skippedEmpty,
-    failed,
-    truncated,
+  // [CRON-HARTSLAG] De uitkomst vastleggen. Best effort: dit mag de cron nooit laten vallen.
+  await finishCronRun(createPipelineClient(), cronRunId, {
+    ok,
+    result: outcome,
+    ...(why.length > 0 ? { error: `${why.join("; ")}. Re-run: docs/QUARTER_CLOSE_RETRY.md` } : {}),
   });
+
+  return NextResponse.json(outcome);
 }
