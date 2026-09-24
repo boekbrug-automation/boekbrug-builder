@@ -1,0 +1,52 @@
+name: Autonomy control plane (read only)
+
+on:
+  pull_request:
+    paths:
+      - '.github/ISSUE_TEMPLATE/autonomy-task.md'
+      - '.github/workflows/autonomy-shadow.yml'
+      - 'docs/engineering-control-plane.md'
+      - 'scripts/autonomy/**'
+      - 'tests/autonomy/**'
+  workflow_dispatch:
+    inputs:
+      prs:
+        description: 'Read-only shadow PRs; only 384, 385, 386 are permitted'
+        required: true
+        default: '384 385 386'
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tests/autonomy/*.test.mjs
+
+  shadow:
+    if: github.event_name == 'workflow_dispatch'
+    needs: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Read current PR evidence without posting a verdict
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBERS: ${{ inputs.prs }}
+        run: node scripts/autonomy/shadow.mjs "$PR_NUMBERS" > shadow-packets.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shadow-review-packets
+          path: shadow-packets.jsonl
+          retention-days: 3
