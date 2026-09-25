@@ -492,7 +492,7 @@ export default function KlantenClient({ profile, openByClient = null }: {
         style={{
           position: 'fixed',
           bottom: `calc(24px + var(--bottom-nav-h) + env(safe-area-inset-bottom))`,
-          right: 20,
+          insetInlineEnd: 20,
           background: '#D3E3FD',
           color: '#041E49',
           borderRadius: R.lg,

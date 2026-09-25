@@ -2060,13 +2060,13 @@ export default function FacturenClient({
         </div>
       )}
 
-      {/* ── [BOEK-029] FAB — fixed bottom-right — Material You ── */}
+      {/* ── [BOEK-029] FAB — fixed at the bottom, inline-end — Material You ── */}
       {!selectMode && <button
         onClick={() => router.push('/dashboard/invoice/new')}
         style={{
           position: 'fixed',
           bottom: `calc(24px + var(--bottom-nav-h) + env(safe-area-inset-bottom))`,
-          right: 20,
+          insetInlineEnd: 20,
           background: M3.primaryContainer,
           color: M3.onPrimaryContainer,
           borderRadius: R.lg,

@@ -7998,16 +7998,37 @@ test("[TAAL] the screen uses logical directions, so Arabic is a layout and not a
       // wrong corner. Matched narrowly — `right: <number>` as a style property — because CSS
       // `left`/`right` also appear as string values ('to the right') and in prose.
       // insetInlineStart/End are unaffected. `left: 0, right: 0` full-bleed pairs are fine in
-      // either language and common (overlays), so a line containing BOTH sides is skipped.
-      for (const line of src.split("\n")) {
-        if (/\bleft: *[\d'"]/.test(line) && /\bright: *[\d'"]/.test(line)) continue;
+      // either language and common (overlays), so BOTH sides together are skipped.
+      const lines = src.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // The companion of a full-bleed pair sits on the next line as often as on the same one
+        // (a multi-line style object), so it is looked for in a small window around this line
+        // rather than only within it. Kept at ±2 lines: wide enough for the pair, too narrow to
+        // pardon an unrelated side further down the same object.
+        //
+        // ZERO on both sides, and nothing else. `left: 0` with `right: 0` is one element spanning
+        // the full width, which is the same element in either direction. Any other pair —
+        // `left: 20` beside `right: 5` — is two independent physical offsets, so it is two
+        // defects rather than an exemption; matching a mere digit here pardoned exactly those.
+        const near = lines.slice(Math.max(0, i - 2), i + 3).join("\n");
+        const fullBleed = (side: string) =>
+          new RegExp(`\\b${side}: *['"]?0['"]?(?![\\d.%a-z])`, "i").test(near);
+        if (fullBleed("left") && fullBleed("right")) continue;
+        // Horizontal centring — `left: 50%` pulled back by translateX(-50%) — is symmetric, so
+        // it lands in the same place in either direction.
+        if (/\b(?:left|right): *50%/.test(line) && /translateX\(-50%\)/.test(near)) continue;
         // A position MEASURED with getBoundingClientRect is physical by definition; applying a
         // logical property to a measured number would mirror an already-correct element. Files
         // mark those with the [TAAL] "Bewust FYSIEK" note — which lives in a COMMENT, so it must
         // be read from the raw file: `src` here is comment-stripped, and the first version of
         // this exemption tested the stripped text and could never see its own marker.
         if (readFileSync(p, "utf8").includes("Bewust FYSIEK") && /dropdownPos|getBoundingClientRect|rect\./.test(line)) continue;
-        if (/[{,] *(?:left|right): *\d/.test(line)) { offenders.push(`${p} — positioned on a physical side`); break; }
+        // `(?:^|[{,])`: a style property starts its own line as often as it follows a brace or a
+        // comma, and matching only the latter made every multi-line style object invisible here.
+        // That is how four FABs kept `right: 20` through the sweep this gate was written for —
+        // the one case its own comment above names.
+        if (/(?:^|[{,]) *(?:left|right): *\d/.test(line)) { offenders.push(`${p} — positioned on a physical side`); break; }
       }
       // Tailwind too. The inline-style sweep missed these entirely on the first pass — 33 classes
       // in nine files — because they do not look like styles. Tailwind v4 ships the logical

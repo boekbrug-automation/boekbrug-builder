@@ -88,7 +88,7 @@ export default function WerkplekClient() {
         style={{
           position: 'fixed',
           bottom: 'calc(24px + var(--bottom-nav-h) + env(safe-area-inset-bottom))',
-          right: 20,
+          insetInlineEnd: 20,
           background: '#D3E3FD', color: '#041E49',
           borderRadius: 16, padding: '16px 20px',
           fontSize: 15, fontWeight: 600,
