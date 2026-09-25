@@ -37,6 +37,16 @@ export function BulkBar({ selectedCount, onShare, onMove, onDelete, onStar, onCl
       padding: "10px 16px",
       animation: "m3fadeUp 0.2s cubic-bezier(0.4,0,0.2,1)",
       whiteSpace: "nowrap",
+      // [PILOT-3] The bar is centred and FIXED, so anything wider than the window hangs off both
+      // edges — and a fixed element cannot be scrolled to. Measured on a 320px phone in Dutch, the
+      // bar wants 391px and "Selectie wissen" sat at x=-35: the one control that ends the selection
+      // was unreachable. Containing it to the window keeps every action within reach, and the
+      // overflow that no longer fits becomes a scroll INSIDE the bar rather than off the screen.
+      // Nothing shrinks: the buttons measure the same before and after, so the icons stay tappable.
+      // Above ~360px the bar is narrower than the window and neither rule does anything, which is
+      // why the desktop bar — still centred over the content, not the window — is untouched.
+      maxWidth: "calc(100vw - 16px)",
+      overflowX: "auto",
     }}>
       <style>{`
         @keyframes m3fadeUp {
