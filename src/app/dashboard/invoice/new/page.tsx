@@ -2082,7 +2082,13 @@ function NewInvoicePageContent() {
                 under each (DateField). Vervaldatum gets quick payment-term chips. */}
             <div style={{ backgroundColor: 'white', borderRadius: 16, padding: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', display: 'flex', flexDirection: 'column', gap: 12 }}>
               <p style={{ fontSize: 14, fontWeight: 500, color: '#202124', margin: 0 }}>{t('nieuw.datums')}</p>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {/* [PILOT-2] minmax(0, 1fr), not 1fr. A grid track's automatic minimum is its item's
+                  min-content, and a text input carries an intrinsic width of its `size` (20 by
+                  default): measured at 278px per column here. Two of those plus the gap need 564px
+                  where a 320px phone offers 256, so the card overflowed sideways at every phone
+                  width from 280 to 412. minmax(0, …) drops that floor; the desktop layout is
+                  unchanged, because there the tracks were never at their minimum. */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8 }}>
                 <DateField
                   value={invoiceDate}
                   label={invoiceType === 'offerte' ? t('nieuw.datum.offerte') : t('nieuw.datum.factuur')}
